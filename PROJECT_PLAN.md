@@ -334,7 +334,7 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 ## 11. Open questions (resolve before/during Phase 1)
 
-- Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first. *Observed 2026-09-16: development is on macOS (arm64), so the Darwin backend is the likely first target — confirm before Phase 1.*
+- ~~Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first.~~ **Resolved 2026-09-16:** The maintainer runs both macOS and Linux. Write the Darwin (BPF) ARP backend first, then Linux (`AF_PACKET`); both are first-class targets and must keep building.
 - ~~TideUI license and compatible Bubble Tea/Lipgloss versions.~~ **Resolved 2026-09-16:** MIT; TideUI v0.2.2 requires Bubble Tea v1.3.10 and Lipgloss v1.1.0 (see §4).
 - Final project name.
 - Windows support: out of scope initially (would need Npcap).
