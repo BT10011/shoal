@@ -197,6 +197,7 @@ func (e *Engine) Start(ctx context.Context) error {
 		}
 	}
 	for _, d := range e.discoverers {
+		d.setState(StateRunning, nil)
 		e.wg.Add(1)
 		go e.runDiscoverer(ctx, d)
 	}
@@ -316,7 +317,6 @@ func (d *discoverer) setState(s ProbeState, err error) {
 func (e *Engine) runDiscoverer(ctx context.Context, d *discoverer) {
 	defer e.wg.Done()
 	name := d.Name()
-	d.setState(StateRunning, nil)
 	report := func(ev ProbeEvent) {
 		if ev.Probe == "" {
 			ev.Probe = name
