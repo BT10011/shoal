@@ -12,6 +12,7 @@ const usage = `shoal — LAN discovery that shows its work
 
 Usage:
   shoal iface [name]     Show the interface, subnet and gateway shoal would scan
+  shoal probe <name>     Run one probe standalone and print what it sends, receives and learns
 
 Only scan networks you own or are authorised to test.
 `
@@ -31,6 +32,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "iface":
 		return runIface(args[1:])
+	case "probe":
+		return runProbe(args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
