@@ -22,8 +22,9 @@ UI is honest about being invented.
 
 - **Source priority**: the NAS has both a PTR name (`nas.lan`) and an mDNS name
   (`synology.local`); mDNS wins because it is more confident.
-- **Conflict**: the printer's resolver says `printer.lan` while mDNS says
-  `HP-LaserJet-M404.local`. The store raises a conflict and the UI shows both.
+- **Conflict**: wherever the resolver and mDNS disagree (the printer says
+  `printer.lan` vs `HP-LaserJet-M404.local`, the NAS `nas.lan` vs
+  `synology.local`) the store raises a conflict and the UI shows both.
 - **Duplicate IP**: two smart plugs both answer for `192.168.1.230`. The store
   flags both with `duplicate-ip`.
 - **Randomised MAC**: the phone at `.101` has a locally-administered address, so

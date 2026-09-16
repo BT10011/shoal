@@ -71,7 +71,7 @@ The value is **transparency and learning**: seeing how ARP, DNS, mDNS/Bonjour, N
 |---|---|---|
 | Language | Go (latest stable) | goroutines map naturally to probes; single static binary |
 | TUI loop | `github.com/charmbracelet/bubbletea` **v1.3.10** | Pinned to the version TideUI v0.2.2 requires. Do not jump to v2 until TideUI does. |
-| Widgets | `github.com/charmbracelet/bubbles` v0.21.x | table, textinput, viewport, progress, spinner (last line compatible with Bubble Tea v1) |
+| Widgets | `github.com/charmbracelet/bubbles` v0.21.x | textinput for the Phase 3 filter (last line compatible with Bubble Tea v1). *Not yet a dependency:* Phase 0 renders the table, progress bars and log as plain strings through TideUI rows/styles, which keeps one theme and one line-width rule. |
 | Styling | `github.com/charmbracelet/lipgloss` **v1.1.0** | Pinned to the version TideUI v0.2.2 requires. |
 | Themed chrome | `github.com/allisonhere/tideui` **v0.2.2** | Panes, status bar, modals, theme picker. Licence verified 2026-09-16: **MIT**. Credit in README. Do not "Tide"-brand this project. |
 | Routing table | `golang.org/x/net/route` | pure Go; reads the BSD/macOS routing socket to find the default gateway. Linux reads `/proc/net/route`. |
