@@ -23,13 +23,15 @@ const (
 )
 
 // Event describes a change to the store. Device is a snapshot taken at the
-// moment of the change, so consumers never need to lock.
+// moment of the change, so consumers never need to lock. Changed is false
+// when an observation merely refreshed a value that was already known.
 type Event struct {
-	Kind   EventKind
-	Key    string
-	Field  model.Field
-	Device model.DeviceSnapshot
-	At     time.Time
+	Kind    EventKind
+	Key     string
+	Field   model.Field
+	Changed bool
+	Device  model.DeviceSnapshot
+	At      time.Time
 }
 
 // Listener receives events. It is called outside the store's lock and may
@@ -39,11 +41,11 @@ type Listener func(Event)
 // Memory is an in-memory store. It is safe for concurrent use, though the
 // engine is expected to apply observations from a single goroutine.
 type Memory struct {
-	mu       sync.RWMutex
-	devices  map[string]*model.Device
-	ipOwners map[string]map[string]struct{}
-	listener Listener
-	now      func() time.Time
+	mu        sync.RWMutex
+	devices   map[string]*model.Device
+	ipOwners  map[string]map[string]struct{}
+	listeners []Listener
+	now       func() time.Time
 }
 
 // Option configures a Memory store.
@@ -54,9 +56,9 @@ func WithClock(now func() time.Time) Option {
 	return func(m *Memory) { m.now = now }
 }
 
-// WithListener sets the event listener.
+// WithListener subscribes a listener at construction.
 func WithListener(l Listener) Option {
-	return func(m *Memory) { m.listener = l }
+	return func(m *Memory) { m.listeners = append(m.listeners, l) }
 }
 
 // NewMemory creates an empty store.
@@ -64,13 +66,19 @@ func NewMemory(opts ...Option) *Memory {
 	m := &Memory{
 		devices:  make(map[string]*model.Device),
 		ipOwners: make(map[string]map[string]struct{}),
-		listener: func(Event) {},
 		now:      time.Now,
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
 	return m
+}
+
+// Subscribe adds a listener. Every listener receives every event, in order.
+func (m *Memory) Subscribe(l Listener) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listeners = append(m.listeners, l)
 }
 
 func validate(o model.Observation) error {
@@ -103,10 +111,13 @@ func (m *Memory) Apply(o model.Observation) error {
 
 	m.mu.Lock()
 	events := m.apply(o)
+	listeners := append([]Listener(nil), m.listeners...)
 	m.mu.Unlock()
 
 	for _, ev := range events {
-		m.listener(ev)
+		for _, l := range listeners {
+			l(ev)
+		}
 	}
 	return nil
 }
@@ -122,14 +133,13 @@ func (m *Memory) apply(o model.Observation) []Event {
 	}
 	changed := dev.Add(o)
 
-	switch {
-	case !exists:
-		events = append(events, Event{Kind: EventDeviceAdded, Key: dev.Key, Field: o.Field, Device: dev.Snapshot(), At: now})
-	default:
-		events = append(events, Event{Kind: EventDeviceUpdated, Key: dev.Key, Field: o.Field, Device: dev.Snapshot(), At: now})
+	kind := EventDeviceUpdated
+	if !exists {
+		kind = EventDeviceAdded
 	}
+	events = append(events, Event{Kind: kind, Key: dev.Key, Field: o.Field, Changed: changed, Device: dev.Snapshot(), At: now})
 	if changed && dev.Conflicting(o.Field, now) {
-		events = append(events, Event{Kind: EventConflict, Key: dev.Key, Field: o.Field, Device: dev.Snapshot(), At: now})
+		events = append(events, Event{Kind: EventConflict, Key: dev.Key, Field: o.Field, Changed: true, Device: dev.Snapshot(), At: now})
 	}
 
 	if o.Field == model.FieldIP && changed {
@@ -176,7 +186,7 @@ func (m *Memory) indexIP(ip string, dev *model.Device, now time.Time) []Event {
 			At:         now,
 		}
 		if claimant.Add(flag) {
-			events = append(events, Event{Kind: EventDeviceUpdated, Key: key, Field: model.FieldFlag, Device: claimant.Snapshot(), At: now})
+			events = append(events, Event{Kind: EventDeviceUpdated, Key: key, Field: model.FieldFlag, Changed: true, Device: claimant.Snapshot(), At: now})
 		}
 	}
 	return events
