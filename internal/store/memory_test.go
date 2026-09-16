@@ -200,6 +200,32 @@ func TestDevicesSortedAndSnapshotted(t *testing.T) {
 	}
 }
 
+func TestEventChangedFlag(t *testing.T) {
+	m, rec := newTestStore()
+	must(t, m.Apply(obs("k", model.FieldIP, "10.0.0.1", "arp")))
+	must(t, m.Apply(obs("k", model.FieldIP, "10.0.0.1", "arp")))
+	must(t, m.Apply(obs("k", model.FieldIP, "10.0.0.2", "arp")))
+	if len(rec.events) != 3 {
+		t.Fatalf("got %d events", len(rec.events))
+	}
+	if !rec.events[0].Changed || rec.events[1].Changed || !rec.events[2].Changed {
+		t.Fatalf("Changed flags = %v %v %v, want true false true",
+			rec.events[0].Changed, rec.events[1].Changed, rec.events[2].Changed)
+	}
+}
+
+func TestSubscribeFansOutInOrder(t *testing.T) {
+	m, first := newTestStore()
+	second := &recorder{}
+	m.Subscribe(second.listen)
+	must(t, m.Apply(obs("k", model.FieldIP, "10.0.0.1", "arp")))
+	must(t, m.Apply(obs("k", model.FieldHostname, "h", "mdns")))
+	a, b := first.kinds(), second.kinds()
+	if len(a) != 2 || len(b) != 2 || a[0] != b[0] || a[1] != b[1] {
+		t.Fatalf("listeners diverged: %v vs %v", a, b)
+	}
+}
+
 func TestListenerMayCallBackIntoStore(t *testing.T) {
 	var m *Memory
 	var seen int
