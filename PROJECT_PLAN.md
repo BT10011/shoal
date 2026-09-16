@@ -70,10 +70,11 @@ The value is **transparency and learning**: seeing how ARP, DNS, mDNS/Bonjour, N
 | Concern | Choice | Notes |
 |---|---|---|
 | Language | Go (latest stable) | goroutines map naturally to probes; single static binary |
-| TUI loop | `github.com/charmbracelet/bubbletea` | **Pin to the major version TideUI uses** (TideFTP currently uses v1.x). Do not jump to v2 until TideUI does. |
-| Widgets | `github.com/charmbracelet/bubbles` | table, textinput, viewport, progress, spinner |
-| Styling | `github.com/charmbracelet/lipgloss` | |
-| Themed chrome | `github.com/allisonhere/tideui` | Panes, status bar, modals, theme picker. **TODO: verify license before adopting.** Credit in README. Do not "Tide"-brand this project. |
+| TUI loop | `github.com/charmbracelet/bubbletea` **v1.3.10** | Pinned to the version TideUI v0.2.2 requires. Do not jump to v2 until TideUI does. |
+| Widgets | `github.com/charmbracelet/bubbles` v0.21.x | table, textinput, viewport, progress, spinner (last line compatible with Bubble Tea v1) |
+| Styling | `github.com/charmbracelet/lipgloss` **v1.1.0** | Pinned to the version TideUI v0.2.2 requires. |
+| Themed chrome | `github.com/allisonhere/tideui` **v0.2.2** | Panes, status bar, modals, theme picker. Licence verified 2026-09-16: **MIT**. Credit in README. Do not "Tide"-brand this project. |
+| Routing table | `golang.org/x/net/route` | pure Go; reads the BSD/macOS routing socket to find the default gateway. Linux reads `/proc/net/route`. |
 | Raw L2 (Linux) | `github.com/mdlayher/packet`, `github.com/mdlayher/arp` | pure Go, AF_PACKET |
 | Raw L2 (macOS) | BPF via `/dev/bpf` (pure Go if feasible) or `github.com/gopacket/gopacket/pcap` | **TODO: verify** best pure-Go option on macOS; pcap needs cgo |
 | Packet decode | `github.com/gopacket/gopacket` (maintained fork) | also used later for LLDP, 802.1Q, pcapng export |
@@ -333,8 +334,8 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 ## 11. Open questions (resolve before/during Phase 1)
 
-- Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first.
-- TideUI license and compatible Bubble Tea/Lipgloss versions.
+- Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first. *Observed 2026-09-16: development is on macOS (arm64), so the Darwin backend is the likely first target — confirm before Phase 1.*
+- ~~TideUI license and compatible Bubble Tea/Lipgloss versions.~~ **Resolved 2026-09-16:** MIT; TideUI v0.2.2 requires Bubble Tea v1.3.10 and Lipgloss v1.1.0 (see §4).
 - Final project name.
 - Windows support: out of scope initially (would need Npcap).
 
