@@ -30,6 +30,7 @@ Flags:
   --iface NAME            Interface to scan (default: the one carrying the default route)
   --unprivileged          Skip raw ARP; read the kernel neighbour table instead
   --rate N                Probe packets per second (default 100)
+  --max-hosts N           Largest subnet to sweep, in addresses (default 1022, a /22)
   --theme NAME            Colour theme, e.g. nord, dracula, gruvbox-dark, vt100
   --demo                  Scripted fake data
 
@@ -68,6 +69,7 @@ func runTUI(args []string) error {
 	ifaceName := fs.String("iface", "", "interface to scan")
 	unprivileged := fs.Bool("unprivileged", false, "read the kernel neighbour table instead of sending ARP")
 	rate := fs.Int("rate", 0, "probe packets per second")
+	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses")
 	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -82,7 +84,7 @@ func runTUI(args []string) error {
 	}
 	st := store.NewMemory()
 	eng := engine.New(st, iface)
-	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate)
+	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate, *maxHosts)
 	if err := eng.AddDiscoverer(discoverer); err != nil {
 		return err
 	}
@@ -99,16 +101,19 @@ func runTUI(args []string) error {
 // chooseDiscoverer prefers a real ARP sweep and falls back to the kernel
 // neighbour table when raw packet access is refused. The chosen probe
 // explains itself in the event log, so the caller only needs the label.
-func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate int) (engine.Discoverer, string) {
-	if !unprivileged {
-		if err := arp.CheckAccess(iface); err == nil {
-			return arp.New(arp.Options{Rate: rate}), "arp sweep"
-		} else if !errors.Is(err, arp.ErrPermission) {
-			return neigh.New(neigh.Options{Rate: rate}), "neigh · " + err.Error()
-		}
-		return neigh.New(neigh.Options{Rate: rate}), "neigh · no raw packet access"
+func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate, maxHosts int) (engine.Discoverer, string) {
+	fallback := neigh.New(neigh.Options{Rate: rate, MaxHosts: maxHosts})
+	if unprivileged {
+		return fallback, "neigh · unprivileged"
 	}
-	return neigh.New(neigh.Options{Rate: rate}), "neigh · unprivileged"
+	switch err := arp.CheckAccess(iface); {
+	case err == nil:
+		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts}), "arp sweep"
+	case errors.Is(err, arp.ErrPermission):
+		return fallback, "neigh · no raw packet access"
+	default:
+		return fallback, "neigh · " + err.Error()
+	}
 }
 
 func runDemo(theme string) error {

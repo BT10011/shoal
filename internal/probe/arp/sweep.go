@@ -77,7 +77,7 @@ func (s *Sweep) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 		return fmt.Errorf("interface %q has no Ethernet MAC, IPv4 address or subnet", iface.Name)
 	}
 	if n := iface.Hosts(); n > s.opts.MaxHosts {
-		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; narrow the range", iface.Subnet, n, s.opts.MaxHosts)
+		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; raise it with -max-hosts if you are authorised to scan this network", iface.Subnet, n, s.opts.MaxHosts)
 	}
 	targets := hostIPs(iface.Subnet, iface.IP)
 

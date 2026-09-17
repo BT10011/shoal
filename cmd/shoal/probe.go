@@ -68,6 +68,7 @@ func runProbeFake(args []string) error {
 func runProbeARP(args []string) error {
 	fs := flag.NewFlagSet("shoal probe arp", flag.ContinueOnError)
 	rate := fs.Int("rate", 0, "who-has requests per second (default 100)")
+	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses (default 1022)")
 	noRetry := fs.Bool("no-retry", false, "do not re-ask addresses that stayed silent")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -77,13 +78,14 @@ func runProbeARP(args []string) error {
 		return err
 	}
 	fmt.Print(iface.Describe(), "\n")
-	sweep := arp.New(arp.Options{Rate: *rate, NoRetry: *noRetry})
+	sweep := arp.New(arp.Options{Rate: *rate, MaxHosts: *maxHosts, NoRetry: *noRetry})
 	return runStandalone(iface, []engine.Discoverer{sweep}, nil, os.Stdout)
 }
 
 func runProbeNeigh(args []string) error {
 	fs := flag.NewFlagSet("shoal probe neigh", flag.ContinueOnError)
 	rate := fs.Int("rate", 0, "nudge datagrams per second (default 200)")
+	maxHosts := fs.Int("max-hosts", 0, "largest subnet to nudge, in addresses (default 1022)")
 	noNudge := fs.Bool("no-nudge", false, "send nothing; only read what the kernel already knew")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -93,7 +95,7 @@ func runProbeNeigh(args []string) error {
 		return err
 	}
 	fmt.Print(iface.Describe(), "\nneighbour cache source: ", neigh.TableSource, "\n\n")
-	probe := neigh.New(neigh.Options{Rate: *rate, NoNudge: *noNudge})
+	probe := neigh.New(neigh.Options{Rate: *rate, MaxHosts: *maxHosts, NoNudge: *noNudge})
 	return runStandalone(iface, []engine.Discoverer{probe}, nil, os.Stdout)
 }
 
