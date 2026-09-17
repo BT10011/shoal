@@ -256,43 +256,74 @@ func TestProgressBar(t *testing.T) {
 		}
 		return r >= 0x2800 && r <= 0x28ff && !strings.ContainsRune(strings.Join(dotHead, ""), r)
 	}
+	bar := func(done, total, width int, plain bool) string {
+		return ansi.Strip(progressBar(done, total, width, barStyles{plain: plain}))
+	}
 	for _, plain := range []bool{false, true} {
-		if got := progressBar(0, 0, 4, plain); lipgloss.Width(got) != 4 || strings.ContainsAny(got, ":;⣿") {
-			t.Fatalf("plain=%v zero total: %q", plain, got)
+		if got := bar(0, 0, 4, plain); got != "    " {
+			t.Fatalf("plain=%v zero total should be blank: %q", plain, got)
 		}
-		if got := progressBar(20, 10, 4, plain); lipgloss.Width(got) != 4 {
+		if got := bar(20, 10, 4, plain); lipgloss.Width(got) != 4 {
 			t.Fatalf("plain=%v overflow width: %q", plain, got)
 		}
 		prev := -1
 		for done := 0; done <= 254; done++ {
-			bar := progressBar(done, 254, 30, plain)
-			if w := lipgloss.Width(bar); w != 30 {
-				t.Fatalf("plain=%v done=%d: width %d: %q", plain, done, w, bar)
+			b := bar(done, 254, 30, plain)
+			if w := lipgloss.Width(b); w != 30 {
+				t.Fatalf("plain=%v done=%d: width %d: %q", plain, done, w, b)
+			}
+			if strings.ContainsAny(b, "·.") {
+				t.Fatalf("plain=%v done=%d: empty cells must be blank: %q", plain, done, b)
 			}
 			n := 0
-			for _, r := range bar {
+			for _, r := range b {
 				if isFilled(r, plain) {
 					n++
 				}
 			}
 			if n < prev {
-				t.Fatalf("plain=%v done=%d: fill went backwards (%d -> %d): %q", plain, done, prev, n, bar)
+				t.Fatalf("plain=%v done=%d: fill went backwards (%d -> %d): %q", plain, done, prev, n, b)
 			}
 			prev = n
 		}
-		if prev != 30 {
-			t.Fatalf("plain=%v: complete bar has %d filled cells, want 30", plain, prev)
+		full := strings.Repeat("⣿", 30)
+		if plain {
+			full = strings.Repeat(":", 30)
+		}
+		if got := bar(254, 254, 30, plain); got != full {
+			t.Fatalf("plain=%v: complete bar must be solid, got %q", plain, got)
 		}
 	}
-	a, b := progressBar(100, 254, 30, false), progressBar(100, 254, 30, false)
-	if a != b {
-		t.Fatal("texture must be stable between renders")
+	if a, b := bar(100, 254, 30, false), bar(100, 254, 30, false); a != b {
+		t.Fatal("same tick must render identically")
+	}
+	if bar(100, 254, 30, false) == bar(101, 254, 30, false) {
+		t.Fatal("texture should shimmer between ticks")
 	}
 	distinct := map[rune]bool{}
-	for _, r := range progressBar(254, 254, 30, false) {
+	for _, r := range bar(200, 254, 30, false) {
 		distinct[r] = true
 	}
 	if len(distinct) < 3 {
-		t.Fatalf("filled cells should vary in texture, got %d distinct glyphs", len(distinct))
+		t.Fatalf("running bar should vary in texture, got %d distinct glyphs", len(distinct))
+	}
+}
+
+func TestSparkAgeFlaresThenFades(t *testing.T) {
+	flares := 0
+	for cell := 0; cell < 30; cell++ {
+		for window := 0; window < 100; window++ {
+			base := window * sparkWindow
+			if sparkAge(cell, base) != 0 {
+				continue
+			}
+			flares++
+			if sparkAge(cell, base+1) != 0 || sparkAge(cell, base+2) != 1 || sparkAge(cell, base+3) != 1 || sparkAge(cell, base+4) != -1 {
+				t.Fatalf("cell %d window %d: flare does not fade bright→mid→normal", cell, window)
+			}
+		}
+	}
+	if flares < 200 || flares > 800 {
+		t.Fatalf("%d flares over 3000 cell-windows; expected roughly one in six", flares)
 	}
 }
