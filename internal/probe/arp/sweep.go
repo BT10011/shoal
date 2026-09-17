@@ -284,3 +284,13 @@ func sleep(ctx context.Context, d time.Duration) error {
 
 // ErrPermission wraps a raw-socket permission failure with advice.
 var ErrPermission = errors.New("raw packet access denied")
+
+// CheckAccess reports whether raw packet access is available on the
+// interface by opening a connection and closing it again.
+func CheckAccess(iface netif.Interface) error {
+	conn, err := OpenConn(iface)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}

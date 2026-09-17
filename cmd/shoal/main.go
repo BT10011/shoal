@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/store"
 	"github.com/BT10011/shoal/internal/ui"
 )
@@ -18,9 +21,17 @@ import (
 const usage = `shoal — LAN discovery that shows its work
 
 Usage:
-  shoal --demo [--theme name]   TUI on scripted fake data; no root or network needed
-  shoal iface [name]            Show the interface, subnet and gateway shoal would scan
-  shoal probe <name>            Run one probe standalone and print what it sends, receives and learns
+  shoal [flags]           Scan the local subnet and watch it fill in
+  shoal --demo            Scripted fake data; no privileges or network needed
+  shoal iface [name]      Show the interface, subnet and gateway shoal would scan
+  shoal probe <name>      Run one probe standalone and print what it sends, receives and learns
+
+Flags:
+  --iface NAME            Interface to scan (default: the one carrying the default route)
+  --unprivileged          Skip raw ARP; read the kernel neighbour table instead
+  --rate N                Probe packets per second (default 100)
+  --theme NAME            Colour theme, e.g. nord, dracula, gruvbox-dark, vt100
+  --demo                  Scripted fake data
 
 Only scan networks you own or are authorised to test.
 `
@@ -52,19 +63,55 @@ func run(args []string) error {
 
 func runTUI(args []string) error {
 	fs := flag.NewFlagSet("shoal", flag.ContinueOnError)
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, usage, "\nFlags:\n")
-		fs.PrintDefaults()
-	}
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	demo := fs.Bool("demo", false, "use scripted fake probes instead of the network")
+	ifaceName := fs.String("iface", "", "interface to scan")
+	unprivileged := fs.Bool("unprivileged", false, "read the kernel neighbour table instead of sending ARP")
+	rate := fs.Int("rate", 0, "probe packets per second")
 	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if !*demo {
-		return fmt.Errorf("live scanning arrives in Phase 1; run `shoal --demo` for now")
+	if *demo {
+		return runDemo(*theme)
 	}
 
+	iface, err := pickInterface(*ifaceName)
+	if err != nil {
+		return err
+	}
+	st := store.NewMemory()
+	eng := engine.New(st, iface)
+	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate)
+	if err := eng.AddDiscoverer(discoverer); err != nil {
+		return err
+	}
+	ouiEnricher, err := realOUI()
+	if err != nil {
+		return err
+	}
+	if err := eng.AddEnricher(ouiEnricher); err != nil {
+		return err
+	}
+	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: *theme})
+}
+
+// chooseDiscoverer prefers a real ARP sweep and falls back to the kernel
+// neighbour table when raw packet access is refused. The chosen probe
+// explains itself in the event log, so the caller only needs the label.
+func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate int) (engine.Discoverer, string) {
+	if !unprivileged {
+		if err := arp.CheckAccess(iface); err == nil {
+			return arp.New(arp.Options{Rate: rate}), "arp sweep"
+		} else if !errors.Is(err, arp.ErrPermission) {
+			return neigh.New(neigh.Options{Rate: rate}), "neigh · " + err.Error()
+		}
+		return neigh.New(neigh.Options{Rate: rate}), "neigh · no raw packet access"
+	}
+	return neigh.New(neigh.Options{Rate: rate}), "neigh · unprivileged"
+}
+
+func runDemo(theme string) error {
 	st := store.NewMemory()
 	eng := engine.New(st, netif.Interface{})
 	opts := fake.Options{}
@@ -80,19 +127,15 @@ func runTUI(args []string) error {
 			return err
 		}
 	}
-	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Demo: true, Theme: *theme})
+	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Demo: true, Theme: theme})
 }
 
 func runIface(args []string) error {
-	var (
-		i   netif.Interface
-		err error
-	)
+	name := ""
 	if len(args) > 0 {
-		i, err = netif.ByName(args[0])
-	} else {
-		i, err = netif.Default()
+		name = args[0]
 	}
+	i, err := pickInterface(name)
 	if err != nil {
 		return err
 	}

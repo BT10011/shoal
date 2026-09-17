@@ -62,15 +62,19 @@ adds requests, which is honest about the extra work.
 | Platform | Backend | Privilege |
 |---|---|---|
 | macOS / BSD | `/dev/bpf*` (BPF), pure Go via `golang.org/x/sys/unix` | root, or membership of `access_bpf` (Wireshark's ChmodBPF sets this up) |
-| Linux | `AF_PACKET` (coming next) | root or `cap_net_raw` via `make setcap` |
+| Linux | `AF_PACKET` socket bound to the interface | root, or `cap_net_raw` on the binary via `make setcap` |
 
 On BPF the kernel is asked to hand us only ARP frames (`BIOCSETF` with a
 four-instruction filter on the ethertype), to return them immediately
 (`BIOCIMMEDIATE`), to let us write the complete Ethernet header ourselves
 (`BIOCSHDRCMPLT`) and not to echo our own transmissions (`BIOCSSEESENT 0`).
 
-If the device cannot be opened shoal stops with a message saying exactly
-what to do; the unprivileged neighbour-table fallback is a separate probe.
+On Linux the socket's protocol is `ETH_P_ARP`, so the kernel delivers only
+ARP frames and no userspace filter is needed; frames the kernel marks
+`PACKET_OUTGOING` are ours and are ignored.
+
+If raw access is refused, `shoal` says so and falls back to the
+unprivileged [`neigh`](neigh.md) probe instead of failing.
 
 ## Running it
 
