@@ -13,6 +13,7 @@ import (
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/store"
@@ -21,6 +22,7 @@ import (
 const probeUsage = `Usage: shoal probe <name> [flags]
 
 Probes:
+  arp [iface]     Active ARP sweep of the interface's subnet (see docs/protocols/arp.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
 `
@@ -31,6 +33,8 @@ func runProbe(args []string) error {
 		return fmt.Errorf("no probe given")
 	}
 	switch args[0] {
+	case "arp":
+		return runProbeARP(args[1:])
 	case "fake":
 		return runProbeFake(args[1:])
 	case "oui":
@@ -55,6 +59,29 @@ func runProbeFake(args []string) error {
 	}
 	enrichers := append([]engine.Enricher{ouiEnricher}, fake.NewEnrichers(opts)...)
 	return runStandalone(netif.Interface{}, []engine.Discoverer{fake.NewDiscoverer(opts)}, enrichers, os.Stdout)
+}
+
+func runProbeARP(args []string) error {
+	fs := flag.NewFlagSet("shoal probe arp", flag.ContinueOnError)
+	rate := fs.Int("rate", 0, "who-has requests per second (default 100)")
+	noRetry := fs.Bool("no-retry", false, "do not re-ask addresses that stayed silent")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	iface, err := pickInterface(fs.Args())
+	if err != nil {
+		return err
+	}
+	fmt.Print(iface.Describe(), "\n")
+	sweep := arp.New(arp.Options{Rate: *rate, NoRetry: *noRetry})
+	return runStandalone(iface, []engine.Discoverer{sweep}, nil, os.Stdout)
+}
+
+func pickInterface(args []string) (netif.Interface, error) {
+	if len(args) > 0 {
+		return netif.ByName(args[0])
+	}
+	return netif.Default()
 }
 
 func runProbeOUI(args []string) error {
