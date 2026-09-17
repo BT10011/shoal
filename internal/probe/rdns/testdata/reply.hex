@@ -1,0 +1,7 @@
+# NOERROR, 1 answer: 20.1.168.192.in-addr.arpa. PTR synology.lan, TTL 3600
+# the answer's name is the compression pointer c00c, i.e. "the name at offset 12"
+1a2b8180000100010000000002323001
+31033136380331393207696e2d616464
+72046172706100000c0001c00c000c00
+0100000e10000e0873796e6f6c6f6779
+036c616e00
