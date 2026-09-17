@@ -1,0 +1,8 @@
+# An unsolicited announcement: one A record, laptop.local = 192.168.1.42,
+# TTL 10m. This is what a device multicasts when it joins a network or wakes.
+#
+# The class is 0x8001, not 0x0001: in a response the top bit is mDNS's
+# cache-flush flag, meaning "replace whatever you had for this name".
+000084000000000100000000066c6170
+746f70056c6f63616c00000180010000
+02580004c0a8012a

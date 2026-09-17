@@ -19,6 +19,7 @@ type EventKind string
 const (
 	EventDeviceAdded   EventKind = "device_added"
 	EventDeviceUpdated EventKind = "device_updated"
+	EventDeviceMerged  EventKind = "device_merged"
 	EventConflict      EventKind = "conflict"
 )
 
@@ -32,6 +33,10 @@ type Event struct {
 	Changed bool
 	Device  model.DeviceSnapshot
 	At      time.Time
+
+	// MergedFrom is set on EventDeviceMerged: the key that has just stopped
+	// existing, its facts now held by Key.
+	MergedFrom string
 }
 
 // Listener receives events. It is called outside the store's lock and may
@@ -44,6 +49,7 @@ type Memory struct {
 	mu        sync.RWMutex
 	devices   map[string]*model.Device
 	ipOwners  map[string]map[string]struct{}
+	aliases   map[string]string
 	listeners []Listener
 	now       func() time.Time
 }
@@ -66,6 +72,7 @@ func NewMemory(opts ...Option) *Memory {
 	m := &Memory{
 		devices:  make(map[string]*model.Device),
 		ipOwners: make(map[string]map[string]struct{}),
+		aliases:  make(map[string]string),
 		now:      time.Now,
 	}
 	for _, opt := range opts {
@@ -126,6 +133,7 @@ func (m *Memory) apply(o model.Observation) []Event {
 	var events []Event
 	now := m.now()
 
+	o.DeviceKey = m.resolveKey(o.DeviceKey)
 	dev, exists := m.devices[o.DeviceKey]
 	if !exists {
 		dev = model.NewDevice(o.DeviceKey, o.At)
@@ -143,9 +151,79 @@ func (m *Memory) apply(o model.Observation) []Event {
 	}
 
 	if o.Field == model.FieldIP && changed {
+		// Fold in any device that existed only because a probe knew this
+		// address, before indexing, so the two never look like two devices
+		// fighting over one IP.
+		events = append(events, m.absorb(o.Value, dev, now)...)
 		events = append(events, m.indexIP(o.Value, dev, now)...)
 	}
 	return events
+}
+
+// resolveKey maps the key a probe used onto the key the store holds.
+//
+// Probes that listen rather than ask — a passive mDNS listener hears an
+// announcement and knows only the source address — can only key a fact by IP.
+// The device is very likely already known by its MAC, from ARP. Two rules
+// reconcile them: a key that has already been absorbed follows its alias, and
+// a bare IP is handed to whichever device has claimed that address.
+func (m *Memory) resolveKey(key string) string {
+	if target, ok := m.aliases[key]; ok {
+		return target
+	}
+	if _, exists := m.devices[key]; exists {
+		return key
+	}
+	owners := m.ipOwners[key]
+	if len(owners) != 1 {
+		// Nobody owns it, or several do and guessing would hide the
+		// conflict rather than explain it.
+		return key
+	}
+	for owner := range owners {
+		if owner != key {
+			return owner
+		}
+	}
+	return key
+}
+
+// absorb folds a device keyed by ip into dev, which has just claimed that
+// address under a better key. The absorbed device's facts keep their own
+// provenance; only the key they hang from changes.
+func (m *Memory) absorb(ip string, dev *model.Device, now time.Time) []Event {
+	absorbed, ok := m.devices[ip]
+	if !ok || absorbed.Key == dev.Key {
+		return nil
+	}
+
+	for _, field := range absorbed.Fields() {
+		for _, o := range absorbed.Facts[field] {
+			o.DeviceKey = dev.Key
+			dev.Add(o)
+		}
+	}
+	if absorbed.FirstSeen.Before(dev.FirstSeen) {
+		dev.FirstSeen = absorbed.FirstSeen
+	}
+	if absorbed.LastSeen.After(dev.LastSeen) {
+		dev.LastSeen = absorbed.LastSeen
+	}
+
+	delete(m.devices, absorbed.Key)
+	m.aliases[absorbed.Key] = dev.Key
+	// The absorbed device may have been recorded as the claimant of this or
+	// other addresses; those claims now belong to the surviving device.
+	for _, claimants := range m.ipOwners {
+		if _, claimed := claimants[absorbed.Key]; claimed {
+			delete(claimants, absorbed.Key)
+			claimants[dev.Key] = struct{}{}
+		}
+	}
+	return []Event{{
+		Kind: EventDeviceMerged, Key: dev.Key, Changed: true,
+		Device: dev.Snapshot(), At: now, MergedFrom: ip,
+	}}
 }
 
 // indexIP records that dev claims ip and flags every claimant when more than
@@ -175,7 +253,10 @@ func (m *Memory) indexIP(ip string, dev *model.Device, now time.Time) []Event {
 				others = append(others, k)
 			}
 		}
-		claimant := m.devices[key]
+		claimant, ok := m.devices[key]
+		if !ok {
+			continue // absorbed into another device since it laid the claim
+		}
 		flag := model.Observation{
 			DeviceKey:  key,
 			Field:      model.FieldFlag,
