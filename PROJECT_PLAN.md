@@ -195,6 +195,7 @@ type ProbeEvent struct {
 - MAC with locally-administered bit (`first octet & 0x02`) → randomized/private MAC; vendor lookup will not apply.
 - Hostname disagreement between mDNS / PTR / NBNS → shown side by side.
 - IP change for known MAC, device not seen this scan → change events (Phase 4).
+- Address outside the interface's subnet, or a `169.254.x.x` self-assigned one → the device does not belong to this network (optional Phase 3a).
 
 ---
 
@@ -298,6 +299,63 @@ sources that cover different halves of a network, and the RTT column is live.
 - Responsive layout for small terminals (tabbed mode).
 
 **Done when:** a new user can pick any value on screen and discover exactly where it came from within two keypresses.
+
+### Phase 3a — Rogue and off-subnet devices *(optional add-on)*
+
+**Optional.** Phase 3 is complete without it, and it can be skipped or
+deferred. It earns its place under the scope test in §2 because an address
+that does not belong to this network is one of the clearest cases of "help me
+understand what I am looking at": something is on the wire that the subnet
+does not explain, and shoal can say exactly what and how it knows.
+
+#### What counts as not belonging
+
+| Condition | What it usually means |
+|---|---|
+| **IPv4 link-local**, `169.254.0.0/16` (RFC 3927) | The device asked for DHCP, got no answer, and configured itself. A dead DHCP server, a wrong VLAN, a cable in the wrong socket, or a device that was never configured. |
+| **Off-subnet IPv4** — an address outside the scanning interface's subnet | A static address left over from another network, a device moved between sites, a second uplink, a misconfigured VLAN — or something that does not want to be handed an address it can be traced by. |
+| **IPv6 link-local only**, `fe80::/10`, no IPv4 at all | Heard over mDNS but never answered ARP. Common for IoT devices; also what a host looks like when it has no v4 configuration. |
+| **On-link but silent** — a MAC seen in frames that claims no IP | Present at layer 2 only. Passive taps, bridges, and devices mid-boot look like this. |
+
+#### How it is found
+
+No new packets are needed: every source already exists by the end of Phase 2.
+
+- The ARP sweep reads **every** frame on the interface, not only replies to
+  its own requests, so it overhears addresses it never asked about.
+- The kernel neighbour table holds entries for addresses shoal never probed.
+- The mDNS listener records the **source address** of everything it hears, and
+  the A/AAAA records inside those announcements.
+- An ICMP reply arriving from an unexpected source is itself evidence.
+
+#### Shape
+
+- A `rogue` **enricher** in its own package, triggered on `ip`, holding the
+  interface's subnet. It performs no I/O: it compares what is known against
+  what the subnet allows and emits `flag` observations —
+  `link-local-ip`, `off-subnet-ip`, `ipv6-link-local-only`, `no-ip` — each with
+  a `Method` that states the reasoning in full, e.g. *"169.254.11.8 is inside
+  169.254.0.0/16, which a host assigns itself when no DHCP server answers;
+  this interface's subnet is 192.168.1.0/24"*.
+- UI: a badge in the table, `/` filtering by flag, and the detail pane
+  explaining what the flag means and which probe saw the address. Nothing
+  blinks red; the tone stays diagnostic.
+- **Active follow-up is opt-in and off by default.** Confirming an off-subnet
+  address means sending to an address outside the local subnet, which §9
+  forbids by default, so a single unicast ARP probe sits behind an explicit
+  flag (`--check-off-subnet`) and is rate-limited like everything else.
+
+#### Still not a security tool (§2)
+
+Shoal reports what it saw and why the subnet does not explain it. It does not
+alert, block, score, accuse, or guess at intent — an unexpected address is far
+more often a misconfiguration than an intruder, and saying so plainly is more
+useful than a warning icon. Anyone who needs to go further should be pointed
+at Nmap and Wireshark.
+
+**Done when:** a device with a `169.254.x.x` address, or one outside the
+scanning subnet, is flagged in the table, and the detail view explains in
+plain words what that means and which probe saw it.
 
 ### Phase 4 — History
 - SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.
