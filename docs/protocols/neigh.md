@@ -67,3 +67,5 @@ shoal --unprivileged           # the TUI, using this probe instead of arp
 
 `-no-nudge` sends nothing at all: it is the quietest thing shoal can do,
 and useful for seeing what the machine already knew before you scanned.
+Because it generates no traffic it also ignores the `-max-hosts` limit,
+so it works on a large subnet where an active sweep would be refused.

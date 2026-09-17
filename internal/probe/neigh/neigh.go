@@ -81,8 +81,10 @@ func (d *Discoverer) Run(ctx context.Context, iface netif.Interface, emit engine
 	if iface.Subnet == nil || iface.IP.To4() == nil {
 		return fmt.Errorf("interface %q has no IPv4 address or subnet", iface.Name)
 	}
-	if n := iface.Hosts(); n > d.opts.MaxHosts {
-		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; narrow the range", iface.Subnet, n, d.opts.MaxHosts)
+	// The limit bounds how much traffic we generate, so it only applies
+	// when we are actually nudging; reading the cache sends nothing.
+	if n := iface.Hosts(); !d.opts.NoNudge && n > d.opts.MaxHosts {
+		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; raise it with -max-hosts, or use -no-nudge to read the cache without sending anything", iface.Subnet, n, d.opts.MaxHosts)
 	}
 
 	if len(iface.MAC) > 0 {

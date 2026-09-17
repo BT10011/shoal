@@ -235,6 +235,24 @@ func TestRunRefusesBadInterfaceAndHugeSubnet(t *testing.T) {
 	}
 }
 
+func TestNoNudgeIgnoresTheHostLimit(t *testing.T) {
+	c := &capture{}
+	d := New(Options{
+		Table: func() ([]Entry, error) {
+			return []Entry{{IP: net.IPv4(10, 0, 0, 1).To4(), MAC: mac(t, "00:00:5e:00:53:02"), Interface: "en0"}}, nil
+		},
+		Nudge:   func(net.IP) error { t.Fatal("must not nudge"); return nil },
+		NoNudge: true,
+	})
+	// A /18 is far over the limit, but reading the cache sends nothing.
+	if err := d.Run(context.Background(), testIface(t, "10.0.0.0/18"), c.emit, c.report); err != nil {
+		t.Fatalf("passive read should not be limited: %v", err)
+	}
+	if _, ok := c.observation("00:00:5e:00:53:02", model.FieldIP); !ok {
+		t.Fatal("entry was not reported")
+	}
+}
+
 func TestRunSurfacesTableErrors(t *testing.T) {
 	c := &capture{}
 	d := New(Options{
