@@ -15,6 +15,7 @@ import (
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
+	"github.com/BT10011/shoal/internal/probe/nbns"
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/rdns"
 	"github.com/BT10011/shoal/internal/store"
@@ -106,6 +107,10 @@ func runTUI(args []string) error {
 		return err
 	}
 	if err := eng.AddEnricher(mdns.New(mdns.Options{})); err != nil {
+		return err
+	}
+	// NetBIOS names the Windows and Samba hosts the other two miss.
+	if err := eng.AddEnricher(nbns.New(nbns.Options{})); err != nil {
 		return err
 	}
 	// The listener sends nothing; it writes down the announcements already

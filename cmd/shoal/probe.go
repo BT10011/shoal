@@ -18,6 +18,7 @@ import (
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
+	"github.com/BT10011/shoal/internal/probe/nbns"
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/probe/rdns"
@@ -33,6 +34,8 @@ Probes:
   mdns [ip]       Ask a device its name over multicast, or with no ip, listen to the
                   Bonjour conversation and write down what passes (see docs/protocols/mdns.md)
   icmp <ip>       Echo requests, to measure the round trip (see docs/protocols/icmp.md)
+  nbns <ip>       NetBIOS node status: the name table Windows and Samba hosts keep
+                  (see docs/protocols/nbns.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
 `
@@ -55,6 +58,8 @@ func runProbe(args []string) error {
 		return runProbeMDNS(args[1:])
 	case "icmp":
 		return runProbeICMP(args[1:])
+	case "nbns":
+		return runProbeNBNS(args[1:])
 	case "oui":
 		return runProbeOUI(args[1:])
 	default:
@@ -245,6 +250,31 @@ func runProbeICMP(args []string) error {
 	fmt.Printf("target     %s\nsocket     %s\n\n", ip, mode)
 
 	probe := icmp.New(icmp.Options{Count: *count, Interval: *interval, Timeout: *timeout})
+	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
+}
+
+func runProbeNBNS(args []string) error {
+	fs := flag.NewFlagSet("shoal probe nbns", flag.ContinueOnError)
+	timeout := fs.Duration("timeout", 0, "how long to wait for the name table (default 1s)")
+	port := fs.Int("port", 0, "ask this port instead of 137, for testing against a responder you control")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: shoal probe nbns <ip> [-timeout 1s] [-port 137]")
+	}
+	ip := net.ParseIP(fs.Arg(0))
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address", fs.Arg(0))
+	}
+	asked := nbns.Port
+	if *port != 0 {
+		asked = *port
+	}
+	fmt.Printf("target     %s:%d\nquestion   \"*\" (the wildcard name: whatever you are)\n\n", ip, asked)
+
+	probe := nbns.New(nbns.Options{Timeout: *timeout, Port: *port})
 	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
 	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
 }

@@ -1,0 +1,10 @@
+# A node status request, id 0x1a2b, 50 bytes.
+#
+# The question name is "*" padded with nulls, then NetBIOS-encoded: every byte
+# becomes two letters, its high and low nibble each added to 'A'. So 0x2a
+# ('*') becomes "CK" and each 0x00 becomes "AA", which is why these packets
+# are full of A's. Type 0x0021 is NBSTAT, "send me your whole name table".
+1a2b0000000100000000000020434b41
+41414141414141414141414141414141
+41414141414141414141414141000021
+0001

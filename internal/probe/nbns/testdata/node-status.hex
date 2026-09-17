@@ -1,0 +1,26 @@
+# The name table a file server sends back. flags 0x8400 = response,
+# authoritative. No question is echoed, which is what Windows does.
+#
+# A machine registers its name once per service it offers, and the suffix byte
+# says which:
+#
+#   NAS01     <00> workstation,         unique
+#   NAS01     <20> file server,         unique
+#   WORKGROUP <00> domain or workgroup, group
+#   WORKGROUP <1e> browser elections,   group
+#
+# "group" means several machines may hold the name - that is how a workgroup
+# is represented. After the names comes the adapter's own address, which the
+# node reports for itself, then 46 bytes of statistics shoal ignores.
+1a2b8400000000010000000020434b41
+41414141414141414141414141414141
+41414141414141414141414141000021
+000100000000007d044e415330312020
+20202020202020200004004e41533031
+20202020202020202020200400574f52
+4b47524f555020202020202000840057
+4f524b47524f55502020202020201e84
+000011327fa2c4000000000000000000
+00000000000000000000000000000000
+00000000000000000000000000000000
+0000000000
