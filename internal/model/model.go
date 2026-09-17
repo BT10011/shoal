@@ -73,6 +73,27 @@ func SourcePriority(source string) int {
 	return sourcePriority[source]
 }
 
+// direct lists the sources that learn their facts by exchanging packets with
+// the device itself. An observation from one of them is evidence the device
+// was reachable at that moment. rdns asks a resolver, oui consults a table
+// and the store reasons about what it already holds: none of those has heard
+// from the device, so they say nothing about whether it is still there.
+var direct = map[string]bool{
+	"arp":   true,
+	"neigh": true, // the kernel exchanged packets with it, and the probe nudges each address first
+	"mdns":  true,
+	"icmp":  true,
+	"nbns":  true,
+	"netif": true, // this machine's own interface
+	"ports": true,
+}
+
+// Direct reports whether a source's observations come from the device itself
+// rather than from a third party or a lookup table.
+func Direct(source string) bool {
+	return direct[source]
+}
+
 // better reports whether a should be displayed in preference to b:
 // highest confidence, then source priority, then newest.
 func better(a, b Observation) bool {
@@ -182,6 +203,27 @@ func (d *Device) Conflicting(f Field, now time.Time) bool {
 		return false
 	}
 	return len(d.Values(f, now)) > 1
+}
+
+// LastContact returns when a probe last heard from the device directly and
+// which probe it was. Expired observations still count: an answer that has
+// aged out is still proof the device was there when it answered. Two probes
+// heard at the same instant are settled by source priority so the answer is
+// stable. ok is false for a device nothing has ever exchanged packets with,
+// such as one known only from a resolver's answer.
+func (d *Device) LastContact() (at time.Time, source string, ok bool) {
+	for _, obs := range d.Facts {
+		for _, o := range obs {
+			if !Direct(o.Source) {
+				continue
+			}
+			later := o.At.After(at) || (o.At.Equal(at) && SourcePriority(o.Source) > SourcePriority(source))
+			if !ok || later {
+				at, source, ok = o.At, o.Source, true
+			}
+		}
+	}
+	return at, source, ok
 }
 
 // Fields lists the fields with at least one observation, sorted.
