@@ -269,10 +269,12 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 *Outcome:* `shoal` sweeps a /24 in ~7 s (253 requests at 100/s, a 1 s settle, a retry pass for silent addresses, another settle); devices appear as they answer. Raw access uses `/dev/bpf` on macOS and `AF_PACKET` on Linux; when it is refused shoal falls back to `neigh` automatically and says so in the status bar. Modern FreeBSD/OpenBSD/NetBSD build but have no neighbour-cache reader (they moved ARP out of the routing table); `shoal probe arp` still works on FreeBSD.
 
-### Phase 2 — Names & latency  *(in progress — `nbns` is next)*
+### Phase 2 — Names & latency ✅ *completed 2026-09-17*
 
-Three of the four probes are done. Names now come from two independent
-sources that cover different halves of a network, and the RTT column is live.
+All four probes are done. Names now come from three independent sources that
+cover different halves of a network — DNS knows what the router was told,
+mDNS knows what Apple and avahi devices call themselves, NetBIOS knows the
+Windows and Samba machines — and the RTT column is live.
 
 - ✅ `rdns`: PTR lookups (show which resolver answered). *Done 2026-09-17:* asks `/etc/resolv.conf` resolvers in order (gateway as fallback), stops at the first definite answer, emits `hostname` at confidence 0.7 with the record's DNS TTL, and discards replies whose query ID does not match. IPv4 and UDP only.
 - ✅ `mdns`: reverse queries **and** the passive listener.
@@ -280,8 +282,8 @@ sources that cover different halves of a network, and the RTT column is live.
   - *Passive listener done 2026-09-17:* binds 5353 with `SO_REUSEADDR`/`SO_REUSEPORT` alongside the system responder, joins the group on the scanning interface, and emits `ip`, `hostname` (from A records the sender claims) and `service`. A service is credited only when the sender's own records tie it to itself — see the attribution rule in `docs/protocols/mdns.md`, written after a live run showed a phone announcing a laptop's instance.
   - ⬜ Active service discovery: shoal never asks `_services._dns-sd._udp.local` itself, so on a quiet network the `service` field fills only when another device browses.
 - ✅ `icmp`: RTT. *Done 2026-09-17:* three echo requests 100 ms apart, best of three, over an unprivileged datagram socket where possible and a raw socket otherwise, with the socket kind shown. Replies are matched by sequence and payload because the kernel rewrites the id. Recording the ARP RTT to contrast L2 with L3 is still open — the sweep does not keep per-address timings yet.
-- ⬜ **`nbns`: NetBIOS node status (UDP 137) — next up.** It is what names Windows and Samba hosts, which answer neither mDNS nor a PTR lookup, so it fills the gap the other two leave.
-- ✅ Docs for each finished probe: `rdns.md`, `mdns.md`, `icmp.md`.
+- ✅ `nbns`: NetBIOS node status (UDP 137). *Done 2026-09-17:* one node status request for the wildcard name from an ephemeral port (no privileges), decoding the whole name table. Emits the unique `<00>` name as `hostname` at confidence 0.8 and the adapter address the node reports as `mac` at 0.9, naming the workgroup and every registered service in the log. Samba's all-zero adapter address is treated as unanswered.
+- ✅ Docs for each probe: `rdns.md`, `mdns.md`, `icmp.md`, `nbns.md`.
 
 **Supporting work done in this phase:**
 - `internal/dnswire` — the question-building shared by `rdns` and `mdns` (see §4).
@@ -289,7 +291,11 @@ sources that cover different halves of a network, and the RTT column is live.
 - The progress panel shows a plain count for a probe that listens rather than sweeps, since there is no total to count towards.
 - **Test fixtures are synthetic.** Probes were developed against live captures, but every fixture committed here is hand-built: no real MAC addresses, hostnames, hardware models or network addresses.
 
-**Done when:** hostnames and mDNS services populate live, with conflicting names shown side by side in details. *(Names and services populate now; the side-by-side conflict view lands with the Phase 3 detail pane.)*
+**Done when:** hostnames and mDNS services populate live, with conflicting names shown side by side in details. *(Met: names and services populate live from three sources. The side-by-side conflict view is Phase 3's detail pane — the store already keeps every competing observation, so it is a rendering job, not a data one.)*
+
+**Deferred out of this phase, to pick up whenever it is worth it:**
+- Active mDNS service discovery — shoal never asks `_services._dns-sd._udp.local` itself, so on a quiet network `service` fills only when another device browses.
+- ARP round trips, to contrast a layer 2 answer with ICMP's layer 3 one. The sweep keeps no per-address timings yet.
 
 ### Phase 3 — Diagnostic UI polish
 - Sorting (`s` cycle key, `S` reverse), `/` live filter (substring; glob if `*?[` present).

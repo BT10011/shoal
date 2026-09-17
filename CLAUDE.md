@@ -3,10 +3,11 @@
 ## Start here
 Read `PROJECT_PLAN.md` in full before doing any work. It is the source of truth for scope, architecture, build order and conventions. If this file and the plan ever disagree, the plan wins.
 
-**Current phase: Phase 2 — Names & latency.** (Update this line as phases complete.)
-Phase 2 so far: `rdns`, `mdns` (reverse queries + passive listener) and `icmp` are done; `nbns` is next.
+**Current phase: Phase 3 — Diagnostic UI polish.** (Update this line as phases complete.) Not started.
 Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
 Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, unprivileged `neigh` fallback, vendors from the embedded IEEE registry).
+Phase 2 completed 2026-09-17: names and latency — `rdns`, `mdns` (reverse queries + passive listener), `nbns` and `icmp`. Two optional pieces were deferred; see the end of Phase 2 in the plan.
+Phase 3a is an optional add-on for devices the subnet does not explain; it can be skipped.
 
 ## What we are building
 A terminal-based, good-looking LAN discovery tool (Go, Bubble Tea, Lipgloss, TideUI) that shows live updates and progress, and lets the user understand what is happening under the hood during discovery. Every displayed value must show how it was discovered.
