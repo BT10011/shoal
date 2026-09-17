@@ -398,7 +398,7 @@ var (
 // full foreground while a flare fades, accent and bold at its peak. A
 // finished bar is drawn at full foreground.
 type barStyles struct {
-	plain                     bool
+	plain                   bool
 	dim, mid, bright, solid lipgloss.Style
 }
 
@@ -467,10 +467,12 @@ func progressBar(done, total, width, frame int, st barStyles) string {
 const sparkWindow = 6
 
 // sparkAge returns 0 while a cell is freshly lit, 1 while it fades and -1
-// when it is dim. Roughly one cell in four flares per window.
+// when it is dim. Roughly one cell in two flares per window, each at a
+// different phase so the bar twinkles rather than pulsing in unison.
 func sparkAge(cell, frame int) int {
+	frame += cellHash(cell*104729) % sparkWindow
 	window := frame / sparkWindow
-	if cellHash(cell*7919+window)%4 != 0 {
+	if cellHash(cell*7919+window)%2 != 0 {
 		return -1
 	}
 	switch age := frame % sparkWindow; {

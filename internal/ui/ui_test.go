@@ -313,21 +313,37 @@ func TestProgressBar(t *testing.T) {
 }
 
 func TestSparkAgeFlaresThenFades(t *testing.T) {
-	flares := 0
+	flares, bright := 0, 0
 	for cell := 0; cell < 30; cell++ {
-		for window := 0; window < 100; window++ {
-			base := window * sparkWindow
-			if sparkAge(cell, base) != 0 {
-				continue
-			}
-			flares++
-			if sparkAge(cell, base+1) != 0 || sparkAge(cell, base+2) != 1 || sparkAge(cell, base+3) != 1 || sparkAge(cell, base+4) != -1 {
-				t.Fatalf("cell %d window %d: flare does not fade bright→mid→normal", cell, window)
+		for frame := 0; frame < 600; frame++ {
+			switch age := sparkAge(cell, frame); {
+			case age == 0:
+				bright++
+				if frame > 0 && sparkAge(cell, frame-1) == -1 {
+					flares++
+					if sparkAge(cell, frame+1) != 0 || sparkAge(cell, frame+2) != 1 || sparkAge(cell, frame+3) != 1 || sparkAge(cell, frame+4) != -1 {
+						t.Fatalf("cell %d frame %d: flare does not fade bright→mid→dim", cell, frame)
+					}
+				}
 			}
 		}
 	}
-	if flares < 450 || flares > 1100 {
-		t.Fatalf("%d flares over 3000 cell-windows; expected roughly one in four", flares)
+	if flares < 1000 || flares > 2000 {
+		t.Fatalf("%d flares over 3000 cell-windows; expected roughly one in two", flares)
+	}
+	if share := float64(bright) / 18000; share < 0.10 || share > 0.25 {
+		t.Fatalf("%.0f%% of cell-frames bright; expected about a sixth", share*100)
+	}
+	phases := map[int]bool{}
+	for cell := 0; cell < 30; cell++ {
+		for frame := 0; frame < sparkWindow; frame++ {
+			if sparkAge(cell, frame) == 0 && (frame == 0 || sparkAge(cell, frame-1) != 0) {
+				phases[frame] = true
+			}
+		}
+	}
+	if len(phases) < 3 {
+		t.Fatalf("flares start in only %d distinct phases; cells should not pulse in unison", len(phases))
 	}
 }
 
