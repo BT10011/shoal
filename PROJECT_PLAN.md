@@ -78,8 +78,8 @@ The value is **transparency and learning**: seeing how ARP, DNS, mDNS/Bonjour, N
 | Raw L2 (Linux) | `github.com/mdlayher/packet`, `github.com/mdlayher/arp` | pure Go, AF_PACKET |
 | Raw L2 (macOS) | BPF via `/dev/bpf` (pure Go if feasible) or `github.com/gopacket/gopacket/pcap` | **TODO: verify** best pure-Go option on macOS; pcap needs cgo |
 | Packet decode | `github.com/gopacket/gopacket` (maintained fork) | also used later for LLDP, 802.1Q, pcapng export |
-| DNS / mDNS | `github.com/miekg/dns` | hand-rolled mDNS queries for full visibility (not a black-box zeroconf lib) |
-| ICMP | `github.com/prometheus-community/pro-bing` | |
+| DNS / mDNS | `golang.org/x/net/dns/dnsmessage` | **Changed 2026-09-17** (was `github.com/miekg/dns`): `x/net` is already a dependency for the routing table, so this adds no new module, and its explicit pack/unpack suits a probe that must show the packet. Queries are hand-rolled either way, for full visibility (not a black-box zeroconf lib). Revisit for `mdns` if SRV/TXT parsing proves painful; the probe logic does not depend on the choice. |
+| ICMP | `golang.org/x/net/icmp` + `golang.org/x/net/ipv4` | **Changed 2026-09-17** (was `github.com/prometheus-community/pro-bing`): same reasoning as the DNS row — `x/net` is already a dependency, and building the echo request by hand is what lets the probe show the id, sequence and socket kind. pro-bing would also hide which socket type it fell back to, which is exactly the privilege detail shoal wants to display. |
 | Persistence | `modernc.org/sqlite` | pure Go, no cgo |
 | Config | TOML (`github.com/pelletier/go-toml/v2`) | later phase |
 
@@ -268,14 +268,27 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 *Outcome:* `shoal` sweeps a /24 in ~7 s (253 requests at 100/s, a 1 s settle, a retry pass for silent addresses, another settle); devices appear as they answer. Raw access uses `/dev/bpf` on macOS and `AF_PACKET` on Linux; when it is refused shoal falls back to `neigh` automatically and says so in the status bar. Modern FreeBSD/OpenBSD/NetBSD build but have no neighbour-cache reader (they moved ARP out of the routing table); `shoal probe arp` still works on FreeBSD.
 
-### Phase 2 — Names & latency
-- `rdns`: PTR lookups (show which resolver answered).
-- `mdns`: passive listener on 224.0.0.251:5353 (SO_REUSEPORT; coexist with mDNSResponder/avahi) + active queries: `_services._dns-sd._udp.local`, per-service PTR/SRV/TXT, reverse `in-addr.arpa` over multicast.
-- `nbns`: NetBIOS node status (UDP 137).
-- `icmp`: RTT via pro-bing; optionally also record ARP RTT to contrast L2 vs L3 latency.
-- Docs for each.
+### Phase 2 — Names & latency  *(in progress — `nbns` is next)*
 
-**Done when:** hostnames and mDNS services populate live, with conflicting names shown side by side in details.
+Three of the four probes are done. Names now come from two independent
+sources that cover different halves of a network, and the RTT column is live.
+
+- ✅ `rdns`: PTR lookups (show which resolver answered). *Done 2026-09-17:* asks `/etc/resolv.conf` resolvers in order (gateway as fallback), stops at the first definite answer, emits `hostname` at confidence 0.7 with the record's DNS TTL, and discards replies whose query ID does not match. IPv4 and UDP only.
+- ✅ `mdns`: reverse queries **and** the passive listener.
+  - *Reverse queries done 2026-09-17:* one-shot reverse PTR per device from an ephemeral port, `hostname` at confidence 0.9, proxy responders named, every section logged. Shared question-building lives in `internal/dnswire`.
+  - *Passive listener done 2026-09-17:* binds 5353 with `SO_REUSEADDR`/`SO_REUSEPORT` alongside the system responder, joins the group on the scanning interface, and emits `ip`, `hostname` (from A records the sender claims) and `service`. A service is credited only when the sender's own records tie it to itself — see the attribution rule in `docs/protocols/mdns.md`, written after a live run showed a phone announcing a laptop's instance.
+  - ⬜ Active service discovery: shoal never asks `_services._dns-sd._udp.local` itself, so on a quiet network the `service` field fills only when another device browses.
+- ✅ `icmp`: RTT. *Done 2026-09-17:* three echo requests 100 ms apart, best of three, over an unprivileged datagram socket where possible and a raw socket otherwise, with the socket kind shown. Replies are matched by sequence and payload because the kernel rewrites the id. Recording the ARP RTT to contrast L2 with L3 is still open — the sweep does not keep per-address timings yet.
+- ⬜ **`nbns`: NetBIOS node status (UDP 137) — next up.** It is what names Windows and Samba hosts, which answer neither mDNS nor a PTR lookup, so it fills the gap the other two leave.
+- ✅ Docs for each finished probe: `rdns.md`, `mdns.md`, `icmp.md`.
+
+**Supporting work done in this phase:**
+- `internal/dnswire` — the question-building shared by `rdns` and `mdns` (see §4).
+- `store` reconciles keys: an observation keyed by a bare IP is routed to whichever device claims that address, and a MAC-keyed device absorbs an IP-keyed one when it claims its address, keeping an alias and publishing `EventDeviceMerged`. This is what lets a passive probe, which knows only a source address, contribute to a device ARP found by MAC (see §11).
+- The progress panel shows a plain count for a probe that listens rather than sweeps, since there is no total to count towards.
+- **Test fixtures are synthetic.** Probes were developed against live captures, but every fixture committed here is hand-built: no real MAC addresses, hostnames, hardware models or network addresses.
+
+**Done when:** hostnames and mDNS services populate live, with conflicting names shown side by side in details. *(Names and services populate now; the side-by-side conflict view lands with the Phase 3 detail pane.)*
 
 ### Phase 3 — Diagnostic UI polish
 - Sorting (`s` cycle key, `S` reverse), `/` live filter (substring; glob if `*?[` present).
@@ -338,6 +351,7 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 - ~~Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first.~~ **Resolved 2026-09-16:** The maintainer runs both macOS and Linux. Write the Darwin (BPF) ARP backend first, then Linux (`AF_PACKET`); both are first-class targets and must keep building.
 - ~~TideUI license and compatible Bubble Tea/Lipgloss versions.~~ **Resolved 2026-09-16:** MIT; TideUI v0.2.2 requires Bubble Tea v1.3.10 and Lipgloss v1.1.0 (see §4).
+- ~~How should a passive probe's observations reach a device the store keys by MAC?~~ **Resolved 2026-09-17:** the store reconciles them, and probes stay simple. An observation keyed by a bare IP is routed to whichever device has claimed that address (`resolveKey`); when a MAC-keyed device later claims an address that already exists as its own IP-keyed device, the store folds that device in, keeps an alias so in-flight observations still land, and publishes `EventDeviceMerged`. Ambiguity is never guessed at: if two devices claim one address, the IP-keyed facts stay separate and the `duplicate-ip` flag stands. Phase 4 should key history off the surviving MAC.
 - Final project name.
 - Windows support: out of scope initially (would need Npcap).
 

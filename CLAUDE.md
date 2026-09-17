@@ -4,6 +4,7 @@
 Read `PROJECT_PLAN.md` in full before doing any work. It is the source of truth for scope, architecture, build order and conventions. If this file and the plan ever disagree, the plan wins.
 
 **Current phase: Phase 2 — Names & latency.** (Update this line as phases complete.)
+Phase 2 so far: `rdns`, `mdns` (reverse queries + passive listener) and `icmp` are done; `nbns` is next.
 Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
 Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, unprivileged `neigh` fallback, vendors from the embedded IEEE registry).
 

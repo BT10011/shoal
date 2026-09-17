@@ -13,7 +13,10 @@ import (
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/icmp"
+	"github.com/BT10011/shoal/internal/probe/mdns"
 	"github.com/BT10011/shoal/internal/probe/neigh"
+	"github.com/BT10011/shoal/internal/probe/rdns"
 	"github.com/BT10011/shoal/internal/store"
 	"github.com/BT10011/shoal/internal/ui"
 )
@@ -94,6 +97,31 @@ func runTUI(args []string) error {
 	}
 	if err := eng.AddEnricher(ouiEnricher); err != nil {
 		return err
+	}
+	// Neither name probe needs privileges, so both run whichever discoverer
+	// was chosen above. They answer for different halves of a network: DNS
+	// knows what the router was told, mDNS knows what each device calls
+	// itself.
+	if err := eng.AddEnricher(rdns.New(rdns.Options{Resolvers: rdns.SystemResolvers(iface.Gateway)})); err != nil {
+		return err
+	}
+	if err := eng.AddEnricher(mdns.New(mdns.Options{})); err != nil {
+		return err
+	}
+	// The listener sends nothing; it writes down the announcements already
+	// crossing the network, and keeps running after the sweep finishes.
+	if err := eng.AddDiscoverer(mdns.NewListener(mdns.ListenerOptions{})); err != nil {
+		return err
+	}
+	// ICMP is the one enricher that can be refused outright, so ask once
+	// here rather than failing per device, and say so in the status bar.
+	if icmpMode, err := icmp.CheckAccess(); err != nil {
+		mode += " · no ICMP"
+	} else {
+		if err := eng.AddEnricher(icmp.New(icmp.Options{})); err != nil {
+			return err
+		}
+		mode += " · icmp " + icmpMode.Short()
 	}
 	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: *theme})
 }

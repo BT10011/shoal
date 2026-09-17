@@ -10,13 +10,17 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/BT10011/shoal/internal/dnswire"
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/icmp"
+	"github.com/BT10011/shoal/internal/probe/mdns"
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/oui"
+	"github.com/BT10011/shoal/internal/probe/rdns"
 	"github.com/BT10011/shoal/internal/store"
 )
 
@@ -25,6 +29,10 @@ const probeUsage = `Usage: shoal probe <name> [flags]
 Probes:
   arp [iface]     Active ARP sweep of the interface's subnet (see docs/protocols/arp.md)
   neigh [iface]   Kernel neighbour cache, no privileges needed (see docs/protocols/neigh.md)
+  rdns <ip>       Reverse DNS (PTR) lookup, naming the resolver that answered (see docs/protocols/rdns.md)
+  mdns [ip]       Ask a device its name over multicast, or with no ip, listen to the
+                  Bonjour conversation and write down what passes (see docs/protocols/mdns.md)
+  icmp <ip>       Echo requests, to measure the round trip (see docs/protocols/icmp.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
 `
@@ -41,6 +49,12 @@ func runProbe(args []string) error {
 		return runProbeNeigh(args[1:])
 	case "fake":
 		return runProbeFake(args[1:])
+	case "rdns":
+		return runProbeRDNS(args[1:])
+	case "mdns":
+		return runProbeMDNS(args[1:])
+	case "icmp":
+		return runProbeICMP(args[1:])
 	case "oui":
 		return runProbeOUI(args[1:])
 	default:
@@ -108,6 +122,133 @@ func pickInterface(name string) (netif.Interface, error) {
 	return netif.ByName(name)
 }
 
+func runProbeRDNS(args []string) error {
+	fs := flag.NewFlagSet("shoal probe rdns", flag.ContinueOnError)
+	server := fs.String("resolver", "", "ask this resolver instead of the system's (host or host:port)")
+	timeout := fs.Duration("timeout", 0, "how long to wait for each resolver (default 2s)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: shoal probe rdns <ip> [-resolver host] [-timeout 2s]")
+	}
+	ip := net.ParseIP(fs.Arg(0))
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address", fs.Arg(0))
+	}
+
+	resolvers, err := chooseResolvers(*server)
+	if err != nil {
+		return err
+	}
+	name, err := dnswire.ReverseName(ip)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("question   %s\n", name)
+	for i, r := range resolvers {
+		fmt.Printf("resolver %d %-21s %s\n", i+1, r.Addr, r.Origin)
+	}
+	fmt.Println()
+
+	probe := rdns.New(rdns.Options{Resolvers: resolvers, Timeout: *timeout})
+	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
+}
+
+// runProbeMDNSListen watches the multicast group without sending anything.
+func runProbeMDNSListen(listenFor time.Duration) error {
+	iface, err := netif.Default()
+	if err != nil {
+		return err
+	}
+	fmt.Print(iface.Describe())
+	fmt.Printf("group      %s:%d (passive; shoal sends nothing)\n", mdns.Group, mdns.Port)
+	if listenFor > 0 {
+		fmt.Printf("listening  %s\n\n", listenFor)
+	} else {
+		fmt.Print("listening  until interrupted (^C)\n\n")
+	}
+	return runStandalone(iface, []engine.Discoverer{mdns.NewListener(mdns.ListenerOptions{})}, nil, os.Stdout, listenFor)
+}
+
+// chooseResolvers takes the one the user named, or the system's, falling back
+// to the gateway when the system names none.
+func chooseResolvers(server string) ([]rdns.Resolver, error) {
+	if server == "" {
+		iface, err := netif.Default()
+		if err != nil {
+			// Without an interface there is no gateway to fall back to,
+			// but resolv.conf may still name a resolver.
+			iface = netif.Interface{}
+		}
+		resolvers := rdns.SystemResolvers(iface.Gateway)
+		if len(resolvers) == 0 {
+			return nil, fmt.Errorf("no resolver found in %s and no default gateway; name one with -resolver", rdns.ResolvConf)
+		}
+		return resolvers, nil
+	}
+	addr := server
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(server, rdns.DefaultPort)
+	}
+	return []rdns.Resolver{{Addr: addr, Origin: "named with -resolver"}}, nil
+}
+
+func runProbeMDNS(args []string) error {
+	fs := flag.NewFlagSet("shoal probe mdns", flag.ContinueOnError)
+	wait := fs.Duration("wait", 0, "how long to listen for answers (default 1s)")
+	listenFor := fs.Duration("for", 0, "listen mode: stop after this long (default: until interrupted)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		return runProbeMDNSListen(*listenFor)
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: shoal probe mdns [ip] [-wait 1s] [-for 30s]")
+	}
+	ip := net.ParseIP(fs.Arg(0))
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address", fs.Arg(0))
+	}
+	name, err := dnswire.ReverseName(ip)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("question   %s\ngroup      %s:%d (link-local; routers do not forward it)\n\n", name, mdns.Group, mdns.Port)
+
+	probe := mdns.New(mdns.Options{Wait: *wait})
+	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
+}
+
+func runProbeICMP(args []string) error {
+	fs := flag.NewFlagSet("shoal probe icmp", flag.ContinueOnError)
+	count := fs.Int("count", 0, "echo requests to send (default 3)")
+	interval := fs.Duration("interval", 0, "pause between them (default 100ms)")
+	timeout := fs.Duration("timeout", 0, "wait for the last reply (default 1s)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: shoal probe icmp <ip> [-count 3] [-interval 100ms] [-timeout 1s]")
+	}
+	ip := net.ParseIP(fs.Arg(0))
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address", fs.Arg(0))
+	}
+	mode, err := icmp.CheckAccess()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("target     %s\nsocket     %s\n\n", ip, mode)
+
+	probe := icmp.New(icmp.Options{Count: *count, Interval: *interval, Timeout: *timeout})
+	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
+}
+
 func runProbeOUI(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("usage: shoal probe oui <mac>")
@@ -150,9 +291,15 @@ func (s seedDiscoverer) Run(_ context.Context, _ netif.Interface, emit engine.Em
 
 // runStandalone drives probes to completion, printing every event and
 // observation as it happens, then a summary of what was learned.
-func runStandalone(iface netif.Interface, discoverers []engine.Discoverer, enrichers []engine.Enricher, w io.Writer) error {
+func runStandalone(iface netif.Interface, discoverers []engine.Discoverer, enrichers []engine.Enricher, w io.Writer, limit ...time.Duration) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// Probes that listen rather than ask never finish on their own.
+	if len(limit) > 0 && limit[0] > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit[0])
+		defer cancel()
+	}
 
 	st := store.NewMemory()
 	st.Subscribe(func(ev store.Event) {
@@ -193,7 +340,7 @@ func runStandalone(iface netif.Interface, discoverers []engine.Discoverer, enric
 	for !finished(e.Status()) {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(w, "\ninterrupted")
+			fmt.Fprintln(w, "\nstopped")
 			e.Stop()
 			return printSummary(w, st)
 		case <-ticker.C:
