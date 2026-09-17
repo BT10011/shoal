@@ -1,0 +1,5 @@
+# ICMP echo request: type 8, code 0, checksum, id 0x1234, seq 1, then the
+# payload "shoal probe". The checksum here was computed by hand (RFC 1071
+# ones-complement sum) rather than by the library under test.
+0800520b 1234 0001
+73686f616c2070726f6265
