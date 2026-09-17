@@ -321,7 +321,7 @@ func (a *app) renderHood(width, rows int) []string {
 			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))
 			continue
 		}
-		lines = append(lines, s.Item.Render(fit(d.Name, 7))+progressBar(d.Done, d.Total, barW, a.barStyles())+s.Item.Render(fit(tail, width-7-barW)))
+		lines = append(lines, s.Item.Render(fit(d.Name, 7))+progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())+s.Item.Render(fit(tail, width-7-barW)))
 	}
 	for _, e := range a.status.Enrichers {
 		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)
@@ -394,22 +394,34 @@ var (
 	asciiHead   = []string{"-", "\\", "|", "/"}
 )
 
+// barStyles are the three brightness levels of a running bar: dim at rest,
+// full foreground while a flare fades, accent and bold at its peak. A
+// finished bar is drawn at full foreground.
 type barStyles struct {
-	plain               bool
-	normal, mid, bright lipgloss.Style
+	plain                     bool
+	dim, mid, bright, solid lipgloss.Style
 }
 
 func (a *app) barStyles() barStyles {
 	s := a.renderer.Styles
 	return barStyles{
 		plain:  s.PlainUI,
-		normal: s.Item,
-		mid:    s.Item.Bold(true),
+		dim:    s.ItemMuted,
+		mid:    s.Item,
 		bright: s.Item.Foreground(s.Theme.Unread).Bold(true),
+		solid:  s.Item,
 	}
 }
 
-func progressBar(done, total, width int, st barStyles) string {
+// frameEvery is the animation clock for the bar, independent of how fast
+// probes tick, so flares are visible whatever the sweep rate.
+const frameEvery = 100 * time.Millisecond
+
+func (a *app) frame() int {
+	return int(a.now.UnixNano() / int64(frameEvery))
+}
+
+func progressBar(done, total, width, frame int, st barStyles) string {
 	if width < 1 {
 		return ""
 	}
@@ -425,41 +437,43 @@ func progressBar(done, total, width int, st barStyles) string {
 
 	var b strings.Builder
 	for i := 0; i < cells; i++ {
-		glyph, style := filled[0], st.normal
+		glyph, style := filled[0], st.solid
 		if !complete {
-			glyph = filled[cellHash(i+done*width)%len(filled)]
-			switch sparkAge(i, done) {
+			glyph = filled[cellHash(i+frame*width)%len(filled)]
+			switch sparkAge(i, frame) {
 			case 0:
 				style = st.bright
 			case 1:
 				style = st.mid
+			default:
+				style = st.dim
 			}
 		}
 		b.WriteString(style.Render(glyph))
 	}
 	rest := width - cells
 	if rest > 0 && done > 0 && !complete {
-		b.WriteString(st.normal.Render(head[done%len(head)]))
+		b.WriteString(st.mid.Render(head[frame%len(head)]))
 		rest--
 	}
 	if rest > 0 {
-		b.WriteString(st.normal.Render(strings.Repeat(" ", rest)))
+		b.WriteString(st.dim.Render(strings.Repeat(" ", rest)))
 	}
 	return b.String()
 }
 
-// sparkWindow is how many ticks a flare lasts: bright for the first
-// third, dimmer for the second, back to normal for the rest.
+// sparkWindow is how many frames a flare cycle lasts: bright for the
+// first third, fading for the second, dim for the rest.
 const sparkWindow = 6
 
 // sparkAge returns 0 while a cell is freshly lit, 1 while it fades and -1
-// when it is at normal brightness. Roughly one cell in six flares per window.
-func sparkAge(cell, tick int) int {
-	window := tick / sparkWindow
-	if cellHash(cell*7919+window)%6 != 0 {
+// when it is dim. Roughly one cell in four flares per window.
+func sparkAge(cell, frame int) int {
+	window := frame / sparkWindow
+	if cellHash(cell*7919+window)%4 != 0 {
 		return -1
 	}
-	switch age := tick % sparkWindow; {
+	switch age := frame % sparkWindow; {
 	case age < 2:
 		return 0
 	case age < 4:

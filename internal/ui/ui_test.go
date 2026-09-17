@@ -257,7 +257,7 @@ func TestProgressBar(t *testing.T) {
 		return r >= 0x2800 && r <= 0x28ff && !strings.ContainsRune(strings.Join(dotHead, ""), r)
 	}
 	bar := func(done, total, width int, plain bool) string {
-		return ansi.Strip(progressBar(done, total, width, barStyles{plain: plain}))
+		return ansi.Strip(progressBar(done, total, width, done, barStyles{plain: plain}))
 	}
 	for _, plain := range []bool{false, true} {
 		if got := bar(0, 0, 4, plain); got != "    " {
@@ -294,11 +294,14 @@ func TestProgressBar(t *testing.T) {
 			t.Fatalf("plain=%v: complete bar must be solid, got %q", plain, got)
 		}
 	}
-	if a, b := bar(100, 254, 30, false), bar(100, 254, 30, false); a != b {
-		t.Fatal("same tick must render identically")
+	same := func(frame int) string {
+		return ansi.Strip(progressBar(100, 254, 30, frame, barStyles{}))
 	}
-	if bar(100, 254, 30, false) == bar(101, 254, 30, false) {
-		t.Fatal("texture should shimmer between ticks")
+	if same(7) != same(7) {
+		t.Fatal("same frame must render identically")
+	}
+	if same(7) == same(8) {
+		t.Fatal("texture should shimmer between frames")
 	}
 	distinct := map[rune]bool{}
 	for _, r := range bar(200, 254, 30, false) {
@@ -323,7 +326,18 @@ func TestSparkAgeFlaresThenFades(t *testing.T) {
 			}
 		}
 	}
-	if flares < 200 || flares > 800 {
-		t.Fatalf("%d flares over 3000 cell-windows; expected roughly one in six", flares)
+	if flares < 450 || flares > 1100 {
+		t.Fatalf("%d flares over 3000 cell-windows; expected roughly one in four", flares)
+	}
+}
+
+func TestBarBrightnessLevelsAreDistinct(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	st := a.barStyles()
+	if st.dim.GetForeground() == st.mid.GetForeground() {
+		t.Fatal("dim and fading cells must differ in colour")
+	}
+	if st.bright.GetForeground() == st.mid.GetForeground() || !st.bright.GetBold() {
+		t.Fatal("peak flare must be a distinct colour and bold")
 	}
 }
