@@ -5,20 +5,24 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/BT10011/shoal/internal/engine"
+	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/store"
 )
 
 const probeUsage = `Usage: shoal probe <name> [flags]
 
 Probes:
-  fake    Scripted demo probes; no network access (see docs/protocols/fake.md)
+  fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
+  oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
 `
 
 func runProbe(args []string) error {
@@ -29,6 +33,8 @@ func runProbe(args []string) error {
 	switch args[0] {
 	case "fake":
 		return runProbeFake(args[1:])
+	case "oui":
+		return runProbeOUI(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, probeUsage)
 		return fmt.Errorf("unknown probe %q", args[0])
@@ -43,7 +49,52 @@ func runProbeFake(args []string) error {
 		return err
 	}
 	opts := fake.Options{Interval: *interval, Latency: *latency}
-	return runStandalone(netif.Interface{}, []engine.Discoverer{fake.NewDiscoverer(opts)}, fake.NewEnrichers(opts), os.Stdout)
+	ouiEnricher, err := realOUI()
+	if err != nil {
+		return err
+	}
+	enrichers := append([]engine.Enricher{ouiEnricher}, fake.NewEnrichers(opts)...)
+	return runStandalone(netif.Interface{}, []engine.Discoverer{fake.NewDiscoverer(opts)}, enrichers, os.Stdout)
+}
+
+func runProbeOUI(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: shoal probe oui <mac>")
+	}
+	mac, err := net.ParseMAC(args[0])
+	if err != nil {
+		return err
+	}
+	ouiEnricher, err := realOUI()
+	if err != nil {
+		return err
+	}
+	seed := seedDiscoverer{key: mac.String(), field: model.FieldMAC, value: mac.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{ouiEnricher}, os.Stdout)
+}
+
+func realOUI() (engine.Enricher, error) {
+	reg, err := oui.Embedded()
+	if err != nil {
+		return nil, fmt.Errorf("embedded OUI registry: %w", err)
+	}
+	return oui.New(reg), nil
+}
+
+// seedDiscoverer emits one user-supplied fact so a single enricher can be
+// exercised on its own from the command line.
+type seedDiscoverer struct {
+	key   string
+	field model.Field
+	value string
+}
+
+func (s seedDiscoverer) Name() string { return "seed" }
+
+func (s seedDiscoverer) Run(_ context.Context, _ netif.Interface, emit engine.Emit, report engine.Report) error {
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: s.key, Message: fmt.Sprintf("%s=%s supplied on the command line", s.field, s.value)})
+	emit(model.Observation{DeviceKey: s.key, Field: s.field, Value: s.value, Confidence: 1, Method: "supplied on the command line"})
+	return nil
 }
 
 // runStandalone drives probes to completion, printing every event and

@@ -9,7 +9,7 @@ store and engine can be exercised without root, a network, or a real LAN.
 | Probe | Pretends to be | Trigger | What it emits |
 |---|---|---|---|
 | `arp` (discoverer) | ARP sweep of `192.168.1.0/24` | — | `mac`, `ip` for each scripted device; one `sent` event per address, `received` per reply, `progress` 1..254 |
-| `oui` | IEEE OUI registry lookup | `mac` | `vendor`; or the `locally-administered-mac` flag when the first octet has bit `0x02` set |
+| `oui` | **not faked** — the real enricher runs offline against the embedded registry ([oui.md](oui.md)); the cast uses genuine vendor prefixes | `mac` | `vendor`, or the `locally-administered-mac` flag |
 | `rdns` | PTR query to the router resolver | `ip` | `hostname` (confidence 0.7, TTL 5m) or NXDOMAIN |
 | `mdns` | Multicast reverse PTR + DNS-SD enumeration | `ip` | `hostname` (confidence 0.9, TTL 2m) and `service` values |
 | `icmp` | Echo request/reply | `ip` | `latency`; silent devices time out |
