@@ -206,3 +206,30 @@ func TestSnapshotIsIndependent(t *testing.T) {
 		t.Fatalf("snapshot Resolved = %q", got.Value)
 	}
 }
+
+func TestLastContactCountsOnlyDirectSources(t *testing.T) {
+	d := NewDevice("k", t0)
+	if _, _, ok := d.LastContact(); ok {
+		t.Fatal("empty device has no contact")
+	}
+	d.Add(obs(FieldVendor, "Acme", "oui", 0.9, t0.Add(30*time.Second), 0))
+	d.Add(obs(FieldHostname, "nas.lan", "rdns", 0.7, t0.Add(40*time.Second), 0))
+	d.Add(obs(FieldFlag, "duplicate-ip", "store", 1, t0.Add(50*time.Second), 0))
+	if _, _, ok := d.LastContact(); ok {
+		t.Fatal("a table, a resolver and the store have not heard from the device")
+	}
+	d.Add(obs(FieldIP, "10.0.0.1", "arp", 1, t0, 0))
+	d.Add(obs(FieldLatency, "1ms", "icmp", 1, t0.Add(10*time.Second), time.Second)) // expired, still counts
+	at, source, ok := d.LastContact()
+	if !ok || source != "icmp" || !at.Equal(t0.Add(10*time.Second)) {
+		t.Fatalf("contact = %v %q %v", at, source, ok)
+	}
+	if !Direct("arp") || Direct("oui") || Direct("unknown") {
+		t.Fatal("Direct classification wrong")
+	}
+	d.Add(obs(FieldHostname, "h", "mdns", 0.9, t0.Add(10*time.Second), 0))
+	d.Add(obs(FieldIP, "10.0.0.1", "arp", 1, t0.Add(10*time.Second), 0))
+	if _, source, _ := d.LastContact(); source != "arp" {
+		t.Fatalf("same instant should be settled by source priority, got %q", source)
+	}
+}

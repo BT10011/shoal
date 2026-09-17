@@ -71,7 +71,7 @@ The value is **transparency and learning**: seeing how ARP, DNS, mDNS/Bonjour, N
 |---|---|---|
 | Language | Go (latest stable) | goroutines map naturally to probes; single static binary |
 | TUI loop | `github.com/charmbracelet/bubbletea` **v1.3.10** | Pinned to the version TideUI v0.2.2 requires. Do not jump to v2 until TideUI does. |
-| Widgets | `github.com/charmbracelet/bubbles` v0.21.x | textinput for the Phase 3 filter (last line compatible with Bubble Tea v1). *Not yet a dependency:* Phase 0 renders the table, progress bars and log as plain strings through TideUI rows/styles, which keeps one theme and one line-width rule. |
+| Widgets | `github.com/charmbracelet/bubbles` **v0.21.1** | Only `textinput`, for the Phase 3 filter; it pins the same Bubble Tea and Lipgloss versions as TideUI. Everything else (table, progress bars, log, manual) is plain strings through TideUI rows and styles, which keeps one theme and one line-width rule. Added 2026-09-18. |
 | Styling | `github.com/charmbracelet/lipgloss` **v1.1.0** | Pinned to the version TideUI v0.2.2 requires. |
 | Themed chrome | `github.com/allisonhere/tideui` **v0.2.2** | Panes, status bar, modals, theme picker. Licence verified 2026-09-16: **MIT**. Credit in README. Do not "Tide"-brand this project. |
 | Routing table | `golang.org/x/net/route` | pure Go; reads the BSD/macOS routing socket to find the default gateway. Linux reads `/proc/net/route`. |
@@ -297,13 +297,68 @@ Windows and Samba machines — and the RTT column is live.
 - Active mDNS service discovery — shoal never asks `_services._dns-sd._udp.local` itself, so on a quiet network `service` fills only when another device browses.
 - ARP round trips, to contrast a layer 2 answer with ICMP's layer 3 one. The sweep keeps no per-address timings yet.
 
-### Phase 3 — Diagnostic UI polish
-- Sorting (`s` cycle key, `S` reverse), `/` live filter (substring; glob if `*?[` present).
-- Detail view: facts grouped by field → source, method, age, TTL, confidence; `x` toggles raw packet/hex view.
-- Freshness colouring (recent / stale / not answering).
-- Rescan (`r`), cancel scan (`c`).
-- Responsive layout for small terminals (tabbed mode).
-- The three chrome features below. They are what make the TUI navigable without documentation, so treat them as part of the phase rather than polish to drop if time runs short.
+### Phase 3 — Diagnostic UI polish ✅ *completed 2026-09-18*
+- ✅ Sorting (`s` cycle key, `S` reverse), `/` live filter (substring; glob if `*?[` present).
+- ✅ Detail view: facts grouped by field → source, method, age, TTL, confidence; `x` toggles raw packet/hex view.
+- ✅ Freshness colouring (recent / stale / not answering).
+- ✅ Rescan (`r`), cancel scan (`c`).
+- ✅ Responsive layout for small terminals (tabbed mode).
+- ✅ The three chrome features below. They are what make the TUI navigable without documentation, so treat them as part of the phase rather than polish to drop if time runs short.
+
+*Outcome and decisions recorded during the phase:*
+
+- **Scans are now a first-class engine concept.** `Engine.Rescan` cancels
+  the running discoverers, waits for them to release their sockets, and
+  runs every discoverer again under a fresh scan; it also re-enqueues every
+  known device to every enricher whose trigger field it has, so names and
+  round trips are refreshed and an expired DNS or mDNS name comes back.
+  `Engine.Cancel` stops the discoverers and empties the enricher queues; a
+  lookup already waiting on a reply finishes on its own timeout. `Status`
+  carries the scan number and start time. **Devices are never forgotten by
+  a rescan** (principle 3: observations, not overwrites) — new answers sit
+  beside the old with fresh timestamps, which is what makes freshness
+  visible. Phase 4's "device missing" events should key off the same scan
+  boundaries.
+- **Freshness is judged on direct contact only.** `model.Direct(source)`
+  names the probes that exchange packets with the device (arp, neigh, mdns,
+  nbns, icmp, netif, ports); `Device.LastContact()` is the newest
+  observation from one of them, expired or not. A resolver, the OUI table
+  or the store answering says nothing about whether the device is there.
+  The classes: *fresh* — contact since the current scan began; *stale* —
+  not yet, scan still running (or cancelled/failed, which leave addresses
+  unasked); *not answering* — the scan settled (every sweeping discoverer
+  done and every enricher queue empty) without contact; *unheard* — nothing
+  has ever exchanged packets with it. Marks: blank, `?`, `✗`, `-`; colours
+  normal, muted, error, muted. The details pane states the reasoning in a
+  sentence naming the probe and time.
+- **Tabbed layout** below 80 columns or 16 rows. Tabs carry no hints (a
+  hint would truncate the title in a third of the width); any pane header
+  hint that does not fit next to its title is dropped, and the mode text
+  moves to the first line of the hood pane instead.
+- **Status bar** left: DEMO badge or interface + subnet (subnet dropped in
+  tabbed mode), device count or filter match count, scan label. Probe
+  progress is no longer repeated there; the mode string ("arp sweep · icmp
+  dgram") lives in the "Under the hood" header.
+- **Key bar** drops whole entries, least important first (theme, rescan,
+  details, sort, filter, move, quit, help), and never truncates a word. At
+  80 columns with the subnet shown it keeps sort, help and quit; at 120 it
+  keeps everything but theme. It changes with focus: details pane, filter
+  editing and the log tab each show their own bindings.
+- **Enter** focuses the details pane (scroll it with the movement keys),
+  **Esc** returns to the table or clears the filter, **Tab** cycles the two
+  panes (three when tabbed). The filter input keeps ↑↓ working on the table
+  so a device can be picked while typing. The pattern is matched against
+  the device key and every live value of every field, so services and flags
+  filter too.
+- **Theme choice lasts for the session** (`--theme` sets the initial one);
+  persisting it waits for config (§4). The picker is TideUI's, rendered as
+  a soft panel with the `shoal` prefix.
+- **Help** is a written manual (`internal/ui/help.go`), wrapped and
+  scrolled in-app, covering panes, the two probe kinds, columns, provenance,
+  freshness, scans, filter and sort, keys, and where `docs/protocols/` is.
+- Hex view: 16, 8 or 4 bytes per line depending on pane width, capped at
+  1 KiB per observation with a trailer saying how much was left out. Values
+  with no raw packet (a table lookup, the store's own flags) say so.
 
 #### Key bar — always visible
 
@@ -422,7 +477,7 @@ plain words what that means and which probe saw it.
 
 - **Layout:** device table (main, widest) · details pane · scan/progress panel · event log · bottom key bar. Use a TideUI layout mode; fall back to tabbed on small terminals.
 - **Default columns:** IP · MAC · Hostname · Vendor · RTT · (later) Type · First seen · Last seen. Column set configurable later.
-- **Keys:** `↑/↓ j/k` move · `Enter` details · `/` filter · `Esc` clear/close · `s`/`S` sort · `r` rescan · `c` cancel · `t` theme · `?` help · `q` quit.
+- **Keys:** `↑/↓ j/k` move · `PgUp/PgDn g G` page and ends · `Enter` focus details · `Tab` next pane · `/` filter · `Esc` back/clear/close · `s`/`S` sort · `x` raw packets · `r` rescan · `c` cancel · `t` theme · `?` help · `q` quit.
 - **Key bar:** always visible, one line, the basic bindings only; never wraps at 80 columns.
 - **Theme picker (`t`):** previews each theme live as the highlight moves; `Enter` commits, `Esc` restores the previous theme.
 - **Help (`?`):** a scrollable manual, not a key list — panes, probes, columns, provenance, keys, and a pointer to `docs/protocols/`.

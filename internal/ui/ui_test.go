@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,7 @@ func sized(t *testing.T, w, h int) (*app, *store.Memory) {
 			{Probe: "store", Kind: engine.KindInfo, Message: "hostname conflict", At: t0},
 		},
 		Status: engine.Status{
+			Scan: 1, ScanStarted: t0,
 			Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateRunning, Done: 20, Total: 254}},
 			Enrichers:   []engine.EnricherStatus{{Name: "rdns", Running: 1, Queued: 2, Completed: 3}},
 		},
@@ -63,15 +65,150 @@ func sized(t *testing.T, w, h int) (*app, *store.Memory) {
 	return a, st
 }
 
+func keys(devs []model.DeviceSnapshot) []string {
+	out := make([]string, len(devs))
+	for i, d := range devs {
+		out[i] = d.Key
+	}
+	return out
+}
+
 func TestSortByIPPutsAddresslessLast(t *testing.T) {
 	st := seededStore(t)
-	sorted := sortByIP(st.Devices())
-	if len(sorted) != 3 || sorted[0].Key != "mac-a" || sorted[1].Key != "mac-b" || sorted[2].Key != "mac-c" {
-		keys := make([]string, len(sorted))
-		for i, d := range sorted {
-			keys[i] = d.Key
+	if got := keys(sortDevices(st.Devices(), sortState{}, t0)); strings.Join(got, " ") != "mac-a mac-b mac-c" {
+		t.Fatalf("order = %v", got)
+	}
+}
+
+func TestSortByColumnAndReverse(t *testing.T) {
+	st := seededStore(t)
+	for _, o := range []model.Observation{
+		obs("mac-a", model.FieldLatency, "10.5ms", "icmp", 1),
+		obs("mac-b", model.FieldLatency, "2ms", "icmp", 1),
+		obs("mac-c", model.FieldHostname, "alpha", "mdns", 0.9),
+	} {
+		if err := st.Apply(o); err != nil {
+			t.Fatal(err)
 		}
-		t.Fatalf("order = %v", keys)
+	}
+	col := func(f model.Field) int {
+		for i, c := range columns {
+			if c.field == f {
+				return i
+			}
+		}
+		t.Fatalf("no column for %s", f)
+		return -1
+	}
+	cases := []struct {
+		name string
+		st   sortState
+		want string
+	}{
+		{"ip", sortState{col: col(model.FieldIP)}, "mac-a mac-b mac-c"},
+		{"ip reversed keeps addressless last", sortState{col: col(model.FieldIP), reverse: true}, "mac-b mac-a mac-c"},
+		{"hostname", sortState{col: col(model.FieldHostname)}, "mac-c mac-b mac-a"},
+		{"hostname reversed", sortState{col: col(model.FieldHostname), reverse: true}, "mac-b mac-c mac-a"},
+		{"rtt numeric not lexical", sortState{col: col(model.FieldLatency)}, "mac-b mac-a mac-c"},
+		{"rtt reversed", sortState{col: col(model.FieldLatency), reverse: true}, "mac-a mac-b mac-c"},
+	}
+	for _, c := range cases {
+		if got := strings.Join(keys(sortDevices(st.Devices(), c.st, t0)), " "); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}) // MAC is dropped at this width; HOSTNAME is next
+	if a.sort.col != 2 || !strings.Contains(ansi.Strip(a.View()), "HOSTNAME ▾") {
+		t.Fatalf("s should sort by the next column and mark the header; sort=%+v\n%s", a.sort, ansi.Strip(a.View()))
+	}
+	if got := strings.Join(keys(a.devices), " "); got != "mac-b mac-a mac-c" {
+		t.Fatalf("table order by hostname = %q", got)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	if !a.sort.reverse || !strings.Contains(ansi.Strip(a.View()), "HOSTNAME ▴") {
+		t.Fatal("S should reverse and flip the arrow")
+	}
+}
+
+func TestFilterMatchesValuesSubstringOrGlob(t *testing.T) {
+	st := seededStore(t)
+	match := func(pattern string) string {
+		f := filter{pattern: pattern}
+		var got []string
+		for _, d := range st.Devices() {
+			if f.matches(d, t0) {
+				got = append(got, d.Key)
+			}
+		}
+		return strings.Join(got, " ")
+	}
+	cases := map[string]string{
+		"":             "mac-a mac-b mac-c",
+		"SYN":          "mac-b", // case-insensitive, hostname
+		"_smb":         "mac-b", // service value
+		"Synology Inc": "mac-b", // vendor
+		"192.168.1.":   "mac-a mac-b",
+		"192.168.1.*":  "mac-a mac-b", // glob
+		"*.1":          "mac-a",       // glob must match the whole value
+		"mac-c":        "mac-c",       // the key itself
+		"nomatch":      "",
+	}
+	for pattern, want := range cases {
+		if got := match(pattern); got != want {
+			t.Errorf("%q: got %q want %q", pattern, got, want)
+		}
+	}
+}
+
+func TestFilterKeysNarrowLiveThenKeepOrClear(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if !a.filter.editing {
+		t.Fatal("/ should start editing")
+	}
+	for _, r := range "syn" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(a.devices) != 1 || a.selected != "mac-b" {
+		t.Fatalf("live filter: %v selected %q", keys(a.devices), a.selected)
+	}
+	plain := ansi.Strip(a.View())
+	for _, want := range []string{"/syn", "1 of 3 match", "⏎ keep", "esc clear"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("editing view missing %q\n%s", want, plain)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}) // typed into the filter, not quit
+	if a.filter.pattern != "synq" {
+		t.Fatalf("pattern = %q", a.filter.pattern)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.filter.editing || !a.filter.active() || len(a.devices) != 1 {
+		t.Fatalf("enter should keep the filter: editing=%v pattern=%q shown=%d", a.filter.editing, a.filter.pattern, len(a.devices))
+	}
+	plain = ansi.Strip(a.View())
+	if !strings.Contains(plain, "/syn  1 of 3") || !strings.Contains(plain, "Devices") || !strings.Contains(plain, " 1/3") {
+		t.Errorf("kept filter should show in the status bar and pane hint\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.filter.active() || len(a.devices) != 3 {
+		t.Fatal("esc should clear the filter")
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "zzz" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if !strings.Contains(ansi.Strip(a.View()), "nothing matches zzz") {
+		t.Error("an empty result should say so")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.filter.editing || a.filter.active() {
+		t.Fatal("esc while editing clears and closes")
 	}
 }
 
@@ -148,13 +285,19 @@ func TestViewShowsDevicesDetailsAndLog(t *testing.T) {
 	for _, want := range []string{
 		"Devices", "Details", "Under the hood",
 		"192.168.1.1", "192.168.1.20", "synology.local !", "Synology Inc.",
-		"mdns said synology.local", "nas.lan  (disagrees)", "conf 0.9", "5s ago",
+		"mdns said synology.local", "conf 0.9", "5s ago",
 		"arp    ", "20/254", "running", "rdns   1 running · 2 queued · 3 done",
 		"who-has 192.168.1.20", "hostname conflict",
 		"DEMO", "3 devices", "q quit",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("view missing %q\n%s", want, plain)
+		}
+	}
+	details := ansi.Strip(joinLines(a.renderDetails(80)))
+	for _, want := range []string{"nas.lan  (disagrees)", "rdns · conf 0.7", "heard from directly 5s ago via arp, since scan 1 began"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q\n%s", want, details)
 		}
 	}
 }
@@ -355,5 +498,434 @@ func TestBarBrightnessLevelsAreDistinct(t *testing.T) {
 	}
 	if st.bright.GetForeground() == st.mid.GetForeground() || !st.bright.GetBold() {
 		t.Fatal("peak flare must be a distinct colour and bold")
+	}
+}
+
+func TestFreshnessFollowsScans(t *testing.T) {
+	st := seededStore(t)
+	dev, _ := st.Get("mac-b")
+	if err := st.Apply(obs("mac-d", model.FieldHostname, "ghost.lan", "rdns", 0.7)); err != nil {
+		t.Fatal(err)
+	}
+	ghost, _ := st.Get("mac-d")
+
+	scan2 := t0.Add(time.Minute)
+	running := engine.Status{Scan: 2, ScanStarted: scan2,
+		Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateRunning, Total: 254, Done: 3}}}
+	done := engine.Status{Scan: 2, ScanStarted: scan2,
+		Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateDone, Total: 254, Done: 254}},
+		Enrichers:   []engine.EnricherStatus{{Name: "icmp"}}}
+	doneButBusy := done
+	doneButBusy.Enrichers = []engine.EnricherStatus{{Name: "icmp", Queued: 1}}
+	cancelled := engine.Status{Scan: 2, ScanStarted: scan2,
+		Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateCancelled, Total: 254, Done: 9}}}
+
+	cases := []struct {
+		name string
+		st   engine.Status
+		want freshness
+	}{
+		{"first scan", engine.Status{Scan: 1, ScanStarted: t0}, fresh},
+		{"no scan yet", engine.Status{}, fresh},
+		{"scan 2 running", running, stale},
+		{"scan 2 done, lookups pending", doneButBusy, stale},
+		{"scan 2 settled", done, notAnswering},
+		{"scan 2 cancelled", cancelled, stale},
+	}
+	for _, c := range cases {
+		if got := classify(dev, c.st); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	if got := classify(ghost, done); got != unheard {
+		t.Errorf("resolver-only device = %v, want unheard", got)
+	}
+
+	// Heard from during scan 2 by any direct probe: fresh again.
+	if err := st.Apply(model.Observation{DeviceKey: "mac-b", Field: model.FieldLatency, Value: "3ms", Source: "icmp", Method: "echo reply", Confidence: 1, At: scan2.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	dev, _ = st.Get("mac-b")
+	if got := classify(dev, done); got != fresh {
+		t.Errorf("after icmp reply = %v, want fresh", got)
+	}
+	// A resolver answering during scan 2 is not contact.
+	if err := st.Apply(model.Observation{DeviceKey: "mac-a", Field: model.FieldHostname, Value: "gw.lan", Source: "rdns", Method: "PTR", Confidence: 0.7, At: scan2.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	gw, _ := st.Get("mac-a")
+	if got := classify(gw, done); got != notAnswering {
+		t.Errorf("after rdns only = %v, want notAnswering", got)
+	}
+
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(Batch{Devices: st.Devices(), Status: done, At: scan2.Add(10 * time.Second)})
+	if a.selected != "mac-b" {
+		t.Fatal("setup")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyUp}) // mac-a, which did not answer
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "✗ 192.168.1.1 ") {
+		t.Errorf("silent device should carry the ✗ mark\n%s", plain)
+	}
+	if details := ansi.Strip(joinLines(a.renderDetails(100))); !strings.Contains(details, "✗ did not answer scan 2, which has finished; last contact 1m ago via arp") {
+		t.Errorf("details should explain the freshness\n%s", details)
+	}
+	if !strings.Contains(plain, "  192.168.1.20 ") {
+		t.Errorf("answering device should have a blank mark\n%s", plain)
+	}
+}
+
+type blockingDiscoverer struct{}
+
+func (blockingDiscoverer) Name() string { return "arp" }
+func (blockingDiscoverer) Run(ctx context.Context, _ netif.Interface, _ engine.Emit, report engine.Report) error {
+	report(engine.ProbeEvent{Kind: engine.KindProgress, Done: 1, Total: 2})
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRescanAndCancelKeysDriveTheEngine(t *testing.T) {
+	st := store.NewMemory()
+	eng := engine.New(st, netif.Interface{})
+	if err := eng.AddDiscoverer(blockingDiscoverer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+	a := newApp(Options{Store: st, Engine: eng, Theme: "nord"})
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	wait := func(what string, cond func(engine.Status) bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond(eng.Status()) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	wait("scan 1", func(s engine.Status) bool { return s.Scan == 1 && s.Discoverers[0].Total == 2 })
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	wait("cancelled", func(s engine.Status) bool { return s.Discoverers[0].State == engine.StateCancelled })
+	a.Update(Batch{Status: eng.Status(), At: t0})
+	if got := a.scanLabel(); got != "scan 1 cancelled" {
+		t.Fatalf("label = %q", got)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	wait("scan 2", func(s engine.Status) bool { return s.Scan == 2 && s.Discoverers[0].State == engine.StateRunning })
+	a.Update(Batch{Status: eng.Status(), At: t0})
+	if got := a.scanLabel(); got != "scan 2 running" {
+		t.Fatalf("label = %q", got)
+	}
+}
+
+func TestScanLabel(t *testing.T) {
+	a, _ := sized(t, 100, 30)
+	set := func(ds []engine.DiscovererStatus, es []engine.EnricherStatus) {
+		a.status = engine.Status{Scan: 3, ScanStarted: t0, Discoverers: ds, Enrichers: es}
+	}
+	a.status = engine.Status{}
+	if got := a.scanLabel(); got != "starting" {
+		t.Errorf("before start: %q", got)
+	}
+	set([]engine.DiscovererStatus{{State: engine.StateRunning, Total: 254, Done: 1}}, nil)
+	if got := a.scanLabel(); got != "scan 3 running" {
+		t.Errorf("running: %q", got)
+	}
+	set([]engine.DiscovererStatus{{State: engine.StateDone, Total: 254, Done: 254}}, []engine.EnricherStatus{{Running: 1}})
+	if got := a.scanLabel(); got != "scan 3 finishing" {
+		t.Errorf("finishing: %q", got)
+	}
+	set([]engine.DiscovererStatus{{State: engine.StateDone, Total: 254, Done: 254}, {State: engine.StateRunning}}, []engine.EnricherStatus{{}})
+	if got := a.scanLabel(); got != "scan 3 done" {
+		t.Errorf("done with a listener still up: %q", got)
+	}
+	set([]engine.DiscovererStatus{{State: engine.StateRunning}}, nil)
+	if got := a.scanLabel(); got != "scan 3 listening" {
+		t.Errorf("listener only: %q", got)
+	}
+	set([]engine.DiscovererStatus{{State: engine.StateFailed, Total: 254}}, nil)
+	if got := a.scanLabel(); got != "scan 3 failed" {
+		t.Errorf("failed: %q", got)
+	}
+}
+
+func TestKeyBarDropsWholeEntriesRatherThanWrapping(t *testing.T) {
+	for _, size := range [][2]int{{120, 40}, {100, 30}, {80, 24}} {
+		a, _ := sized(t, size[0], size[1])
+		lines := strings.Split(ansi.Strip(a.View()), "\n")
+		bar := lines[len(lines)-1]
+		if w := lipgloss.Width(bar); w != size[0] {
+			t.Errorf("%v: status line is %d wide", size, w)
+		}
+		if !strings.Contains(bar, "? help") || !strings.Contains(bar, "q quit") {
+			t.Errorf("%v: help and quit must always be in the key bar: %q", size, bar)
+		}
+		if !strings.Contains(bar, "3 devices") || !strings.Contains(bar, "scan 1 running") {
+			t.Errorf("%v: status text missing: %q", size, bar)
+		}
+		for _, b := range tableBindings {
+			entry := b.key + " " + b.label
+			if strings.Contains(bar, entry) {
+				continue
+			}
+			// Absent entirely is fine; a truncated fragment is not.
+			for i := len(entry) - 1; i > len(b.key)+1; i-- {
+				if strings.HasSuffix(strings.TrimRight(bar, " "), entry[:i]) {
+					t.Errorf("%v: key bar truncated %q to %q", size, entry, entry[:i])
+				}
+			}
+		}
+	}
+	a, _ := sized(t, 140, 40)
+	bar := ansi.Strip(a.View())
+	for _, b := range tableBindings {
+		if !strings.Contains(bar, b.key+" "+b.label) {
+			t.Errorf("140 columns should fit every binding, missing %q", b.key+" "+b.label)
+		}
+	}
+	a, _ = sized(t, 120, 40)
+	bar = ansi.Strip(a.View())
+	shown := 0
+	for _, b := range tableBindings {
+		if strings.Contains(bar, b.key+" "+b.label) {
+			shown++
+		}
+	}
+	if shown < 7 || strings.Contains(bar, "t theme") {
+		t.Errorf("120 columns should fit all but the theme binding, the least important: %q", bar)
+	}
+	if got := keyBar(a.renderer.Styles, tableBindings, 5); got != "" {
+		t.Errorf("no room: %q", got)
+	}
+}
+
+func TestThemePickerPreviewsLiveAndRestoresOnEsc(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	original := a.renderer.Styles.Theme.Name
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	if !a.picker.Opened() {
+		t.Fatal("t should open the picker")
+	}
+	if plain := ansi.Strip(a.View()); !strings.Contains(plain, "shoal") || !strings.Contains(plain, "theme") || !strings.Contains(plain, "esc revert") {
+		t.Errorf("picker modal missing\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	previewed := a.renderer.Styles.Theme.Name
+	if previewed == original {
+		t.Fatal("moving the highlight should re-render in the previewed theme")
+	}
+	if a.theme != original {
+		t.Fatal("preview must not confirm")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.picker.Opened() || a.renderer.Styles.Theme.Name != original || a.theme != original {
+		t.Fatalf("esc should close and restore %s, got %s", original, a.renderer.Styles.Theme.Name)
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.picker.Opened() || a.theme == original || a.renderer.Styles.Theme.Name != a.theme {
+		t.Fatalf("enter should keep the highlighted theme: confirmed %s rendering %s", a.theme, a.renderer.Styles.Theme.Name)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.renderer.Styles.Theme.Name != a.theme {
+		t.Fatal("esc after a confirmed change should restore the confirmed theme, not the original")
+	}
+}
+
+func TestHelpIsAScrollableManual(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	if !a.help.open {
+		t.Fatal("? should open help")
+	}
+	plain := ansi.Strip(a.View())
+	for _, want := range []string{"HOW TO READ THIS SCREEN", "Shoal finds the devices", "esc close", "of "} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("help missing %q\n%s", want, plain)
+		}
+	}
+	lines := a.helpLines()
+	if len(lines) < 100 {
+		t.Fatalf("manual is only %d lines; it should be a manual, not a key list", len(lines))
+	}
+	width := a.helpPanelWidth() - 4
+	for i, l := range lines {
+		if w := lipgloss.Width(l); w > width {
+			t.Errorf("line %d is %d wide, panel text width %d: %q", i, w, width, ansi.Strip(l))
+		}
+	}
+	joined := ansi.Strip(strings.Join(lines, "\n"))
+	for _, want := range []string{"THE PANES", "PROBES: DISCOVERERS AND ENRICHERS", "THE COLUMNS", "READING THE DETAILS PANE", "FRESHNESS", "SCANS", "FILTER AND SORT", "KEYS", "GOING DEEPER", "docs/protocols/", "shoal probe arp", "Confidence"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("manual lacks %q", want)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if a.help.scroll.Offset() != 1 {
+		t.Fatalf("j should scroll, offset %d", a.help.scroll.Offset())
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if off := a.help.scroll.Offset(); off != len(lines)-a.helpRows() {
+		t.Fatalf("G should stop at the last page: offset %d of %d lines, %d rows", off, len(lines), a.helpRows())
+	}
+	if a.cursor != 0 {
+		t.Fatal("scrolling help must not move the table")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if a.help.open {
+		t.Fatal("q should close help, not quit")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.help.open {
+		t.Fatal("esc should close help")
+	}
+	// Small terminals still get a readable manual.
+	a, _ = sized(t, 40, 12)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	for i, l := range strings.Split(a.View(), "\n") {
+		if w := lipgloss.Width(l); w != 40 {
+			t.Errorf("40x12 help: line %d is %d wide", i, w)
+		}
+	}
+}
+
+func TestTabbedLayoutOnSmallTerminals(t *testing.T) {
+	a, _ := sized(t, 60, 18)
+	if !a.tabbed() {
+		t.Fatal("60x18 should be tabbed")
+	}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "> Devices") || !strings.Contains(plain, "  Details") || !strings.Contains(plain, "Under the") {
+		t.Errorf("tab bar missing\n%s", plain)
+	}
+	if !strings.Contains(plain, "192.168.1.20") || strings.Contains(plain, "arp said") {
+		t.Errorf("devices tab should show the table only\n%s", plain)
+	}
+	if strings.Contains(plain, "Detail 1") {
+		t.Errorf("a tab title must not be truncated by a hint\n%s", plain)
+	}
+	narrow, _ := sized(t, 80, 24)
+	if plain := ansi.Strip(narrow.View()); !strings.Contains(plain, "Under the hood") || !strings.Contains(plain, "simulated, no packets sent") {
+		t.Errorf("a hint that does not fit the header should move into the pane, not truncate the title\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	plain = ansi.Strip(a.View())
+	if a.focus != paneDetails || !strings.Contains(plain, "> Details") || !strings.Contains(plain, "first seen") {
+		t.Errorf("tab should show details\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	plain = ansi.Strip(a.View())
+	if a.focus != paneHood || !strings.Contains(plain, "who-has 192.168.1.20") || !strings.Contains(plain, "simulated, no packets sent") {
+		t.Errorf("second tab should show the log, led by the mode\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if a.focus != paneDevices {
+		t.Fatal("tab should wrap to devices")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.focus != paneDetails {
+		t.Fatal("enter should open details")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.focus != paneDevices {
+		t.Fatal("esc should return to devices")
+	}
+
+	wide, _ := sized(t, 120, 40)
+	if wide.tabbed() {
+		t.Fatal("120x40 must not be tabbed")
+	}
+	wide.focus = paneHood
+	wide.View()
+	if wide.focus != paneDevices {
+		t.Fatal("the log pane cannot hold focus in the three-pane layout")
+	}
+	wide.Update(tea.KeyMsg{Type: tea.KeyTab})
+	wide.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if wide.focus != paneDevices {
+		t.Fatal("tab cycles two panes when all three are visible")
+	}
+}
+
+func TestRawToggleShowsHexDump(t *testing.T) {
+	a, st := sized(t, 120, 40)
+	raw := []byte("\x00\x01\x08\x00\x06\x04\x00\x02ARP reply bytes here")
+	if err := st.Apply(model.Observation{DeviceKey: "mac-a", Field: model.FieldIP, Value: "192.168.1.1", Source: "arp", Method: "ARP reply", Confidence: 1, At: t0, Raw: raw}); err != nil {
+		t.Fatal(err)
+	}
+	a.Update(Batch{Devices: st.Devices(), At: t0})
+	plain := ansi.Strip(a.View())
+	if strings.Contains(plain, "0000  ") || !strings.Contains(plain, "x shows the raw packet") {
+		t.Errorf("raw view should be off by default with a hint\n%s", plain)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	plain = ansi.Strip(a.View())
+	if !strings.Contains(plain, "raw: 28 bytes") || !strings.Contains(plain, "0000  00 01 08 00 06 04 00 02  ........") {
+		t.Errorf("the pane at this width should dump 8 bytes per line\n%s", plain)
+	}
+	details := ansi.Strip(joinLines(a.renderDetails(100)))
+	for _, want := range []string{"raw: 28 bytes", "0000  00 01 08 00 06 04 00 02  41 52 50 20 72 65 70 6c  ........ARP repl", "0010  79 20 62 79 74 65 73 20  68 65 72 65", "(no raw packet kept for this value)"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("hex view missing %q\n%s", want, details)
+		}
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if strings.Contains(ansi.Strip(a.View()), "0000  ") {
+		t.Error("x again should hide the dump")
+	}
+}
+
+func TestHexDump(t *testing.T) {
+	b := make([]byte, 20)
+	for i := range b {
+		b[i] = byte(0x41 + i)
+	}
+	wide := hexDump(b, 80)
+	if len(wide) != 2 || wide[0] != "0000  41 42 43 44 45 46 47 48  49 4a 4b 4c 4d 4e 4f 50  ABCDEFGHIJKLMNOP" || wide[1] != "0010  51 52 53 54                                       QRST" {
+		t.Errorf("16 per line:\n%q", wide)
+	}
+	if narrow := hexDump(b, 50); len(narrow) != 3 || narrow[0] != "0000  41 42 43 44 45 46 47 48  ABCDEFGH" {
+		t.Errorf("8 per line:\n%q", narrow)
+	}
+	if tiny := hexDump(b, 30); len(tiny) != 5 || tiny[4] != "0010  51 52 53 54  QRST" {
+		t.Errorf("4 per line:\n%q", tiny)
+	}
+	big := make([]byte, rawLimit+100)
+	lines := hexDump(big, 80)
+	if len(lines) != rawLimit/16+1 || lines[len(lines)-1] != "… 100 more bytes not shown" {
+		t.Errorf("cap: %d lines, last %q", len(lines), lines[len(lines)-1])
+	}
+}
+
+func TestDetailsFocusScrollsAndKeyBarChanges(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.focus != paneDetails {
+		t.Fatal("enter focuses details")
+	}
+	bar := ansi.Strip(a.View())
+	if !strings.Contains(bar, "esc back") || !strings.Contains(bar, "x raw") {
+		t.Errorf("details key bar missing\n%s", bar)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if a.details.Offset() != 1 || a.cursor != 0 {
+		t.Fatal("down scrolls details")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.focus != paneDevices {
+		t.Fatal("esc returns")
 	}
 }

@@ -4,31 +4,38 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/allisonhere/tideui"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 )
 
 const (
 	sidebarRatio = 0.56
 	upperRatio   = 0.5
+
+	// Below either of these the three panes cannot share the screen, so
+	// the layout switches to one pane at a time behind a tab bar.
+	tabbedBelowWidth  = 80
+	tabbedBelowHeight = 16
 )
 
 type box struct{ cols, rows int }
 
 type panes struct{ devices, details, hood box }
 
-// geometry mirrors tideui's StackedRight arithmetic so the app knows how
-// many content lines and columns each pane really has.
-func geometry(width, height int) panes {
+// geometry mirrors tideui's arithmetic so the app knows how many content
+// lines and columns each pane really has. In tabbed mode every pane gets
+// the whole width and everything below the tab bar.
+func geometry(width, height int, tabbed bool) panes {
 	mainHeight := max(1, height-1)
+	if tabbed {
+		b := box{cols: max(1, width), rows: max(1, mainHeight-1)}
+		return panes{devices: b, details: b, hood: b}
+	}
 	sidebarW := ratioSize(width, sidebarRatio)
 	rightW := width - sidebarW
 	upperH := ratioSize(mainHeight, upperRatio)
@@ -105,394 +112,11 @@ func ipKey(ip string) (uint32, bool) {
 	return binary.BigEndian.Uint32(p), true
 }
 
-// sortByIP orders devices numerically by resolved IP, then by key.
-func sortByIP(devs []model.DeviceSnapshot) []model.DeviceSnapshot {
-	now := time.Now()
-	type keyed struct {
-		dev   model.DeviceSnapshot
-		ip    uint32
-		hasIP bool
-	}
-	ks := make([]keyed, len(devs))
-	for i, d := range devs {
-		ks[i] = keyed{dev: d}
-		if o, ok := d.ResolvedAt(model.FieldIP, now); ok {
-			ks[i].ip, ks[i].hasIP = ipKey(o.Value)
-		}
-	}
-	sort.SliceStable(ks, func(i, j int) bool {
-		a, b := ks[i], ks[j]
-		if a.hasIP != b.hasIP {
-			return a.hasIP
-		}
-		if a.ip != b.ip {
-			return a.ip < b.ip
-		}
-		return a.dev.Key < b.dev.Key
-	})
-	out := make([]model.DeviceSnapshot, len(ks))
-	for i, k := range ks {
-		out[i] = k.dev
-	}
-	return out
-}
-
-type column struct {
-	title string
-	field model.Field
-	width int // 0 = flexible
-	drop  int // lower is dropped first when the pane is narrow
-}
-
-// The MAC goes first when space is short: it is always in the details pane,
-// while hostname and vendor are what make the overview readable.
-var columns = []column{
-	{title: "IP", field: model.FieldIP, width: 15, drop: 5},
-	{title: "MAC", field: model.FieldMAC, width: 17, drop: 1},
-	{title: "HOSTNAME", field: model.FieldHostname, drop: 4},
-	{title: "VENDOR", field: model.FieldVendor, drop: 3},
-	{title: "RTT", field: model.FieldLatency, width: 7, drop: 2},
-}
-
-const minFlexWidth = 14
-
-// layoutColumns picks the columns that fit in width and sizes the flexible ones.
-func layoutColumns(width int) ([]column, []int) {
-	cols := append([]column(nil), columns...)
-	for {
-		fixed, flex := 0, 0
-		for _, c := range cols {
-			if c.width > 0 {
-				fixed += c.width
-			} else {
-				flex++
-			}
-		}
-		gaps := max(0, len(cols)-1)
-		need := fixed + gaps + flex*minFlexWidth
-		if need <= width || len(cols) <= 1 {
-			widths := make([]int, len(cols))
-			spare := width - fixed - gaps
-			for i, c := range cols {
-				if c.width > 0 {
-					widths[i] = c.width
-				} else {
-					widths[i] = spare / max(1, flex)
-				}
-			}
-			if flex == 0 && len(widths) > 0 {
-				widths[len(widths)-1] += max(0, width-need)
-			}
-			for i := len(widths) - 1; i >= 0; i-- {
-				total := gaps
-				for _, w := range widths {
-					total += w
-				}
-				if total <= width {
-					break
-				}
-				widths[i] = max(1, widths[i]-(total-width))
-			}
-			return cols, widths
-		}
-		lowest := 0
-		for i, c := range cols {
-			if c.drop < cols[lowest].drop {
-				lowest = i
-			}
-		}
-		cols = append(cols[:lowest], cols[lowest+1:]...)
-	}
-}
-
-func (a *app) renderTable(width, rows int) []string {
-	cols, widths := layoutColumns(width)
-	s := a.renderer.Styles
-
-	cells := make([]string, len(cols))
-	for i, c := range cols {
-		cells[i] = fit(c.title, widths[i])
-	}
-	lines := []string{s.Item.Bold(true).Width(width).Render(fit(strings.Join(cells, " "), width))}
-	if len(a.devices) == 0 {
-		lines = append(lines, s.ItemMuted.Width(width).Render(fit("waiting for the first reply…", width)))
-		return lines
-	}
-
-	end := min(len(a.devices), a.top+max(0, rows-1))
-	for i := a.top; i < end; i++ {
-		d := a.devices[i]
-		for j, c := range cols {
-			v := ""
-			if o, ok := d.ResolvedAt(c.field, a.now); ok {
-				v = o.Value
-			}
-			if c.field == model.FieldHostname && d.Conflicting(c.field, a.now) {
-				v += " !"
-			}
-			cells[j] = fit(v, widths[j])
-		}
-		lines = append(lines, a.renderer.RenderRow(tideui.Row{Text: strings.Join(cells, " "), Selected: i == a.cursor}, width))
-	}
-	return lines
-}
-
-var detailOrder = []model.Field{
-	model.FieldIP, model.FieldMAC, model.FieldHostname, model.FieldVendor, model.FieldLatency,
-	model.FieldType, model.FieldService, model.FieldPort, model.FieldFlag,
-}
-
-func (a *app) renderDetails(width int) []string {
-	s := a.renderer.Styles
-	d, ok := a.current()
-	if !ok {
-		return []string{s.ItemMuted.Render(fit("select a device to see how each value was learned", width))}
-	}
-
-	title := d.Key
-	if h, ok := d.ResolvedAt(model.FieldHostname, a.now); ok {
-		title = h.Value + "  " + d.Key
-	}
-	lines := []string{
-		s.DetailTitle.Render(ansi.Truncate(title, max(1, width-2), "…")),
-		s.DetailMeta.Render(fit(fmt.Sprintf("first seen %s · last seen %s (%s)",
-			d.FirstSeen.Format("15:04:05"), d.LastSeen.Format("15:04:05"), ago(a.now, d.LastSeen)), width)),
-	}
-
-	label := s.Item.Bold(true)
-	muted := s.ItemMuted
-	conflict := s.StatusError.Background(s.Theme.Bg)
-	for _, f := range detailOrder {
-		live := d.Live(f, a.now)
-		if len(live) == 0 {
-			continue
-		}
-		lines = append(lines, "")
-		seen := map[string]bool{}
-		for i, o := range live {
-			name := ""
-			if i == 0 {
-				name = string(f)
-			}
-			value := o.Value
-			style := s.Item
-			switch {
-			case !f.MultiValued() && i > 0 && !seen[o.Value]:
-				value += "  (disagrees)"
-				style = conflict
-			case !f.MultiValued() && i > 0:
-				value += "  (agrees)"
-				style = muted
-			}
-			seen[o.Value] = true
-			lines = append(lines, label.Render(fit(name, 10))+" "+style.Render(fit(value, max(1, width-11))))
-			for i, l := range wrap(o.Method, width-4) {
-				prefix := "    "
-				if i == 0 {
-					prefix = "  ← "
-				}
-				lines = append(lines, muted.Render(fit(prefix+l, width)))
-			}
-			lines = append(lines, muted.Render(fit(fmt.Sprintf("    %s · conf %.1f · %s · %s", o.Source, o.Confidence, ago(a.now, o.At), ttl(o, a.now)), width)))
-		}
-	}
-	return lines
-}
-
+// wrap word-wraps s to width. Text narrower than eight cells is not worth
+// wrapping; it is returned whole and truncated by the caller.
 func wrap(s string, width int) []string {
 	if width < 8 {
 		return []string{s}
 	}
 	return strings.Split(ansi.Wordwrap(s, width, ""), "\n")
-}
-
-func (a *app) renderHood(width, rows int) []string {
-	s := a.renderer.Styles
-	var lines []string
-
-	for _, d := range a.status.Discoverers {
-		state := string(d.State)
-		if d.Err != "" {
-			state = "failed: " + d.Err
-		}
-		// A probe that listens has nothing to count towards, so show what it
-		// has heard rather than a denominator that will never arrive.
-		tail := fmt.Sprintf(" %d/%d %s", d.Done, d.Total, state)
-		if d.Total == 0 {
-			tail = fmt.Sprintf(" %d %s", d.Done, state)
-		}
-		barW := width - 7 - lipgloss.Width(tail)
-		if barW < 4 {
-			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))
-			continue
-		}
-		lines = append(lines, s.Item.Render(fit(d.Name, 7))+progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())+s.Item.Render(fit(tail, width-7-barW)))
-	}
-	for _, e := range a.status.Enrichers {
-		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)
-		if e.Failed > 0 {
-			line += fmt.Sprintf(" · %d failed", e.Failed)
-		}
-		lines = append(lines, s.ItemMuted.Render(fit(line, width)))
-	}
-	if len(lines) == 0 {
-		lines = append(lines, s.ItemMuted.Render(fit("no probes running", width)))
-	}
-	rule := "─"
-	if s.PlainUI {
-		rule = "-"
-	}
-	lines = append(lines, s.ItemMuted.Render(strings.Repeat(rule, max(0, width))))
-
-	room := rows - len(lines)
-	if room <= 0 {
-		return lines
-	}
-	start := max(0, len(a.events)-room)
-	for _, ev := range a.events[start:] {
-		lines = append(lines, a.renderEvent(ev, width))
-	}
-	return lines
-}
-
-func (a *app) renderEvent(ev engine.ProbeEvent, width int) string {
-	s := a.renderer.Styles
-	tag, style := "·", s.ItemMuted
-	switch ev.Kind {
-	case engine.KindSent:
-		tag, style = "→", s.Item
-	case engine.KindReceived:
-		tag, style = "←", s.Badge.Background(s.Theme.Bg)
-	case engine.KindError:
-		tag, style = "✗", s.StatusError.Background(s.Theme.Bg)
-	case engine.KindProgress:
-		tag = "…"
-	}
-	if s.PlainUI {
-		switch tag {
-		case "→":
-			tag = ">"
-		case "←":
-			tag = "<"
-		case "✗":
-			tag = "!"
-		default:
-			tag = "-"
-		}
-	}
-	msg := ev.Message
-	if msg == "" && ev.Kind == engine.KindProgress {
-		msg = fmt.Sprintf("%d/%d", ev.Done, ev.Total)
-	}
-	return style.Render(fit(fmt.Sprintf("%s %-5s %s %s", ev.At.Format("15:04:05"), ev.Probe, tag, msg), width))
-}
-
-// Dotted, retro-looking progress bar. While a probe runs, filled cells
-// pick a dense braille glyph by hashing position and tick so the texture
-// shimmers, a few cells flare bright and fade, and a head glyph cycles at
-// the leading edge. Once complete every cell is the full 8-dot glyph so
-// the finished bar is a solid grid with no holes.
-var (
-	dotFilled   = []string{"⣿", "⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽"}
-	dotHead     = []string{"⠁", "⠃", "⠇", "⡇", "⣇", "⣧"}
-	asciiFilled = []string{":", ":", ":", ";"}
-	asciiHead   = []string{"-", "\\", "|", "/"}
-)
-
-// barStyles are the three brightness levels of a running bar: dim at rest,
-// full foreground while a flare fades, accent and bold at its peak. A
-// finished bar is drawn at full foreground.
-type barStyles struct {
-	plain                   bool
-	dim, mid, bright, solid lipgloss.Style
-}
-
-func (a *app) barStyles() barStyles {
-	s := a.renderer.Styles
-	return barStyles{
-		plain:  s.PlainUI,
-		dim:    s.ItemMuted,
-		mid:    s.Item,
-		bright: s.Item.Foreground(s.Theme.Unread).Bold(true),
-		solid:  s.Item,
-	}
-}
-
-// frameEvery is the animation clock for the bar, independent of how fast
-// probes tick, so flares are visible whatever the sweep rate.
-const frameEvery = 100 * time.Millisecond
-
-func (a *app) frame() int {
-	return int(a.now.UnixNano() / int64(frameEvery))
-}
-
-func progressBar(done, total, width, frame int, st barStyles) string {
-	if width < 1 {
-		return ""
-	}
-	filled, head := dotFilled, dotHead
-	if st.plain {
-		filled, head = asciiFilled, asciiHead
-	}
-	cells := 0
-	if total > 0 {
-		cells = min(width, done*width/total)
-	}
-	complete := total > 0 && done >= total
-
-	var b strings.Builder
-	for i := 0; i < cells; i++ {
-		glyph, style := filled[0], st.solid
-		if !complete {
-			glyph = filled[cellHash(i+frame*width)%len(filled)]
-			switch sparkAge(i, frame) {
-			case 0:
-				style = st.bright
-			case 1:
-				style = st.mid
-			default:
-				style = st.dim
-			}
-		}
-		b.WriteString(style.Render(glyph))
-	}
-	rest := width - cells
-	if rest > 0 && done > 0 && !complete {
-		b.WriteString(st.mid.Render(head[frame%len(head)]))
-		rest--
-	}
-	if rest > 0 {
-		b.WriteString(st.dim.Render(strings.Repeat(" ", rest)))
-	}
-	return b.String()
-}
-
-// sparkWindow is how many frames a flare cycle lasts: bright for the
-// first third, fading for the second, dim for the rest.
-const sparkWindow = 6
-
-// sparkAge returns 0 while a cell is freshly lit, 1 while it fades and -1
-// when it is dim. Roughly one cell in two flares per window, each at a
-// different phase so the bar twinkles rather than pulsing in unison.
-func sparkAge(cell, frame int) int {
-	frame += cellHash(cell*104729) % sparkWindow
-	window := frame / sparkWindow
-	if cellHash(cell*7919+window)%2 != 0 {
-		return -1
-	}
-	switch age := frame % sparkWindow; {
-	case age < 2:
-		return 0
-	case age < 4:
-		return 1
-	}
-	return -1
-}
-
-func cellHash(i int) int {
-	x := uint32(i)*2654435761 + 0x9e3779b9
-	x ^= x >> 15
-	x *= 0x85ebca6b
-	x ^= x >> 13
-	return int(x & 0x7fffffff)
 }

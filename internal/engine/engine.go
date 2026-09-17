@@ -92,8 +92,50 @@ type EnricherStatus struct {
 
 // Status is a snapshot of the whole engine.
 type Status struct {
+	// Scan counts runs of the discoverers: 1 for the first, one more for
+	// every rescan, 0 before Start. ScanStarted is when the current one began.
+	Scan        int
+	ScanStarted time.Time
 	Discoverers []DiscovererStatus
 	Enrichers   []EnricherStatus
+}
+
+// Sweeping reports whether a discoverer that counts towards a total is
+// still running: the part of a scan that has an end.
+func (s Status) Sweeping() bool {
+	for _, d := range s.Discoverers {
+		if d.State == StateRunning && d.Total > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Settled reports whether the scan has run its course: every discoverer
+// with a total has finished (not failed or cancelled, which leave addresses
+// unasked) and no enricher has work left. Listeners, which have no total,
+// do not hold it up. A scan that has not yet reported a total is not
+// settled either, since nothing is known about how far it got.
+func (s Status) Settled() bool {
+	swept := false
+	for _, d := range s.Discoverers {
+		if d.Total == 0 {
+			continue
+		}
+		if d.State != StateDone {
+			return false
+		}
+		swept = true
+	}
+	if !swept {
+		return false
+	}
+	for _, e := range s.Enrichers {
+		if e.Running > 0 || e.Queued > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Listener receives every probe event on the goroutine that produced it.
@@ -111,8 +153,21 @@ type Engine struct {
 	enrichers   []*enricher
 	listeners   []Listener
 	started     bool
+	ctx         context.Context // the engine's lifetime; enrichers live this long
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
+
+	scan       *scan // the current or most recent scan; nil before Start
+	rescanning bool  // a rescan is waiting for the previous scan to let go
+}
+
+// scan is one run of every discoverer. Enrichers outlive scans: their worker
+// pools keep running and answer whatever each scan turns up.
+type scan struct {
+	n       int
+	started time.Time
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup // discoverers still running under this scan
 }
 
 // Option configures an Engine.
@@ -179,39 +234,133 @@ func (e *Engine) AddEnricher(en Enricher) error {
 	return nil
 }
 
-// Start launches every discoverer and the enricher worker pools. It returns
+// Start launches the enricher worker pools and the first scan. It returns
 // immediately; Stop cancels and waits.
 func (e *Engine) Start(ctx context.Context) error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.started {
+		e.mu.Unlock()
 		return errors.New("engine already started")
 	}
 	e.started = true
-	ctx, e.cancel = context.WithCancel(ctx)
+	e.ctx, e.cancel = context.WithCancel(ctx)
 
 	for _, en := range e.enrichers {
 		for i := 0; i < en.workers; i++ {
 			e.wg.Add(1)
-			go e.enrichWorker(ctx, en)
+			go e.enrichWorker(e.ctx, en)
 		}
 	}
-	for _, d := range e.discoverers {
-		d.setState(StateRunning, nil)
-		e.wg.Add(1)
-		go e.runDiscoverer(ctx, d)
+	events := e.startScan()
+	e.mu.Unlock()
+	for _, ev := range events {
+		e.publish(ev)
 	}
 	return nil
+}
+
+// startScan launches every discoverer under a fresh per-scan context and,
+// on a rescan, asks the enrichers to look at every known device again so
+// names and round trips are refreshed too, not just the address list. It
+// must be called with e.mu held; the events it returns are published by the
+// caller once the lock is released.
+func (e *Engine) startScan() []ProbeEvent {
+	n := 1
+	if e.scan != nil {
+		n = e.scan.n + 1
+	}
+	ctx, cancel := context.WithCancel(e.ctx)
+	s := &scan{n: n, started: e.now(), cancel: cancel}
+	e.scan = s
+	for _, d := range e.discoverers {
+		d.begin()
+		s.wg.Add(1)
+		e.wg.Add(1)
+		go e.runDiscoverer(ctx, s, d)
+	}
+	if n == 1 {
+		return nil
+	}
+
+	requeued := 0
+	for _, dev := range e.store.Devices() {
+		for _, en := range e.enrichers {
+			for f := range en.triggers {
+				if len(dev.Live(f, s.started)) > 0 {
+					en.enqueue(dev.Key)
+					requeued++
+					break
+				}
+			}
+		}
+	}
+	return []ProbeEvent{{
+		Probe: "scan", Kind: KindInfo, At: s.started,
+		Message: fmt.Sprintf("scan %d: running every discoverer again and re-asking the enrichers about %d known devices (%d lookups)", n, e.store.Len(), requeued),
+	}}
+}
+
+// Rescan stops the current scan, waits for its discoverers to release their
+// sockets, then starts a new one. It returns at once; the new scan shows up
+// in Status when it begins. Devices are never forgotten: a rescan adds fresh
+// observations next to the old ones, which is how a device that has gone
+// quiet becomes visible.
+func (e *Engine) Rescan() {
+	e.mu.Lock()
+	if !e.started || e.ctx.Err() != nil || e.rescanning {
+		e.mu.Unlock()
+		return
+	}
+	e.rescanning = true
+	old := e.scan
+	e.wg.Add(1) // under the lock, so Stop's Wait always covers this goroutine
+	e.mu.Unlock()
+
+	old.cancel()
+	go func() {
+		defer e.wg.Done()
+		old.wg.Wait()
+		e.mu.Lock()
+		e.rescanning = false
+		var events []ProbeEvent
+		if e.ctx.Err() == nil {
+			events = e.startScan()
+		}
+		e.mu.Unlock()
+		for _, ev := range events {
+			e.publish(ev)
+		}
+	}()
+}
+
+// Cancel stops the current scan: discoverers are cancelled and the enricher
+// queues emptied. A lookup already waiting on a reply finishes on its own
+// timeout. Rescan starts afresh afterwards.
+func (e *Engine) Cancel() {
+	e.mu.Lock()
+	if !e.started || e.scan == nil {
+		e.mu.Unlock()
+		return
+	}
+	s := e.scan
+	dropped := 0
+	for _, en := range e.enrichers {
+		dropped += en.clear()
+	}
+	e.mu.Unlock()
+	s.cancel()
+	e.publish(ProbeEvent{Probe: "scan", Kind: KindInfo,
+		Message: fmt.Sprintf("scan %d cancelled: discoverers stopped, %d queued lookups dropped", s.n, dropped)})
 }
 
 // Stop cancels all probes and waits for them to exit.
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	cancel := e.cancel
-	e.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	e.mu.Unlock()
 	e.wg.Wait()
 }
 
@@ -220,6 +369,9 @@ func (e *Engine) Status() Status {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var s Status
+	if e.scan != nil {
+		s.Scan, s.ScanStarted = e.scan.n, e.scan.started
+	}
 	for _, d := range e.discoverers {
 		s.Discoverers = append(s.Discoverers, d.snapshot())
 	}
@@ -314,8 +466,21 @@ func (d *discoverer) setState(s ProbeState, err error) {
 	}
 }
 
-func (e *Engine) runDiscoverer(ctx context.Context, d *discoverer) {
+// begin resets the status for a new scan. Total is kept as a hint: it lets
+// the progress bar start at 0/254 rather than blank, and tells the UI this
+// probe is a sweep with an end, until the first progress event replaces it.
+func (d *discoverer) begin() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.status.State = StateRunning
+	d.status.Done = 0
+	d.status.Err = ""
+	d.status.Message = ""
+}
+
+func (e *Engine) runDiscoverer(ctx context.Context, s *scan, d *discoverer) {
 	defer e.wg.Done()
+	defer s.wg.Done()
 	name := d.Name()
 	report := func(ev ProbeEvent) {
 		if ev.Probe == "" {
@@ -378,6 +543,16 @@ func (en *enricher) enqueue(key string) {
 	case en.wake <- struct{}{}:
 	default:
 	}
+}
+
+// clear empties the queue and reports how many lookups were dropped.
+func (en *enricher) clear() int {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	n := len(en.queue)
+	en.queue = nil
+	en.queued = make(map[string]bool)
+	return n
 }
 
 func (en *enricher) pop() (string, bool) {

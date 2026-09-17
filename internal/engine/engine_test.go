@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -390,4 +391,177 @@ func TestStopCancelsBlockingDiscoverer(t *testing.T) {
 func TestStopBeforeStartIsSafe(t *testing.T) {
 	e := New(store.NewMemory(), netif.Interface{})
 	e.Stop()
+}
+
+func discovererState(e *Engine, i int) ProbeState {
+	return e.Status().Discoverers[i].State
+}
+
+func TestRescanRunsDiscoverersAgainAndRequeuesEnrichers(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	en := newCountingEnricher("oui", 2, model.FieldMAC)
+	if err := e.AddEnricher(en); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+
+	eventually(t, "first scan done", func() bool { return discovererState(e, 0) == StateDone })
+	eventually(t, "enricher settled", settled(e, "oui", 2))
+	first := e.Status()
+	if first.Scan != 1 || first.ScanStarted.IsZero() {
+		t.Fatalf("status after first scan = %+v", first)
+	}
+
+	e.Rescan()
+	eventually(t, "second scan", func() bool { return e.Status().Scan == 2 })
+	second := e.Status()
+	if !second.ScanStarted.After(first.ScanStarted) {
+		t.Fatalf("scan start did not advance: %v then %v", first.ScanStarted, second.ScanStarted)
+	}
+	eventually(t, "second scan done", func() bool { return discovererState(e, 0) == StateDone })
+	eventually(t, "enricher settled again", settled(e, "oui", 4))
+
+	sent := log.filter(func(ev ProbeEvent) bool { return ev.Kind == KindSent && ev.Probe == "arp" })
+	if len(sent) != 4 {
+		t.Fatalf("%d arp requests over two scans, want 4", len(sent))
+	}
+	for _, key := range []string{"mac-1", "mac-2"} {
+		if n := en.callCount(key); n != 2 {
+			t.Errorf("%s enriched %d times, want 2 (once per scan)", key, n)
+		}
+	}
+	infos := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "scan" })
+	if len(infos) != 1 || infos[0].Message != "scan 2: running every discoverer again and re-asking the enrichers about 2 known devices (2 lookups)" {
+		t.Fatalf("scan events = %+v", infos)
+	}
+	if st.Len() != 2 {
+		t.Fatalf("rescan must not forget devices: %d", st.Len())
+	}
+}
+
+func TestRescanWhileRunningRestartsTheScan(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "listen", devices: 1, block: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+
+	eventually(t, "running", func() bool { return discovererState(e, 0) == StateRunning })
+	e.Rescan()
+	e.Rescan() // coalesced while the first is still waiting
+	eventually(t, "second scan running", func() bool {
+		s := e.Status()
+		return s.Scan == 2 && s.Discoverers[0].State == StateRunning
+	})
+	time.Sleep(20 * time.Millisecond)
+	if s := e.Status().Scan; s != 2 {
+		t.Fatalf("scan = %d; a rescan during a rescan must be coalesced", s)
+	}
+}
+
+func TestCancelStopsDiscoverersAndDrainsQueues(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	en := newCountingEnricher("slow", 1, model.FieldMAC)
+	en.delay = 50 * time.Millisecond
+	if err := e.AddEnricher(en); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 6, block: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+
+	eventually(t, "queue built up", func() bool { return enricherStatus(e, "slow").Queued >= 3 })
+	e.Cancel()
+	eventually(t, "discoverer cancelled", func() bool { return discovererState(e, 0) == StateCancelled })
+	if q := enricherStatus(e, "slow").Queued; q != 0 {
+		t.Fatalf("cancel left %d lookups queued", q)
+	}
+	eventually(t, "in-flight lookup finished on its own", func() bool { return enricherStatus(e, "slow").Running == 0 })
+	if got := enricherStatus(e, "slow"); got.Completed+got.Failed >= 6 {
+		t.Fatalf("queued lookups ran anyway: %+v", got)
+	}
+	infos := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "scan" && ev.Kind == KindInfo })
+	if len(infos) != 1 || !strings.HasPrefix(infos[0].Message, "scan 1 cancelled: discoverers stopped, ") {
+		t.Fatalf("cancel events = %+v", infos)
+	}
+	if s := e.Status(); s.Scan != 1 || s.Sweeping() || s.Settled() {
+		t.Fatalf("a cancelled scan is neither sweeping nor settled: %+v", s)
+	}
+
+	e.Rescan()
+	eventually(t, "scan 2 running after cancel", func() bool {
+		s := e.Status()
+		return s.Scan == 2 && s.Discoverers[0].State == StateRunning && s.Discoverers[0].Err == ""
+	})
+}
+
+func TestStopDuringRescanReturns(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "listen", devices: 1, block: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.Rescan()
+	done := make(chan struct{})
+	go func() { e.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return while a rescan was pending")
+	}
+	e.Rescan() // after Stop: must be a no-op, not a panic
+	e.Cancel()
+}
+
+func TestStatusSweepingAndSettled(t *testing.T) {
+	running := DiscovererStatus{Name: "arp", State: StateRunning, Total: 254, Done: 3}
+	done := DiscovererStatus{Name: "arp", State: StateDone, Total: 254, Done: 254}
+	listener := DiscovererStatus{Name: "mdns", State: StateRunning}
+	idle := EnricherStatus{Name: "rdns"}
+	busy := EnricherStatus{Name: "rdns", Queued: 2}
+	cases := []struct {
+		name              string
+		s                 Status
+		sweeping, settled bool
+	}{
+		{"nothing yet", Status{}, false, false},
+		{"sweep running", Status{Discoverers: []DiscovererStatus{running, listener}}, true, false},
+		{"sweep done, enrichers busy", Status{Discoverers: []DiscovererStatus{done, listener}, Enrichers: []EnricherStatus{busy}}, false, false},
+		{"sweep done, all quiet", Status{Discoverers: []DiscovererStatus{done, listener}, Enrichers: []EnricherStatus{idle}}, false, true},
+		{"only a listener", Status{Discoverers: []DiscovererStatus{listener}}, false, false},
+		{"sweep not yet counted", Status{Discoverers: []DiscovererStatus{{Name: "arp", State: StateRunning}}}, false, false},
+		{"cancelled", Status{Discoverers: []DiscovererStatus{{Name: "arp", State: StateCancelled, Total: 254, Done: 9}}}, false, false},
+		{"failed", Status{Discoverers: []DiscovererStatus{{Name: "arp", State: StateFailed, Total: 254}}}, false, false},
+	}
+	for _, c := range cases {
+		if got := c.s.Sweeping(); got != c.sweeping {
+			t.Errorf("%s: Sweeping = %v", c.name, got)
+		}
+		if got := c.s.Settled(); got != c.settled {
+			t.Errorf("%s: Settled = %v", c.name, got)
+		}
+	}
 }
