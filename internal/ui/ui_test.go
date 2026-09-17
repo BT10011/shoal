@@ -250,13 +250,49 @@ func TestLayoutColumnsNeverExceedWidth(t *testing.T) {
 }
 
 func TestProgressBar(t *testing.T) {
-	if got := progressBar(5, 10, 10, true); got != "#####-----" {
-		t.Fatalf("got %q", got)
+	isFilled := func(r rune, plain bool) bool {
+		if plain {
+			return r == ':' || r == ';'
+		}
+		return r >= 0x2800 && r <= 0x28ff && !strings.ContainsRune(strings.Join(dotHead, ""), r)
 	}
-	if got := progressBar(0, 0, 4, true); got != "----" {
-		t.Fatalf("zero total: %q", got)
+	for _, plain := range []bool{false, true} {
+		if got := progressBar(0, 0, 4, plain); lipgloss.Width(got) != 4 || strings.ContainsAny(got, ":;⣿") {
+			t.Fatalf("plain=%v zero total: %q", plain, got)
+		}
+		if got := progressBar(20, 10, 4, plain); lipgloss.Width(got) != 4 {
+			t.Fatalf("plain=%v overflow width: %q", plain, got)
+		}
+		prev := -1
+		for done := 0; done <= 254; done++ {
+			bar := progressBar(done, 254, 30, plain)
+			if w := lipgloss.Width(bar); w != 30 {
+				t.Fatalf("plain=%v done=%d: width %d: %q", plain, done, w, bar)
+			}
+			n := 0
+			for _, r := range bar {
+				if isFilled(r, plain) {
+					n++
+				}
+			}
+			if n < prev {
+				t.Fatalf("plain=%v done=%d: fill went backwards (%d -> %d): %q", plain, done, prev, n, bar)
+			}
+			prev = n
+		}
+		if prev != 30 {
+			t.Fatalf("plain=%v: complete bar has %d filled cells, want 30", plain, prev)
+		}
 	}
-	if got := progressBar(20, 10, 4, true); got != "####" {
-		t.Fatalf("overflow: %q", got)
+	a, b := progressBar(100, 254, 30, false), progressBar(100, 254, 30, false)
+	if a != b {
+		t.Fatal("texture must be stable between renders")
+	}
+	distinct := map[rune]bool{}
+	for _, r := range progressBar(254, 254, 30, false) {
+		distinct[r] = true
+	}
+	if len(distinct) < 3 {
+		t.Fatalf("filled cells should vary in texture, got %d distinct glyphs", len(distinct))
 	}
 }

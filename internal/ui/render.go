@@ -379,17 +379,48 @@ func (a *app) renderEvent(ev engine.ProbeEvent, width int) string {
 	return style.Render(fit(fmt.Sprintf("%s %-5s %s %s", ev.At.Format("15:04:05"), ev.Probe, tag, msg), width))
 }
 
+// Dotted, retro-looking progress bar. Filled cells pick a dense braille
+// glyph by hashing their position, so the texture looks random yet stays
+// put as the bar grows; the head cell cycles with each tick so motion is
+// visible even between cell boundaries.
+var (
+	dotFilled   = []string{"⣿", "⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽"}
+	dotHead     = []string{"⠁", "⠃", "⠇", "⡇", "⣇", "⣧"}
+	dotEmpty    = "·"
+	asciiFilled = []string{":", ":", ":", ";"}
+	asciiHead   = []string{"-", "\\", "|", "/"}
+	asciiEmpty  = "."
+)
+
 func progressBar(done, total, width int, plain bool) string {
 	if width < 1 {
 		return ""
 	}
-	full, empty := "█", "░"
+	filled, head, empty := dotFilled, dotHead, dotEmpty
 	if plain {
-		full, empty = "#", "-"
+		filled, head, empty = asciiFilled, asciiHead, asciiEmpty
 	}
-	filled := 0
+	cells := 0
 	if total > 0 {
-		filled = min(width, done*width/total)
+		cells = min(width, done*width/total)
 	}
-	return strings.Repeat(full, filled) + strings.Repeat(empty, width-filled)
+	var b strings.Builder
+	for i := 0; i < cells; i++ {
+		b.WriteString(filled[cellHash(i)%len(filled)])
+	}
+	rest := width - cells
+	if rest > 0 && done > 0 && done < total {
+		b.WriteString(head[done%len(head)])
+		rest--
+	}
+	b.WriteString(strings.Repeat(empty, rest))
+	return b.String()
+}
+
+func cellHash(i int) int {
+	x := uint32(i)*2654435761 + 0x9e3779b9
+	x ^= x >> 15
+	x *= 0x85ebca6b
+	x ^= x >> 13
+	return int(x & 0x7fffffff)
 }
