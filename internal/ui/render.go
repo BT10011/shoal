@@ -315,7 +315,12 @@ func (a *app) renderHood(width, rows int) []string {
 		if d.Err != "" {
 			state = "failed: " + d.Err
 		}
+		// A probe that listens has nothing to count towards, so show what it
+		// has heard rather than a denominator that will never arrive.
 		tail := fmt.Sprintf(" %d/%d %s", d.Done, d.Total, state)
+		if d.Total == 0 {
+			tail = fmt.Sprintf(" %d %s", d.Done, state)
+		}
 		barW := width - 7 - lipgloss.Width(tail)
 		if barW < 4 {
 			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))

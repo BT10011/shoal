@@ -265,3 +265,107 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// A passive probe hears an announcement and can only key a fact by the
+// address it came from. These tests pin how such a fact reaches the device
+// that ARP already found, whichever order the two arrive in.
+
+const (
+	mac = "3c:22:fb:9e:01:77"
+	ip  = "192.168.1.42"
+)
+
+func TestAbsorbsIPKeyedDeviceWhenAMACClaimsTheAddress(t *testing.T) {
+	m, rec := newTestStore()
+	// The listener hears the name first, before ARP has found the MAC.
+	must(t, m.Apply(obs(ip, model.FieldHostname, "laptop.local", "mdns")))
+	if m.Len() != 1 {
+		t.Fatalf("Len = %d, want the provisional device", m.Len())
+	}
+	// ARP then finds the MAC and its address.
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+
+	if m.Len() != 1 {
+		t.Fatalf("Len = %d, want the two folded into one: %+v", m.Len(), m.Devices())
+	}
+	dev, ok := m.Get(mac)
+	if !ok {
+		t.Fatal("the surviving device should be keyed by MAC")
+	}
+	name, ok := dev.ResolvedAt(model.FieldHostname, t0)
+	if !ok || name.Value != "laptop.local" {
+		t.Errorf("hostname = %+v, want the absorbed name", name)
+	}
+	if name.Source != "mdns" {
+		t.Errorf("source = %q, want the absorbed fact to keep its provenance", name.Source)
+	}
+	if flags := dev.Values(model.FieldFlag, t0); len(flags) != 0 {
+		t.Errorf("flags = %v, want none: one device under two keys is not a duplicate IP", flags)
+	}
+
+	var merged *Event
+	for i := range rec.events {
+		if rec.events[i].Kind == EventDeviceMerged {
+			merged = &rec.events[i]
+		}
+	}
+	if merged == nil {
+		t.Fatalf("no merge event published: %v", rec.kinds())
+	}
+	if merged.Key != mac || merged.MergedFrom != ip {
+		t.Errorf("merge event = %s from %s, want %s from %s", merged.Key, merged.MergedFrom, mac, ip)
+	}
+}
+
+func TestRoutesAnIPKeyedFactToTheDeviceThatOwnsTheAddress(t *testing.T) {
+	m, _ := newTestStore()
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+	// The listener speaks up afterwards, knowing only the address.
+	must(t, m.Apply(obs(ip, model.FieldHostname, "laptop.local", "mdns")))
+
+	if m.Len() != 1 {
+		t.Fatalf("Len = %d, want the fact routed to the existing device: %+v", m.Len(), m.Devices())
+	}
+	dev, _ := m.Get(mac)
+	if _, ok := dev.ResolvedAt(model.FieldHostname, t0); !ok {
+		t.Error("the MAC-keyed device should have gained the hostname")
+	}
+}
+
+func TestFollowsTheAliasAfterAMerge(t *testing.T) {
+	m, _ := newTestStore()
+	must(t, m.Apply(obs(ip, model.FieldHostname, "laptop.local", "mdns")))
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+	// A probe that started before the merge finishes afterwards, still
+	// using the address as its key.
+	must(t, m.Apply(obs(ip, model.FieldLatency, "1.9ms", "icmp")))
+
+	if m.Len() != 1 {
+		t.Fatalf("Len = %d, want the late fact to follow the alias: %+v", m.Len(), m.Devices())
+	}
+	dev, _ := m.Get(mac)
+	if rtt, ok := dev.ResolvedAt(model.FieldLatency, t0); !ok || rtt.Value != "1.9ms" {
+		t.Errorf("latency = %+v, want it on the surviving device", rtt)
+	}
+}
+
+func TestDoesNotGuessWhenTwoDevicesClaimTheSameAddress(t *testing.T) {
+	m, _ := newTestStore()
+	other := "00:11:32:7f:a2:c4"
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+	must(t, m.Apply(obs(other, model.FieldIP, ip, "arp")))
+	must(t, m.Apply(obs(ip, model.FieldHostname, "laptop.local", "mdns")))
+
+	if m.Len() != 3 {
+		t.Fatalf("Len = %d, want the ambiguous fact kept apart: %+v", m.Len(), m.Devices())
+	}
+	for _, key := range []string{mac, other} {
+		dev, ok := m.Get(key)
+		if !ok {
+			t.Fatalf("device %s missing", key)
+		}
+		if flags := dev.Values(model.FieldFlag, t0); len(flags) != 1 || flags[0] != "duplicate-ip" {
+			t.Errorf("%s flags = %v, want duplicate-ip", key, flags)
+		}
+	}
+}

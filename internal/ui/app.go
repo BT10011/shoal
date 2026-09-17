@@ -281,7 +281,11 @@ func (a *app) statusLeft() string {
 	}
 	parts = append(parts, fmt.Sprintf("%d devices", len(a.devices)))
 	for _, d := range a.status.Discoverers {
-		parts = append(parts, fmt.Sprintf("%s %s %d/%d", d.Name, d.State, d.Done, d.Total))
+		if d.Total == 0 {
+			parts = append(parts, fmt.Sprintf("%s %s %d", d.Name, d.State, d.Done))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s %s %d/%d", d.Name, d.State, d.Done, d.Total))
+		}
 	}
 	return joinStatus(s, parts)
 }

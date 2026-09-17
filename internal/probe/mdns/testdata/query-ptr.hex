@@ -1,0 +1,6 @@
+# PTR? 42.1.168.192.in-addr.arpa, id 0x4242. No recursion bit: there is no
+# resolver to recurse. No QU bit either: the query comes from an ephemeral
+# port, which already tells responders to answer directly (RFC 6762 6.7).
+42420000000100000000000002343201
+31033136380331393207696e2d616464
+72046172706100000c0001

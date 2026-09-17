@@ -1,0 +1,21 @@
+# A reverse mDNS reply, in the shape a responder really sends one: an answer
+# for the address asked about, plus a record it volunteers alongside.
+#
+# flags 0x8400 = response + authoritative: in mDNS every responder is
+# authoritative, because it only ever answers for itself.
+#
+#   answer     42.1.168.192.in-addr.arpa.     PTR ttl 10  laptop.local.
+#   additional laptop._device-info._tcp.local TXT ttl 10  model=Example1,1
+#
+# The additional record is volunteered, not asked for: responders add what
+# they think the querier will want next. Both names are compressed - 0xc00c
+# is "the name at offset 12", and the TXT owner points back into the answer's
+# rdata for its ".local" suffix.
+42428400000100010000000102343201
+31033136380331393207696e2d616464
+72046172706100000c0001c00c000c00
+010000000a000e066c6170746f70056c
+6f63616c00066c6170746f700c5f6465
+766963652d696e666f045f746370c03e
+001000010000000a0011106d6f64656c
+3d4578616d706c65312c31
