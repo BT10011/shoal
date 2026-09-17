@@ -1,14 +1,14 @@
-//go:build !(darwin || dragonfly || freebsd || netbsd || openbsd)
+//go:build !linux && !darwin && !freebsd
 
 package arp
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/BT10011/shoal/internal/netif"
 )
 
-// OpenConn is not yet implemented on this platform.
+// OpenConn is not implemented on this platform; use the neigh probe.
 func OpenConn(netif.Interface) (Conn, error) {
-	return nil, errors.New("raw ARP is not supported on this platform yet")
+	return nil, fmt.Errorf("%w: raw ARP is not supported on this platform", ErrPermission)
 }

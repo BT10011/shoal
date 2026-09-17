@@ -23,6 +23,7 @@ type Options struct {
 	Engine *engine.Engine
 	Iface  netif.Interface
 	Demo   bool
+	Mode   string // how discovery is running, shown in the status bar
 	Theme  string
 }
 
@@ -274,6 +275,9 @@ func (a *app) statusLeft() string {
 		parts = append(parts, s.StatusNotice.Render(" DEMO "), "192.168.1.0/24 simulated, no packets sent")
 	} else if a.opts.Iface.Subnet != nil {
 		parts = append(parts, a.opts.Iface.Name+" "+a.opts.Iface.Subnet.String())
+	}
+	if a.opts.Mode != "" {
+		parts = append(parts, a.opts.Mode)
 	}
 	parts = append(parts, fmt.Sprintf("%d devices", len(a.devices)))
 	for _, d := range a.status.Discoverers {

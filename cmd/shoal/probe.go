@@ -15,6 +15,7 @@ import (
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/store"
 )
@@ -23,6 +24,7 @@ const probeUsage = `Usage: shoal probe <name> [flags]
 
 Probes:
   arp [iface]     Active ARP sweep of the interface's subnet (see docs/protocols/arp.md)
+  neigh [iface]   Kernel neighbour cache, no privileges needed (see docs/protocols/neigh.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
 `
@@ -35,6 +37,8 @@ func runProbe(args []string) error {
 	switch args[0] {
 	case "arp":
 		return runProbeARP(args[1:])
+	case "neigh":
+		return runProbeNeigh(args[1:])
 	case "fake":
 		return runProbeFake(args[1:])
 	case "oui":
@@ -68,7 +72,7 @@ func runProbeARP(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	iface, err := pickInterface(fs.Args())
+	iface, err := pickInterface(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -77,11 +81,29 @@ func runProbeARP(args []string) error {
 	return runStandalone(iface, []engine.Discoverer{sweep}, nil, os.Stdout)
 }
 
-func pickInterface(args []string) (netif.Interface, error) {
-	if len(args) > 0 {
-		return netif.ByName(args[0])
+func runProbeNeigh(args []string) error {
+	fs := flag.NewFlagSet("shoal probe neigh", flag.ContinueOnError)
+	rate := fs.Int("rate", 0, "nudge datagrams per second (default 200)")
+	noNudge := fs.Bool("no-nudge", false, "send nothing; only read what the kernel already knew")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	return netif.Default()
+	iface, err := pickInterface(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Print(iface.Describe(), "\nneighbour cache source: ", neigh.TableSource, "\n\n")
+	probe := neigh.New(neigh.Options{Rate: *rate, NoNudge: *noNudge})
+	return runStandalone(iface, []engine.Discoverer{probe}, nil, os.Stdout)
+}
+
+// pickInterface resolves an interface by name, or the one carrying the
+// default route when the name is empty.
+func pickInterface(name string) (netif.Interface, error) {
+	if name == "" {
+		return netif.Default()
+	}
+	return netif.ByName(name)
 }
 
 func runProbeOUI(args []string) error {
