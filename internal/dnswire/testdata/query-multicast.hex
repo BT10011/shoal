@@ -1,0 +1,5 @@
+# the same question as mDNS asks it: no recursion (flags 0x0000) and the QU
+# bit set in the class, 0x8001 instead of 0x0001
+1a2b0000000100000000000002323001
+31033136380331393207696e2d616464
+72046172706100000c8001
