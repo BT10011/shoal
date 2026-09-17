@@ -1,0 +1,4 @@
+# The matching echo reply: identical but for type 0, which shifts the
+# checksum by 0x0800.
+00005a0b 1234 0001
+73686f616c2070726f6265
