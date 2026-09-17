@@ -3,7 +3,9 @@
 ## Start here
 Read `PROJECT_PLAN.md` in full before doing any work. It is the source of truth for scope, architecture, build order and conventions. If this file and the plan ever disagree, the plan wins.
 
-**Current phase: Phase 1 — Layer 2 discovery.** (Update this line as phases complete.) Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
+**Current phase: Phase 2 — Names & latency.** (Update this line as phases complete.)
+Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
+Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, unprivileged `neigh` fallback, vendors from the embedded IEEE registry).
 
 ## What we are building
 A terminal-based, good-looking LAN discovery tool (Go, Bubble Tea, Lipgloss, TideUI) that shows live updates and progress, and lets the user understand what is happening under the hood during discovery. Every displayed value must show how it was discovered.

@@ -248,7 +248,7 @@ shoal probe oui 00:11:32:AA:BB:CC
 
 Each phase ends with working, tested, demoable software. Do not start a phase until the previous one meets its acceptance criteria.
 
-### Phase 0 — Skeleton & demo mode
+### Phase 0 — Skeleton & demo mode ✅ *completed 2026-09-16*
 - `netif`: detect interface, subnet, gateway, own IP/MAC; `shoal iface` prints them.
 - `model` + `store` (in-memory) with unit tests for `Resolved()`, TTL expiry, conflict detection.
 - `engine` with registry, scheduler and the `fake` discoverer/enrichers emitting realistic, staggered observations and probe events.
@@ -257,7 +257,7 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 
 **Done when:** `shoal --demo` shows devices appearing and filling in live, progress moves, log scrolls, `q` quits cleanly; `go test -race ./...` passes.
 
-### Phase 1 — Layer 2 discovery
+### Phase 1 — Layer 2 discovery ✅ *completed 2026-09-17*
 - Active ARP sweep of the subnet (rate-limited, one retry for silent hosts), emitting `sent`/`received` events.
 - Unprivileged fallback: nudge IPs (e.g. UDP to a closed port) to populate the kernel neighbor cache, then read it (Linux: netlink or `/proc/net/arp`; macOS: routing sysctl). Label clearly as a different, less direct method.
 - `oui` enricher (embedded IEEE data) + locally-administered MAC flag.
@@ -265,6 +265,8 @@ Each phase ends with working, tested, demoable software. Do not start a phase un
 - `docs/protocols/arp.md`.
 
 **Done when:** a real /24 sweep completes in a few seconds with IP, MAC, vendor, and the detail view can say *how* each was learned.
+
+*Outcome:* `shoal` sweeps a /24 in ~7 s (253 requests at 100/s, a 1 s settle, a retry pass for silent addresses, another settle); devices appear as they answer. Raw access uses `/dev/bpf` on macOS and `AF_PACKET` on Linux; when it is refused shoal falls back to `neigh` automatically and says so in the status bar. Modern FreeBSD/OpenBSD/NetBSD build but have no neighbour-cache reader (they moved ARP out of the routing table); `shoal probe arp` still works on FreeBSD.
 
 ### Phase 2 — Names & latency
 - `rdns`: PTR lookups (show which resolver answered).
