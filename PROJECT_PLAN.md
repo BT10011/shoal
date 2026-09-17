@@ -301,8 +301,46 @@ Windows and Samba machines — and the RTT column is live.
 - Sorting (`s` cycle key, `S` reverse), `/` live filter (substring; glob if `*?[` present).
 - Detail view: facts grouped by field → source, method, age, TTL, confidence; `x` toggles raw packet/hex view.
 - Freshness colouring (recent / stale / not answering).
-- Theme picker (`t`), help overlay (`?`), rescan (`r`), cancel scan.
+- Rescan (`r`), cancel scan (`c`).
 - Responsive layout for small terminals (tabbed mode).
+- The three chrome features below. They are what make the TUI navigable without documentation, so treat them as part of the phase rather than polish to drop if time runs short.
+
+#### Key bar — always visible
+
+One line at the bottom listing the handful of bindings a new user needs, and
+nothing more: move, details, filter, sort, theme, help, quit. It exists in
+embryo already (`↑↓ move  tab pane  q quit`, added in Phase 0) and grows as
+the keys land. It must not wrap at 80 columns — if it no longer fits, drop
+bindings from it rather than wrapping, because the full list lives in the help
+manual.
+
+#### Theme picker — `t`
+
+A modal list of the TideUI built-in themes. The important part is that it is a
+**live preview, not a list of names**: moving the highlight re-renders the
+whole TUI in that theme immediately, so the user sees the real thing against
+real data.
+
+- `↑/↓` or `j/k` — move the highlight, previewing as it goes
+- `Enter` — keep the highlighted theme and close
+- `Esc` — close and restore whatever theme was in use when the picker opened
+
+The choice should survive a restart once config exists (§4); until then it
+lasts for the session, and `--theme` still works.
+
+#### Help — `?`
+
+Not a key list: a **manual the user can read and learn from**, scrollable in
+the same movement keys, closed with `Esc`, `?` or `q`. It should cover what
+each pane shows, what a probe is and what the difference between a discoverer
+and an enricher is, what every column means, how confidence, method and TTL
+should be read, what each key does, and where `docs/protocols/` lives for
+going deeper.
+
+This is the in-app counterpart to the protocol docs, and it is what lets
+someone learn how a network is discovered without leaving the terminal — which
+is the point of the whole tool (§3.8). Worth writing properly rather than
+generating from a key table.
 
 **Done when:** a new user can pick any value on screen and discover exactly where it came from within two keypresses.
 
@@ -385,6 +423,9 @@ plain words what that means and which probe saw it.
 - **Layout:** device table (main, widest) · details pane · scan/progress panel · event log · bottom key bar. Use a TideUI layout mode; fall back to tabbed on small terminals.
 - **Default columns:** IP · MAC · Hostname · Vendor · RTT · (later) Type · First seen · Last seen. Column set configurable later.
 - **Keys:** `↑/↓ j/k` move · `Enter` details · `/` filter · `Esc` clear/close · `s`/`S` sort · `r` rescan · `c` cancel · `t` theme · `?` help · `q` quit.
+- **Key bar:** always visible, one line, the basic bindings only; never wraps at 80 columns.
+- **Theme picker (`t`):** previews each theme live as the highlight moves; `Enter` commits, `Esc` restores the previous theme.
+- **Help (`?`):** a scrollable manual, not a key list — panes, probes, columns, provenance, keys, and a pointer to `docs/protocols/`.
 - **Progress panel:** per-discoverer progress bars; per-enricher running/queued counts.
 - **Event log:** timestamped `ProbeEvent`s, filterable by probe; capped ring buffer.
 - **Rules:** UI never blocks; all engine communication via messages; rendering throttled.
