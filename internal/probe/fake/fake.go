@@ -1,14 +1,14 @@
 // Package fake provides scripted probes for --demo: a discoverer that
 // "sweeps" 192.168.1.0/24 and enrichers that answer from a fixed cast of
 // devices. Nothing touches the network. Every Method says "simulated" so
-// the provenance is honest.
+// the provenance is honest. Vendor lookup is not faked: the real oui
+// enricher works offline, so the demo uses it with genuine MAC prefixes.
 package fake
 
 import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +22,6 @@ import (
 type Device struct {
 	IP       string
 	MAC      string
-	Vendor   string
 	RDNS     string
 	MDNSName string
 	Services []string
@@ -61,28 +60,30 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// DefaultDevices is the demo cast: a mix of vendors, a hostname
-// disagreement (the printer) and two smart plugs fighting over one IP.
+// DefaultDevices is the demo cast: genuine vendor prefixes (MikroTik,
+// Synology, Apple, HP, Google, Philips, Raspberry Pi, Sonos, Espressif), a
+// randomised-MAC phone, a hostname disagreement (the printer) and two
+// smart plugs fighting over one IP.
 func DefaultDevices() []Device {
 	return []Device{
-		{IP: "192.168.1.1", MAC: "2c:c8:1b:4a:10:01", Vendor: "MikroTik", RDNS: "gateway.lan", RTT: 900 * time.Microsecond},
-		{IP: "192.168.1.20", MAC: "00:11:32:7f:a2:c4", Vendor: "Synology Inc.", RDNS: "nas.lan", MDNSName: "synology.local",
+		{IP: "192.168.1.1", MAC: "2c:c8:1b:4a:10:01", RDNS: "gateway.lan", RTT: 900 * time.Microsecond},
+		{IP: "192.168.1.20", MAC: "00:11:32:7f:a2:c4", RDNS: "nas.lan", MDNSName: "synology.local",
 			Services: []string{"_smb._tcp", "_http._tcp", "_afpovertcp._tcp"}, RTT: 2 * time.Millisecond},
-		{IP: "192.168.1.42", MAC: "3c:22:fb:9e:01:77", Vendor: "Apple, Inc.", MDNSName: "studio-macbook.local",
+		{IP: "192.168.1.42", MAC: "3c:22:fb:9e:01:77", MDNSName: "studio-macbook.local",
 			Services: []string{"_companion-link._tcp", "_rdlink._tcp"}, RTT: 4 * time.Millisecond},
-		{IP: "192.168.1.50", MAC: "00:1e:0b:55:d3:1a", Vendor: "Hewlett Packard", RDNS: "printer.lan", MDNSName: "HP-LaserJet-M404.local",
+		{IP: "192.168.1.50", MAC: "00:1e:0b:55:d3:1a", RDNS: "printer.lan", MDNSName: "HP-LaserJet-M404.local",
 			Services: []string{"_ipp._tcp", "_pdl-datastream._tcp", "_http._tcp"}, RTT: 3 * time.Millisecond},
-		{IP: "192.168.1.60", MAC: "f4:f5:d8:12:34:56", Vendor: "Google, Inc.", MDNSName: "Chromecast-Living-Room.local",
+		{IP: "192.168.1.60", MAC: "f4:f5:d8:12:34:56", MDNSName: "Chromecast-Living-Room.local",
 			Services: []string{"_googlecast._tcp"}, RTT: 8 * time.Millisecond},
-		{IP: "192.168.1.77", MAC: "00:17:88:2b:cc:0e", Vendor: "Philips Lighting BV", RDNS: "hue.lan", MDNSName: "Philips-hue.local",
+		{IP: "192.168.1.77", MAC: "00:17:88:2b:cc:0e", RDNS: "hue.lan", MDNSName: "Philips-hue.local",
 			Services: []string{"_hue._tcp", "_hap._tcp"}, RTT: 5 * time.Millisecond},
 		{IP: "192.168.1.101", MAC: "da:3b:91:0c:44:e2", MDNSName: "iPhone.local", Silent: true},
-		{IP: "192.168.1.150", MAC: "b8:27:eb:6d:2f:90", Vendor: "Raspberry Pi Foundation", RDNS: "pi.lan", MDNSName: "raspberrypi.local",
+		{IP: "192.168.1.150", MAC: "b8:27:eb:6d:2f:90", RDNS: "pi.lan", MDNSName: "raspberrypi.local",
 			Services: []string{"_ssh._tcp", "_sftp-ssh._tcp"}, RTT: 2 * time.Millisecond},
-		{IP: "192.168.1.200", MAC: "00:0e:58:ab:cd:ef", Vendor: "Sonos, Inc.", MDNSName: "Sonos-Kitchen.local",
+		{IP: "192.168.1.200", MAC: "00:0e:58:ab:cd:ef", MDNSName: "Sonos-Kitchen.local",
 			Services: []string{"_sonos._tcp", "_spotify-connect._tcp"}, RTT: 6 * time.Millisecond},
-		{IP: "192.168.1.230", MAC: "84:cc:a8:01:02:03", Vendor: "Espressif Inc.", RDNS: "plug-a.lan", RTT: 12 * time.Millisecond},
-		{IP: "192.168.1.230", MAC: "84:cc:a8:04:05:06", Vendor: "Espressif Inc.", RDNS: "plug-b.lan", RTT: 14 * time.Millisecond},
+		{IP: "192.168.1.230", MAC: "84:cc:a8:01:02:03", RDNS: "plug-a.lan", RTT: 12 * time.Millisecond},
+		{IP: "192.168.1.230", MAC: "84:cc:a8:04:05:06", RDNS: "plug-b.lan", RTT: 14 * time.Millisecond},
 	}
 }
 
@@ -181,50 +182,16 @@ func (d *Discoverer) Run(ctx context.Context, _ netif.Interface, emit engine.Emi
 	return nil
 }
 
-// NewEnrichers returns the demo oui, rdns, mdns and icmp enrichers.
+// NewEnrichers returns the demo rdns, mdns and icmp enrichers. Pair them
+// with the real oui enricher, which needs no network.
 func NewEnrichers(opts Options) []engine.Enricher {
 	opts = opts.withDefaults()
 	s := newScript(opts)
 	return []engine.Enricher{
-		&ouiEnricher{opts: opts, script: s},
 		&rdnsEnricher{opts: opts, script: s},
 		&mdnsEnricher{opts: opts, script: s},
 		&icmpEnricher{opts: opts, script: s},
 	}
-}
-
-type ouiEnricher struct {
-	opts   Options
-	script *script
-}
-
-func (e *ouiEnricher) Name() string            { return "oui" }
-func (e *ouiEnricher) Triggers() []model.Field { return []model.Field{model.FieldMAC} }
-func (e *ouiEnricher) Concurrency() int        { return 4 }
-func (e *ouiEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engine.Emit, report engine.Report) error {
-	dev, ok := e.script.lookup(d, time.Now())
-	if !ok {
-		return nil
-	}
-	prefix := strings.ToUpper(dev.MAC[:8])
-	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: d.Key, Message: "lookup prefix " + prefix + " in embedded IEEE registry"})
-	if err := sleep(ctx, e.script.rng.jitter(e.opts.Latency/10)); err != nil {
-		return err
-	}
-	hw, err := net.ParseMAC(dev.MAC)
-	if err == nil && hw[0]&0x02 != 0 {
-		emit(model.Observation{DeviceKey: d.Key, Field: model.FieldFlag, Value: "locally-administered-mac",
-			Method: fmt.Sprintf("first octet %02x has the locally-administered bit set; vendor lookup does not apply (demo)", hw[0]), Confidence: 1})
-		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: d.Key, Message: "prefix " + prefix + " is locally administered (randomised MAC)"})
-		return nil
-	}
-	if dev.Vendor == "" {
-		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: d.Key, Message: "prefix " + prefix + " not in registry"})
-		return nil
-	}
-	emit(model.Observation{DeviceKey: d.Key, Field: model.FieldVendor, Value: dev.Vendor,
-		Method: fmt.Sprintf("simulated IEEE OUI registry match for %s (demo)", prefix), Confidence: 0.9})
-	return nil
 }
 
 type rdnsEnricher struct {

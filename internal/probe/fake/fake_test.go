@@ -10,6 +10,7 @@ import (
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/store"
 )
 
@@ -91,7 +92,7 @@ func TestDiscovererStopsOnCancel(t *testing.T) {
 
 func TestEnrichersAreConsistentWithScript(t *testing.T) {
 	ens := NewEnrichers(fast)
-	if len(ens) != 4 {
+	if len(ens) != 3 {
 		t.Fatalf("got %d enrichers", len(ens))
 	}
 	names := map[string]bool{}
@@ -101,7 +102,7 @@ func TestEnrichersAreConsistentWithScript(t *testing.T) {
 			t.Fatalf("%s: bad concurrency/triggers", en.Name())
 		}
 	}
-	for _, want := range []string{"oui", "rdns", "mdns", "icmp"} {
+	for _, want := range []string{"rdns", "mdns", "icmp"} {
 		if !names[want] {
 			t.Fatalf("missing enricher %q", want)
 		}
@@ -114,7 +115,11 @@ func TestEndToEndThroughEngine(t *testing.T) {
 	if err := e.AddDiscoverer(NewDiscoverer(fast)); err != nil {
 		t.Fatal(err)
 	}
-	for _, en := range NewEnrichers(fast) {
+	reg, err := oui.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range append([]engine.Enricher{oui.New(reg)}, NewEnrichers(fast)...) {
 		if err := e.AddEnricher(en); err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +162,7 @@ func TestEndToEndThroughEngine(t *testing.T) {
 	now := time.Now()
 
 	nas, _ := st.Get("00:11:32:7f:a2:c4")
-	if v, _ := nas.ResolvedAt(model.FieldVendor, now); v.Value != "Synology Inc." {
+	if v, _ := nas.ResolvedAt(model.FieldVendor, now); v.Value != "Synology Incorporated" || v.Source != "oui" {
 		t.Errorf("nas vendor = %+v", v)
 	}
 	if h, _ := nas.ResolvedAt(model.FieldHostname, now); h.Value != "synology.local" || h.Source != "mdns" {

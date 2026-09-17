@@ -71,7 +71,11 @@ func runTUI(args []string) error {
 	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
 		return err
 	}
-	for _, en := range fake.NewEnrichers(opts) {
+	ouiEnricher, err := realOUI()
+	if err != nil {
+		return err
+	}
+	for _, en := range append([]engine.Enricher{ouiEnricher}, fake.NewEnrichers(opts)...) {
 		if err := eng.AddEnricher(en); err != nil {
 			return err
 		}
