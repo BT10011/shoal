@@ -315,10 +315,13 @@ func (a *app) renderHood(width, rows int) []string {
 		if d.Err != "" {
 			state = "failed: " + d.Err
 		}
-		counts := fmt.Sprintf("%d/%d", d.Done, d.Total)
-		barW := width - 7 - len(counts) - 1 - lipgloss.Width(state) - 2
-		line := fmt.Sprintf("%-6s %s %s %s", d.Name, progressBar(d.Done, d.Total, barW, s.PlainUI), counts, state)
-		lines = append(lines, s.Item.Render(fit(line, width)))
+		tail := fmt.Sprintf(" %d/%d %s", d.Done, d.Total, state)
+		barW := width - 7 - lipgloss.Width(tail)
+		if barW < 4 {
+			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))
+			continue
+		}
+		lines = append(lines, s.Item.Render(fit(d.Name, 7))+progressBar(d.Done, d.Total, barW, a.barStyles())+s.Item.Render(fit(tail, width-7-barW)))
 	}
 	for _, e := range a.status.Enrichers {
 		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)
@@ -379,42 +382,90 @@ func (a *app) renderEvent(ev engine.ProbeEvent, width int) string {
 	return style.Render(fit(fmt.Sprintf("%s %-5s %s %s", ev.At.Format("15:04:05"), ev.Probe, tag, msg), width))
 }
 
-// Dotted, retro-looking progress bar. Filled cells pick a dense braille
-// glyph by hashing their position, so the texture looks random yet stays
-// put as the bar grows; the head cell cycles with each tick so motion is
-// visible even between cell boundaries.
+// Dotted, retro-looking progress bar. While a probe runs, filled cells
+// pick a dense braille glyph by hashing position and tick so the texture
+// shimmers, a few cells flare bright and fade, and a head glyph cycles at
+// the leading edge. Once complete every cell is the full 8-dot glyph so
+// the finished bar is a solid grid with no holes.
 var (
 	dotFilled   = []string{"⣿", "⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽"}
 	dotHead     = []string{"⠁", "⠃", "⠇", "⡇", "⣇", "⣧"}
-	dotEmpty    = "·"
 	asciiFilled = []string{":", ":", ":", ";"}
 	asciiHead   = []string{"-", "\\", "|", "/"}
-	asciiEmpty  = "."
 )
 
-func progressBar(done, total, width int, plain bool) string {
+type barStyles struct {
+	plain               bool
+	normal, mid, bright lipgloss.Style
+}
+
+func (a *app) barStyles() barStyles {
+	s := a.renderer.Styles
+	return barStyles{
+		plain:  s.PlainUI,
+		normal: s.Item,
+		mid:    s.Item.Bold(true),
+		bright: s.Item.Foreground(s.Theme.Unread).Bold(true),
+	}
+}
+
+func progressBar(done, total, width int, st barStyles) string {
 	if width < 1 {
 		return ""
 	}
-	filled, head, empty := dotFilled, dotHead, dotEmpty
-	if plain {
-		filled, head, empty = asciiFilled, asciiHead, asciiEmpty
+	filled, head := dotFilled, dotHead
+	if st.plain {
+		filled, head = asciiFilled, asciiHead
 	}
 	cells := 0
 	if total > 0 {
 		cells = min(width, done*width/total)
 	}
+	complete := total > 0 && done >= total
+
 	var b strings.Builder
 	for i := 0; i < cells; i++ {
-		b.WriteString(filled[cellHash(i)%len(filled)])
+		glyph, style := filled[0], st.normal
+		if !complete {
+			glyph = filled[cellHash(i+done*width)%len(filled)]
+			switch sparkAge(i, done) {
+			case 0:
+				style = st.bright
+			case 1:
+				style = st.mid
+			}
+		}
+		b.WriteString(style.Render(glyph))
 	}
 	rest := width - cells
-	if rest > 0 && done > 0 && done < total {
-		b.WriteString(head[done%len(head)])
+	if rest > 0 && done > 0 && !complete {
+		b.WriteString(st.normal.Render(head[done%len(head)]))
 		rest--
 	}
-	b.WriteString(strings.Repeat(empty, rest))
+	if rest > 0 {
+		b.WriteString(st.normal.Render(strings.Repeat(" ", rest)))
+	}
 	return b.String()
+}
+
+// sparkWindow is how many ticks a flare lasts: bright for the first
+// third, dimmer for the second, back to normal for the rest.
+const sparkWindow = 6
+
+// sparkAge returns 0 while a cell is freshly lit, 1 while it fades and -1
+// when it is at normal brightness. Roughly one cell in six flares per window.
+func sparkAge(cell, tick int) int {
+	window := tick / sparkWindow
+	if cellHash(cell*7919+window)%6 != 0 {
+		return -1
+	}
+	switch age := tick % sparkWindow; {
+	case age < 2:
+		return 0
+	case age < 4:
+		return 1
+	}
+	return -1
 }
 
 func cellHash(i int) int {
