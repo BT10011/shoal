@@ -56,8 +56,11 @@ A discoverer finds devices. The ARP sweep asks every address in the subnet
 "who has this IP?" and notes which MAC address answers; it needs raw
 packet access. Without it, shoal nudges each address and reads the
 kernel's neighbour table instead, which is the same information one step
-removed. The mDNS listener sends nothing at all: it writes down what
-devices announce about themselves on the multicast group.
+removed. The dns-sd listener sends nothing at all: it writes down what
+devices announce about themselves on the mDNS multicast group, the
+traffic behind Bonjour and Avahi. Its facts are credited to mdns, since
+they are mDNS records; its row carries its own name so it is not mistaken
+for the mdns enricher, which asks each device its name.
 
 An enricher adds facts to a device that is already known. Each one is
 triggered by a field: when a device gains an IP, rdns asks the resolver
@@ -107,8 +110,12 @@ expires.
   source; if still tied, the newest.
 
   TTL is how long the value is trusted. DNS and mDNS answers carry their
-  own; when it runs out the value disappears from the table and a rescan
-  fetches it again. A value with no expiry stays until it is replaced.
+  own. When a value is 80% of the way through it, the probe that found it
+  asks again, and once more at 90%, the way mDNS caches do: a name that is
+  still true is renewed before it lapses, and one that no longer answers
+  expires and leaves the table. The probe's row counts these as renewed,
+  apart from the devices it asked for the scan. Renewal pauses while a
+  scan is stopped. A value with no expiry stays until it is replaced.
 
 Press x to see the raw packet or answer behind each value as a hex dump,
 so you can check the interpretation against the bytes. Values that came

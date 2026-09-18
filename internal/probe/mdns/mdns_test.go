@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -12,8 +13,10 @@ import (
 
 	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/BT10011/shoal/internal/dnswire"
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
+	"github.com/BT10011/shoal/internal/netif"
 )
 
 func loadHex(t *testing.T, name string) []byte {
@@ -169,19 +172,66 @@ func snapshot(key, ip string) model.DeviceSnapshot {
 	return d.Snapshot()
 }
 
-// probeWith builds an enricher over a socket that replays the given replies.
+// fakeAsker answers like OpenMulticast or OpenOneShot over a scripted socket.
+type fakeAsker struct {
+	*fakeConn
+	oneShot bool
+	sendErr error
+}
+
+func (a *fakeAsker) OneShot() bool { return a.oneShot }
+func (a *fakeAsker) Send(q []byte, _ *net.UDPAddr) error {
+	if a.sendErr != nil {
+		return a.sendErr
+	}
+	_, err := a.WriteTo(q, nil)
+	return err
+}
+
+// probeWith builds an enricher that asks from port 5353 over a socket that
+// replays the given multicast traffic.
 func probeWith(replies ...packet) (*Enricher, *fakeConn) {
 	conn := &fakeConn{replies: replies}
 	e := New(Options{
-		Wait:   50 * time.Millisecond,
-		NewID:  func() uint16 { return captureID },
-		Listen: func(context.Context) (net.PacketConn, error) { return conn, nil },
+		Wait:  50 * time.Millisecond,
+		NewID: func() uint16 { return captureID },
+		Open: func(context.Context, netif.Interface, *net.UDPAddr) (Asker, error) {
+			return &fakeAsker{fakeConn: conn}, nil
+		},
+		Fallback: func(context.Context, netif.Interface, *net.UDPAddr) (Asker, error) {
+			return nil, errors.New("the fallback must not be used")
+		},
 	})
 	return e, conn
 }
 
-func TestEnrichEmitsHostnameFromMulticastReply(t *testing.T) {
-	reply := loadHex(t, "reply-ptr.hex")
+// oneShotWith builds an enricher whose port-5353 socket cannot be had, so
+// it falls back to asking from an ephemeral port.
+func oneShotWith(replies ...packet) (*Enricher, *fakeConn) {
+	conn := &fakeConn{replies: replies}
+	e := New(Options{
+		Wait:  50 * time.Millisecond,
+		NewID: func() uint16 { return captureID },
+		Open: func(context.Context, netif.Interface, *net.UDPAddr) (Asker, error) {
+			return &fakeAsker{fakeConn: &fakeConn{}, sendErr: fmt.Errorf("%w: bind: address already in use", ErrPortHeld)}, nil
+		},
+		Fallback: func(context.Context, netif.Interface, *net.UDPAddr) (Asker, error) {
+			return &fakeAsker{fakeConn: conn, oneShot: true}, nil
+		},
+	})
+	return e, conn
+}
+
+// withID returns a copy of a DNS message with its ID replaced.
+func withID(wire []byte, id uint16) []byte {
+	out := append([]byte(nil), wire...)
+	out[0], out[1] = byte(id>>8), byte(id)
+	return out
+}
+
+func TestEnrichAsksFromPort5353AndMatchesByName(t *testing.T) {
+	// Multicast answers carry ID 0 whatever the question's ID was.
+	reply := withID(loadHex(t, "reply-ptr.hex"), 0)
 	e, conn := probeWith(packet{wire: reply, from: udpAddr(deviceIP)})
 
 	var rec recorder
@@ -191,8 +241,8 @@ func TestEnrichEmitsHostnameFromMulticastReply(t *testing.T) {
 	if len(conn.sent) != 1 {
 		t.Fatalf("sent %d queries, want 1", len(conn.sent))
 	}
-	if want := loadHex(t, "query-ptr.hex"); !equal(conn.sent[0], want) {
-		t.Errorf("query =\n%s\nwant\n%s", hex.Dump(conn.sent[0]), hex.Dump(want))
+	if want := withID(loadHex(t, "query-ptr.hex"), 0); !equal(conn.sent[0], want) {
+		t.Errorf("query =\n%s\nwant ID 0 (RFC 6762 §18.1)\n%s", hex.Dump(conn.sent[0]), hex.Dump(want))
 	}
 	if !conn.closed {
 		t.Error("socket left open")
@@ -204,14 +254,8 @@ func TestEnrichEmitsHostnameFromMulticastReply(t *testing.T) {
 	if o.Field != model.FieldHostname || o.Value != "laptop.local" {
 		t.Errorf("observation = %s %q, want hostname laptop.local", o.Field, o.Value)
 	}
-	if o.DeviceKey != deviceKey {
-		t.Errorf("DeviceKey = %q, want the device's key", o.DeviceKey)
-	}
-	if o.Confidence != Confidence {
-		t.Errorf("Confidence = %v, want %v", o.Confidence, Confidence)
-	}
-	if o.TTL != minTTL {
-		t.Errorf("TTL = %s, want the 10s record held for %s", o.TTL, minTTL)
+	if o.DeviceKey != deviceKey || o.Confidence != Confidence || o.TTL != minTTL {
+		t.Errorf("observation = %+v", o)
 	}
 	if !equal(o.Raw, reply) {
 		t.Error("Raw does not hold the reply bytes")
@@ -221,11 +265,55 @@ func TestEnrichEmitsHostnameFromMulticastReply(t *testing.T) {
 			t.Errorf("Method = %q, want it to mention %q", o.Method, want)
 		}
 	}
-	if sent := rec.messages(engine.KindSent); len(sent) != 1 || !strings.Contains(sent[0], "one-shot") {
-		t.Errorf("sent events = %v, want one describing the multicast question", sent)
+	if sent := rec.messages(engine.KindSent); len(sent) != 1 || !strings.Contains(sent[0], "from port 5353, so the answer is multicast") {
+		t.Errorf("sent events = %v, want one saying the answer comes back by multicast", sent)
 	}
 	if got := rec.messages(engine.KindReceived); len(got) != 1 || !strings.Contains(got[0], "laptop.local") {
 		t.Errorf("received events = %v, want one naming the answer", got)
+	}
+}
+
+func TestEnrichIgnoresOtherConversationsOnTheGroup(t *testing.T) {
+	other, err := dnswire.Query(0, "_airplay._tcp.local.", dnswire.QueryOptions{Type: dnsmessage.TypePTR})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := withID(loadHex(t, "reply-ptr.hex"), 0)
+	e, _ := probeWith(
+		packet{wire: other, from: udpAddr("192.168.1.9")},           // someone else's question
+		packet{wire: []byte{1, 2, 3}, from: udpAddr("192.168.1.8")}, // someone else's garbage
+		packet{wire: reply, from: udpAddr(deviceIP)},
+	)
+	var rec recorder
+	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.obs) != 1 {
+		t.Fatalf("emitted %d observations, want the one answer", len(rec.obs))
+	}
+	if errs, info := rec.messages(engine.KindError), rec.messages(engine.KindInfo); len(errs) != 0 || len(info) != 0 {
+		t.Errorf("traffic that is not an answer to us must pass silently: errors %v info %v", errs, info)
+	}
+}
+
+func TestEnrichFallsBackWhenPort5353CannotBeShared(t *testing.T) {
+	e, conn := oneShotWith(packet{wire: loadHex(t, "reply-ptr.hex"), from: udpAddr(deviceIP)})
+	var rec recorder
+	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if want := loadHex(t, "query-ptr.hex"); len(conn.sent) != 1 || !equal(conn.sent[0], want) {
+		t.Fatalf("a one-shot question carries a random ID the answer must echo: %v", conn.sent)
+	}
+	if len(rec.obs) != 1 || rec.obs[0].Value != "laptop.local" {
+		t.Fatalf("observations = %+v", rec.obs)
+	}
+	info := strings.Join(rec.messages(engine.KindInfo), "\n")
+	if !strings.Contains(info, "port 5353 is held by a program that will not share it") {
+		t.Errorf("the fallback must be explained: %q", info)
+	}
+	if sent := rec.messages(engine.KindSent); len(sent) != 1 || !strings.Contains(sent[0], "one-shot from an ephemeral port") {
+		t.Errorf("sent events = %v", sent)
 	}
 }
 
@@ -238,13 +326,21 @@ func TestEnrichSilenceIsNotAnError(t *testing.T) {
 	if len(rec.obs) != 0 {
 		t.Errorf("emitted %+v, want nothing", rec.obs)
 	}
-	if info := rec.messages(engine.KindInfo); len(info) != 1 || !strings.Contains(info[0], "no mDNS answer") {
+	if info := rec.messages(engine.KindInfo); len(info) != 1 || !strings.Contains(info[0], "no mDNS answer") || strings.Contains(info[0], "firewall") {
 		t.Errorf("info events = %v, want one explaining the silence", info)
+	}
+	e, _ = oneShotWith()
+	rec = recorder{}
+	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), "\n"); !strings.Contains(info, "or a host firewall dropped a unicast reply") {
+		t.Errorf("one-shot silence should mention the firewall: %q", info)
 	}
 }
 
-func TestEnrichDiscardsMismatchedID(t *testing.T) {
-	e, _ := probeWith(packet{wire: loadHex(t, "reply-ptr.hex"), from: udpAddr(deviceIP)})
+func TestEnrichDiscardsMismatchedIDOnAOneShotQuestion(t *testing.T) {
+	e, _ := oneShotWith(packet{wire: loadHex(t, "reply-ptr.hex"), from: udpAddr(deviceIP)})
 	e.opts.NewID = func() uint16 { return 0x9999 }
 
 	var rec recorder
@@ -260,7 +356,7 @@ func TestEnrichDiscardsMismatchedID(t *testing.T) {
 }
 
 func TestEnrichNamesAProxyResponder(t *testing.T) {
-	e, _ := probeWith(packet{wire: loadHex(t, "reply-ptr.hex"), from: udpAddr("192.168.1.5")})
+	e, _ := probeWith(packet{wire: withID(loadHex(t, "reply-ptr.hex"), 0), from: udpAddr("192.168.1.5")})
 	var rec recorder
 	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
 		t.Fatal(err)
@@ -275,7 +371,7 @@ func TestEnrichNamesAProxyResponder(t *testing.T) {
 }
 
 func TestEnrichLogsASecondClaim(t *testing.T) {
-	reply := loadHex(t, "reply-ptr.hex")
+	reply := withID(loadHex(t, "reply-ptr.hex"), 0)
 	e, _ := probeWith(
 		packet{wire: reply, from: udpAddr(deviceIP)},
 		packet{wire: reply, from: udpAddr("192.168.1.5")},
@@ -301,7 +397,7 @@ func TestEnrichRejectsDeviceWithoutIP(t *testing.T) {
 }
 
 func TestEnrichSurfacesSocketFailure(t *testing.T) {
-	e := New(Options{Listen: func(context.Context) (net.PacketConn, error) {
+	e := New(Options{Open: func(context.Context, netif.Interface, *net.UDPAddr) (Asker, error) {
 		return nil, errors.New("permission denied")
 	}})
 	var rec recorder

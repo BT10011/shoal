@@ -28,16 +28,42 @@ resolver: *who is `42.1.168.192.in-addr.arpa`?* Reverse lookups are the
 right shape here because shoal starts from an address — it has just learned
 one from ARP — and does not yet know any name to ask about.
 
-The query goes out from an **ephemeral port**, not 5353. That makes it a
-**one-shot query**: responders send the answer straight back to that port
-instead of multicasting it to the whole network (RFC 6762 §6.7), so shoal does
-not need to join the multicast group, and the reply cannot be confused with
-the ordinary Bonjour chatter that `mDNSResponder` is already handling. It also
-means the query ID is echoed back, so an unmatched reply can be discarded.
+The query goes out from **port 5353**, the way every Bonjour and Avahi
+querier asks, on the interface being scanned. A question from that port is
+answered by **multicast** to the whole group (RFC 6762 §6), and that matters
+more than it sounds:
+
+- A question from any other port is a *one-shot* query, answered by unicast
+  straight back to it (§6.7). A host firewall usually drops that answer: its
+  connection tracking saw a packet go to `224.0.0.251` and does not
+  recognise a reply arriving from the device's own address. Ubuntu's `ufw`,
+  for one, allows multicast mDNS by default and silently drops the unicast
+  reply, so on such a machine every one-shot question goes unanswered.
+- A multicast answer is allowed wherever mDNS is allowed at all, on any OS.
+
+Port 5353 is shared with the system's own responder (`mDNSResponder`,
+`avahi-daemon`), so shoal takes care not to disturb it. Answers are read on
+a socket bound to the **group address**, which only ever receives multicast,
+so unicast traffic for the port stays with the responder. Each question is
+sent from a second socket bound to port 5353 that exists only for that one
+write, with multicast loopback off, so this host's own sockets, the listener
+among them, do not hear shoal asking.
+
+Because the group socket hears every mDNS message on the segment, an answer
+is matched **by name**: only a message carrying a PTR for the name asked
+about counts, and everything else passes silently. The query ID is **0**, as
+RFC 6762 §18.1 asks of multicast questions, and multicast answers carry 0
+too. Every host on the segment hears the answer, the `dns-sd` listener
+included, which writes it down like any other announcement.
+
+If a responder holds port 5353 without letting it be shared, shoal says so
+in the log and falls back to a one-shot question from an ephemeral port,
+matching the answer by its echoed query ID; the silence message then adds
+that a firewall may have dropped the reply.
 
 Neither the recursion-desired bit (there is nothing to recurse) nor the QU bit
-(§5.4, "answer me directly") is set; the ephemeral source port already says
-what the QU bit would.
+(§5.4, "answer me directly") is set: the point is to be answered by
+multicast.
 
 ## An answer, taken apart
 
@@ -63,9 +89,13 @@ into a DHCP server, so when the two disagree the `.local` name wins — and both
 stay visible in the detail view, which is the point.
 
 That reply's TTL is **10 seconds**. mDNS keeps reverse records short because a
-genuinely interested querier is expected to keep asking. Shoal asks once per
-device, so it holds the name for five minutes and says so; the method string
-always reports the true TTL.
+genuinely interested querier is expected to keep asking. Shoal holds the name
+for at least five minutes and says so; the method string always reports the
+true TTL. When a name reaches 80% of that, the engine asks again, and once
+more at 90%, as mDNS caches do (§5.2), so a name that is still true never
+lapses and one that no longer answers expires. The hood row counts these as
+renewed. Names the `dns-sd` listener heard are renewed the same way, by this
+probe, since both are credited to `mdns`.
 
 ## Who actually answered
 
@@ -86,7 +116,11 @@ responder, and the log says that rather than reporting a failure.
 Bonjour networks talk to themselves constantly: devices announce when they
 join, when they wake, when a service changes, and they answer each other's
 queries in the open. The listener is a **discoverer** that sends nothing at
-all and writes down what passes.
+all and writes down what passes. It appears in the hood pane and the log as
+**`dns-sd`**, after the DNS Service Discovery announcements (RFC 6763) that
+make up most of what it hears, so it is not mistaken for this probe. Its
+facts are still credited to `mdns`: they are mDNS records, and share this
+probe's confidence, its weight as direct contact, and its renewal.
 
 Port 5353 is already held by the system responder — `mDNSResponder` on macOS,
 `avahi-daemon` on most Linux systems — so the socket sets **SO_REUSEADDR** and
@@ -132,8 +166,9 @@ explained rather than silently absent.
 ```
 shoal probe mdns 192.168.1.42           # ask one device for its name
 shoal probe mdns 192.168.1.42 -wait 3s  # wait longer for a slow responder
-shoal probe mdns                          # listen; ^C to stop
-shoal probe mdns -for 30s                 # listen for half a minute
+shoal probe dns-sd                        # listen; ^C to stop
+shoal probe dns-sd -for 30s               # listen for half a minute
+shoal probe mdns                          # the same: with no address, mdns listens
 ```
 
 A quiet network stays quiet: announcements are triggered by devices joining,
@@ -148,11 +183,11 @@ terminal will stir up traffic to watch.
   a quiet network.
 - **TXT records are logged, not read.** `_device-info` already carries the
   hardware model, which is what Phase 5's `classify` will want.
-- **The outgoing interface is the host's default.** On a multi-homed machine —
-  a VPN up, say — the query follows the default route rather than the
-  interface shoal is scanning. The listener will have to bind the interface
-  explicitly, and this probe should follow.
 - **IPv4 only**, matching the rest of shoal.
 - **No known-answer suppression or duplicate-question suppression.** Both are
-  politeness features of continuous querying; a single one-shot query per
-  device does not need them.
+  politeness features of continuous querying. Shoal asks once per device per
+  scan and again only as a name nears expiry, which is gentler than a
+  continuous querier; worth adding if renewal ever runs at scale.
+- **No Windows.** Sharing port 5353 uses `SO_REUSEPORT`, which Windows lacks,
+  and the rest of shoal needs raw sockets it does not offer without Npcap.
+  Linux, macOS and the BSDs build and work.

@@ -96,6 +96,9 @@ func TestListenerLearnsAHostnameFromAnAnnouncement(t *testing.T) {
 	if !ok {
 		t.Fatalf("no hostname emitted from %+v", rec.obs)
 	}
+	if o.Source != "mdns" {
+		t.Errorf("Source = %q: the listener's facts are mDNS records, credited to mdns", o.Source)
+	}
 	if o.Value != "laptop.local" {
 		t.Errorf("hostname = %q, want laptop.local", o.Value)
 	}
@@ -238,8 +241,8 @@ func TestListenerSurfacesSocketFailure(t *testing.T) {
 }
 
 func TestListenerName(t *testing.T) {
-	if got := NewListener(ListenerOptions{}).Name(); got != "mdns" {
-		t.Errorf("Name = %q, want mdns", got)
+	if got := NewListener(ListenerOptions{}).Name(); got != "dns-sd" {
+		t.Errorf("Name = %q, want dns-sd, apart from the mdns enricher", got)
 	}
 }
 

@@ -75,45 +75,80 @@ func (l *Listener) owns(key, name string) bool {
 	return l.own[key][strings.ToLower(trimDot(name))]
 }
 
-func (l *Listener) Name() string { return "mdns" }
+// ListenerName is how the listener appears in the hood pane and the log,
+// kept apart from the mdns enricher that asks questions: one hears the
+// announcements devices make (DNS Service Discovery, RFC 6763, the traffic
+// behind Bonjour and Avahi), the other asks each device its name.
+const ListenerName = "dns-sd"
 
-// ListenMulticast joins the mDNS group on an interface.
+// Source is what the listener's facts are credited to. They are mDNS
+// records like the enricher's answers, so they share its name and with it
+// its priority, its weight as direct contact and its renewal.
+const Source = "mdns"
+
+func (l *Listener) Name() string { return ListenerName }
+
+// ListenMulticast joins the mDNS group on an interface. With no interface
+// named, the system's default for multicast is used.
 //
 // Port 5353 is already held by the system responder — mDNSResponder on macOS,
 // avahi-daemon on most Linux systems — so the socket asks for SO_REUSEADDR
 // and SO_REUSEPORT before binding. Those are what let several processes share
 // a multicast port, and they are why shoal can watch the conversation without
-// disturbing the responder that is having it.
+// disturbing the responder that is having it. Binding the group address,
+// rather than any address, means only multicast arrives here: unicast
+// traffic for the port stays with the responder it was meant for.
 func ListenMulticast(ctx context.Context, iface netif.Interface, group *net.UDPAddr) (net.PacketConn, error) {
-	lc := net.ListenConfig{
-		Control: func(_, _ string, c syscall.RawConn) error {
-			var opErr error
-			err := c.Control(func(fd uintptr) {
-				if opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); opErr != nil {
-					return
-				}
-				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-			})
-			if err != nil {
-				return err
-			}
-			return opErr
-		},
-	}
+	lc := net.ListenConfig{Control: shareablePort}
 	conn, err := lc.ListenPacket(ctx, "udp4", fmt.Sprintf("%s:%d", group.IP, group.Port))
 	if err != nil {
 		return nil, fmt.Errorf("cannot bind %s: %w", group, err)
 	}
-	ni, err := net.InterfaceByName(iface.Name)
+	ni, err := interfaceFor(iface)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("interface %s: %w", iface.Name, err)
+		return nil, err
 	}
 	if err := ipv4.NewPacketConn(conn).JoinGroup(ni, group); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("cannot join %s on %s: %w", group.IP, iface.Name, err)
+		where := "the default interface"
+		if ni != nil {
+			where = iface.Name
+		}
+		return nil, fmt.Errorf("cannot join %s on %s: %w", group.IP, where, err)
 	}
 	return conn, nil
+}
+
+// shareablePort sets the options that let a socket share port 5353 with the
+// system's own responder. BSD and macOS need SO_REUSEPORT on every socket
+// bound to the port; Linux accepts SO_REUSEADDR on both, whoever owns the
+// other one.
+func shareablePort(_, _ string, c syscall.RawConn) error {
+	var opErr error
+	err := c.Control(func(fd uintptr) {
+		if opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); opErr != nil {
+			return
+		}
+		opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	})
+	if err != nil {
+		return err
+	}
+	return opErr
+}
+
+// interfaceFor resolves the scanning interface, or nil to let the system
+// choose when none is named.
+func interfaceFor(iface netif.Interface) (*net.Interface, error) {
+	if iface.Name == "" {
+		return nil, nil
+	}
+	ni, err := net.InterfaceByName(iface.Name)
+	if err != nil {
+		return nil, fmt.Errorf("interface %s: %w", iface.Name, err)
+	}
+	return ni, nil
 }
 
 // Run listens until the context is cancelled.
@@ -173,6 +208,7 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 	}
 
 	emit(model.Observation{
+		Source:    Source,
 		DeviceKey: key, Field: model.FieldIP, Value: key, Confidence: 0.9,
 		Method: fmt.Sprintf("sent multicast DNS from this address to %s, overheard without asking", l.opts.Group),
 	})
@@ -185,6 +221,7 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 		}
 		l.claims(key, rec.Name)
 		emit(model.Observation{
+			Source:    Source,
 			DeviceKey: key, Field: model.FieldHostname, Value: rec.Name,
 			Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
 			Method: fmt.Sprintf("mDNS A record %s = %s, announced by the device itself (%s section, mDNS TTL %s)",
@@ -211,6 +248,7 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 				continue
 			}
 			emit(model.Observation{
+				Source:    Source,
 				DeviceKey: key, Field: model.FieldService, Value: service,
 				Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
 				Method: fmt.Sprintf("mDNS SRV record %s = %s:%d, and %s announced %s as its own name (mDNS TTL %s)",
@@ -241,6 +279,7 @@ func (l *Listener) service(key string, rec Record, wire []byte, emit engine.Emit
 		return
 	}
 	emit(model.Observation{
+		Source:    Source,
 		DeviceKey: key, Field: model.FieldService, Value: name,
 		Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
 		Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers (mDNS TTL %s)", MetaQuery, name, rec.TTL),
