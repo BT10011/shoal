@@ -10,6 +10,7 @@ Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, 
 Phase 2 completed 2026-09-17: names and latency — `rdns`, `mdns` (reverse queries + passive listener), `nbns` and `icmp`. Two optional pieces were deferred; see the end of Phase 2 in the plan.
 Phase 3 completed 2026-09-18: sort, filter, hex view, freshness marks, rescan/cancel (scans are now an engine concept), key bar, live theme picker, in-app manual, tabbed layout for small terminals. Decisions are recorded at the end of Phase 3 in the plan.
 Phase 3a is an optional add-on for devices the subnet does not explain; it can be skipped.
+Windows support is a decided target, deferred until the maintainer is on a Windows machine; the design is in the plan's §11. Do not run Wine on the Linux machine.
 
 ## What we are building
 A terminal-based, good-looking LAN discovery tool (Go, Bubble Tea, Lipgloss, TideUI) that shows live updates and progress, and lets the user understand what is happening under the hood during discovery. Every displayed value must show how it was discovered.

@@ -652,7 +652,28 @@ motivated it (the device that never speaks); revisit only if wanted.
 - ~~TideUI license and compatible Bubble Tea/Lipgloss versions.~~ **Resolved 2026-09-16:** MIT; TideUI v0.2.2 requires Bubble Tea v1.3.10 and Lipgloss v1.1.0 (see §4).
 - ~~How should a passive probe's observations reach a device the store keys by MAC?~~ **Resolved 2026-09-17:** the store reconciles them, and probes stay simple. An observation keyed by a bare IP is routed to whichever device has claimed that address (`resolveKey`); when a MAC-keyed device later claims an address that already exists as its own IP-keyed device, the store folds that device in, keeps an alias so in-flight observations still land, and publishes `EventDeviceMerged`. Ambiguity is never guessed at: if two devices claim one address, the IP-keyed facts stay separate and the `duplicate-ip` flag stands. Phase 4 should key history off the surviving MAC.
 - Final project name.
-- Windows support: out of scope initially (would need Npcap).
+- ~~Windows support: out of scope initially (would need Npcap).~~ **Decided
+  2026-09-18:** Windows users are a definite target. The work is deferred
+  until the maintainer is on a Windows machine to build and test it there (he does not
+  want Wine run on the Linux box). Today `GOOS=windows go build ./...` fails
+  only on `internal/probe/mdns/listener.go` (Unix socket options), but a
+  build is not enough: four mechanisms are Unix-only. The survey found:
+
+  | Part | Windows design |
+  |---|---|
+  | Raw ARP (`arp`) | Npcap, via `wpcap.dll` loaded with `windows.LoadLibraryEx` from `%SystemRoot%\System32\Npcap` (fall back to the normal search path for WinPcap-compatible installs), so no cgo and no new dependency. Device name is `\Device\NPF_` + the adapter GUID (`IpAdapterAddresses.AdapterName`, matched by interface index). `pcap_open_live`, filter `arp` via `pcap_compile`/`pcap_setfilter`, `pcap_next_ex` with a ~100 ms timeout so reads can poll for cancellation, `pcap_sendpacket`, `pcap_setmintocopy(0)` if present. Separate handles for sending and receiving; `Close` takes a mutex so it never frees a handle mid-read. Without Npcap, fall back to `neigh`, with a mode saying "install Npcap for raw ARP". |
+  | Unprivileged fallback (`neigh`) | `GetIpNetTable` from `iphlpapi.dll` (IPv4, `MIB_IPNETROW` is 24 bytes: index, phys-addr length, 8-byte addr, IPv4 in network order, type; skip type 2 "invalid"). Parse the buffer in portable code so it is tested everywhere. Interface names come from `net.InterfaceByIndex`, which on Windows gives the friendly name `net.Interfaces` uses. The UDP nudge works unchanged. |
+  | ICMP (`icmp`) | No unprivileged ICMP socket on Windows, and raw needs admin. Use `IcmpSendEcho` (what `ping.exe` uses, no admin) behind a `net.PacketConn` adapter: each write runs `IcmpSendEcho` in a goroutine and a success is handed back to the reader as a synthesised echo reply, so the existing matching and timing code is unchanged and RTT keeps its microsecond resolution. New `Mode` for the socket kind. |
+  | mDNS (`mdns`, `dns-sd`) | Windows has no `SO_REUSEPORT` and cannot bind a multicast address: set `SO_REUSEADDR` only and bind `0.0.0.0:5353`. Move `shareablePort` into `sockopt_unix.go`/`sockopt_windows.go`. `IP_MULTICAST_LOOP` is receive-side on Windows, so the listener will hear shoal's own questions; harmless. Windows Defender Firewall prompts on first run and must be allowed for mDNS and NetBIOS answers to arrive. |
+  | Gateway (`netif`) | `GetAdaptersAddresses` with `GAA_FLAG_INCLUDE_GATEWAYS`: the up adapter with an IPv4 gateway and the lowest `Ipv4Metric`, named via `net.InterfaceByIndex`. New `route_windows.go`; exclude Windows from `route_other.go`. |
+  | Resolvers (`rdns`) | No `/etc/resolv.conf`: take `FirstDnsServerAddress` of the same adapters, IPv4 first (Windows lists placeholder `fec0::` servers that would time out). Make the "named no nameserver" wording platform-neutral. |
+
+  Also: platform-aware hints wherever the code says `make setcap` or sudo
+  (on Windows: install Npcap from npcap.com; its licence does not allow
+  bundling it); a `make build-windows` target producing `bin/shoal.exe`;
+  build tags on `conn_other.go` and `table_other.go` to exclude Windows. The
+  TUI itself (Bubble Tea) runs in Windows Terminal. nbns and the rest of the
+  engine need no change.
 
 ---
 
