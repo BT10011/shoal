@@ -30,7 +30,10 @@ type Options struct {
 const (
 	batchEvery = 100 * time.Millisecond
 	clockEvery = time.Second
-	logKeep    = 2000 // events kept for browsing; a /24 sweep produces about 600
+	// A listener's wave needs a steady clock, since batches only arrive
+	// when something is heard; while one runs the UI ticks at this rate.
+	animateEvery = waveEvery
+	logKeep      = 2000 // events kept for browsing; a /24 sweep produces about 600
 
 	// subnetBelowWidth is the terminal width under which the status bar
 	// stops showing the subnet so the key bar keeps move, rescan and stop.
@@ -115,11 +118,20 @@ func newApp(o Options) *app {
 }
 
 func (a *app) Init() tea.Cmd {
-	return tick()
+	return a.tick()
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(clockEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
+// tick schedules the next clock message: once a second normally, faster
+// while a listener's wave has to keep rolling.
+func (a *app) tick() tea.Cmd {
+	every := clockEvery
+	for _, d := range a.status.Discoverers {
+		if isListener(d) && d.State == engine.StateRunning {
+			every = animateEvery
+			break
+		}
+	}
+	return tea.Tick(every, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -128,7 +140,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 	case tickMsg:
 		a.now = time.Time(msg)
-		return a, tick()
+		return a, a.tick()
 	case Batch:
 		a.applyBatch(msg)
 	case tea.KeyMsg:

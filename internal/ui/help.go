@@ -30,8 +30,11 @@ and the details pane can tell you which one. Nothing appears by magic.
   focus here and scroll it with the same movement keys; Esc goes back.
 
   Under the hood: what the probes are doing right now. A progress bar per
-  discoverer, a queue count per enricher, and beneath the rule a log of
-  every packet sent (→) and received (←), with the time it happened. The
+  discoverer that sweeps, a rolling wave for one that only listens (it has
+  no end to count towards, so the row says how many messages it has heard
+  and the wave goes flat when it stops), a queue count per enricher, and
+  beneath the rule a log of every packet sent (→) and received (←), with
+  the time it happened. The
   log follows the newest event until you Tab into the pane and press ↑:
   that pins it, selects an event, and shows that event in full, wrapped
   rather than cut off, with a line saying what kind of event it was and
