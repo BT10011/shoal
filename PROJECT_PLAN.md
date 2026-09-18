@@ -293,6 +293,31 @@ Windows and Samba machines — and the RTT column is live.
 
 **Done when:** hostnames and mDNS services populate live, with conflicting names shown side by side in details. *(Met: names and services populate live from three sources. The side-by-side conflict view is Phase 3's detail pane — the store already keeps every competing observation, so it is a rendering job, not a data one.)*
 
+**Revisited 2026-09-18, before Phase 4** (loose ends from the first real runs):
+- *mDNS questions now go out from port 5353.* A one-shot question from an
+  ephemeral port is answered by unicast, which host firewalls drop (ufw, for
+  one, does, so the enricher named nothing on a machine running it). From 5353 the answer is
+  multicast, allowed wherever mDNS is. Portable design: answers read on a
+  socket bound to the group address (never takes unicast from the system
+  responder), each question sent from a transient socket bound to 5353 with
+  SO_REUSEADDR/SO_REUSEPORT, the scanning interface's multicast IF, loopback
+  off and TTL 255; answers matched by name, query ID 0 (§18.1). If 5353
+  cannot be shared, a logged fallback to the old one-shot question. Verified
+  live: devices that went unanswered before now answer. Linux, macOS and FreeBSD
+  build; Windows still does not (§11).
+- *Values are renewed before they expire.* At 80% of a value's TTL the
+  engine re-asks the enricher that produced it (`engine.Producer`, matched
+  by source and field), again at 90%, as mDNS caches do (§5.2). Renewals are
+  queued apart from scan lookups: they do not count as asked or named, do
+  not hold up "settled" (so freshness marks do not flicker), are counted as
+  "renewed" on the row, pause while a scan is stopped, and a `renew` event
+  summarises each round. `c` now also stops renewals after a settled scan.
+- *The mDNS listener is `dns-sd` on screen.* Its facts keep source `mdns`
+  (priority, direct contact and renewal by the mdns enricher all follow the
+  source); only its row and log label changed, so it no longer reads as a
+  second `mdns`. The log's probe column widened to six characters.
+  `shoal probe dns-sd` listens.
+
 **Deferred out of this phase, to pick up whenever it is worth it:**
 - Active mDNS service discovery — shoal never asks `_services._dns-sd._udp.local` itself, so on a quiet network `service` fills only when another device browses.
 - ARP round trips, to contrast a layer 2 answer with ICMP's layer 3 one. The sweep keeps no per-address timings yet.

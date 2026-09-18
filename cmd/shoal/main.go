@@ -129,7 +129,7 @@ func runTUI(args []string) error {
 	if err := eng.AddEnricher(rdns.New(rdns.Options{Resolvers: rdns.SystemResolvers(iface.Gateway)})); err != nil {
 		return err
 	}
-	if err := eng.AddEnricher(mdns.New(mdns.Options{})); err != nil {
+	if err := eng.AddEnricher(mdns.New(mdns.Options{Iface: iface})); err != nil {
 		return err
 	}
 	// NetBIOS names the Windows and Samba hosts the other two miss.

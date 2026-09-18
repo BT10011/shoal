@@ -617,6 +617,7 @@ func TestEnricherRowsCountAskedAgainstAnswered(t *testing.T) {
 		{engine.EnricherStatus{Name: "rogue", Produces: model.FieldFlag, Completed: 23, Answered: 1}, "rogue  23 asked · 1 flagged"},
 		{engine.EnricherStatus{Name: "nbns", Produces: model.FieldHostname, Running: 4, Queued: 9, Completed: 10, Failed: 1, Answered: 3}, "nbns   15 asked · 3 named · 4 running · 9 queued · 1 failed"},
 		{engine.EnricherStatus{Name: "x"}, "x      0 asked · 0 answered"},
+		{engine.EnricherStatus{Name: "mdns", Produces: model.FieldHostname, Completed: 23, Answered: 9, Refreshing: 2, Renewed: 14}, "mdns   23 asked · 9 named · 14 renewed"},
 	}
 	for _, c := range cases {
 		if got := strings.TrimRight(row(c.e), " "); got != c.want {

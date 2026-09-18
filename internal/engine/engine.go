@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,6 +102,10 @@ type EnricherStatus struct {
 	Completed int // lookups finished without error
 	Failed    int
 	Answered  int // lookups that produced the Produces field
+	// Renewals are lookups the engine made to keep a value from expiring.
+	// They are counted apart, so Asked and Answered stay about the scan.
+	Refreshing int // renewals queued or running
+	Renewed    int // renewals that brought the value back
 }
 
 // Asked is every lookup this scan has started: finished or still waiting.
@@ -175,7 +180,19 @@ type Engine struct {
 
 	scan       *scan // the current or most recent scan; nil before Start
 	rescanning bool  // a rescan is waiting for the previous scan to let go
+
+	refreshMu sync.Mutex
+	refreshed map[string]time.Time // device and enricher → when a renewal was last asked for
 }
+
+// refreshEvery is how often the engine looks for values nearing expiry.
+const refreshEvery = time.Second
+
+// refreshAt is how far through its TTL a value is asked for again. mDNS
+// caches do the same, at 80% and then 90% of the TTL (RFC 6762 §5.2): the
+// answer arrives while the old one is still good, so a name that is still
+// true never blinks off the screen, and one that is no longer true expires.
+const refreshAt = 0.8
 
 // scan is one run of every discoverer. Enrichers outlive scans: their worker
 // pools keep running and answer whatever each scan turns up.
@@ -197,7 +214,7 @@ func WithClock(now func() time.Time) Option {
 
 // New creates an engine over a store and subscribes to its events.
 func New(st *store.Memory, iface netif.Interface, opts ...Option) *Engine {
-	e := &Engine{store: st, iface: iface, now: time.Now}
+	e := &Engine{store: st, iface: iface, now: time.Now, refreshed: make(map[string]time.Time)}
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -250,6 +267,7 @@ func (e *Engine) AddEnricher(en Enricher) error {
 		workers:  workers,
 		triggers: triggers,
 		produces: produces,
+		renewals: make(map[string]bool),
 		queued:   make(map[string]bool),
 		wake:     make(chan struct{}, workers),
 	})
@@ -273,6 +291,8 @@ func (e *Engine) Start(ctx context.Context) error {
 			go e.enrichWorker(e.ctx, en)
 		}
 	}
+	e.wg.Add(1)
+	go e.refreshLoop(e.ctx)
 	events := e.startScan()
 	e.mu.Unlock()
 	for _, ev := range events {
@@ -380,12 +400,91 @@ func (e *Engine) Cancel() {
 	e.mu.Unlock()
 	s.cancel()
 	e.publish(ProbeEvent{Probe: "scan", Kind: KindInfo,
-		Message: fmt.Sprintf("scan %d stopped: discoverers cancelled, %d queued lookups dropped", s.n, dropped)})
+		Message: fmt.Sprintf("scan %d stopped: discoverers cancelled, %d queued lookups dropped, and values are no longer renewed as they near expiry", s.n, dropped)})
 }
 
-// busyLocked reports whether any discoverer is still running or any
-// enricher has work in hand. It must be called with e.mu held.
+func (e *Engine) refreshLoop(ctx context.Context) {
+	defer e.wg.Done()
+	t := time.NewTicker(refreshEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			e.refreshDue(e.now())
+		}
+	}
+}
+
+// refreshDue asks again for every value that has passed 80% of its TTL, of
+// the enricher that produced it, and a second time at 90% if the first
+// did not renew it. It pauses while the scan is stopped, since stopping
+// means the user wants the screen to hold still.
+func (e *Engine) refreshDue(now time.Time) {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	e.mu.Lock()
+	if !e.started || e.ctx.Err() != nil || e.scan == nil || e.scan.stopped {
+		e.mu.Unlock()
+		return
+	}
+	producers := make(map[string]*enricher)
+	for _, en := range e.enrichers {
+		if en.produces != "" {
+			producers[en.Name()] = en
+		}
+	}
+	e.mu.Unlock()
+	if len(producers) == 0 {
+		return
+	}
+
+	asked := make(map[string]int)
+	total := 0
+	for _, dev := range e.store.Devices() {
+		for field, obs := range dev.Facts {
+			for _, o := range obs {
+				en := producers[o.Source]
+				if en == nil || field != en.produces || o.TTL <= 0 || o.Expired(now) {
+					continue
+				}
+				if now.Before(o.At.Add(time.Duration(float64(o.TTL) * refreshAt))) {
+					continue
+				}
+				k := dev.Key + "\x00" + en.Name()
+				if last, ok := e.refreshed[k]; ok && now.Sub(last) < o.TTL/10 {
+					continue
+				}
+				e.refreshed[k] = now
+				if en.enqueueRefresh(dev.Key) {
+					asked[en.Name()]++
+					total++
+				}
+			}
+		}
+	}
+	if total == 0 {
+		return
+	}
+	names := make([]string, 0, len(asked))
+	for name, n := range asked {
+		names = append(names, fmt.Sprintf("%s %d", name, n))
+	}
+	sort.Strings(names)
+	e.publish(ProbeEvent{Probe: "renew", Kind: KindInfo, At: now,
+		Message: fmt.Sprintf("asking again for %d values nearing expiry (%s): a value is renewed at 80%% of its TTL, and again at 90%%, as mDNS caches do (RFC 6762 §5.2)", total, strings.Join(names, ", "))})
+}
+
+// busyLocked reports whether anything would still change the screen: a
+// discoverer running, an enricher with work in hand, or one whose values
+// are renewed as they near expiry. It must be called with e.mu held.
 func (e *Engine) busyLocked() bool {
+	for _, en := range e.enrichers {
+		if en.produces != "" {
+			return true
+		}
+	}
 	for _, d := range e.discoverers {
 		if d.snapshot().State == StateRunning {
 			return true
@@ -556,6 +655,7 @@ type enricher struct {
 	triggers map[model.Field]bool
 	produces model.Field
 	wake     chan struct{}
+	renewals map[string]bool // queued keys whose lookup only renews a value
 
 	mu        sync.Mutex
 	queue     []string
@@ -564,25 +664,31 @@ type enricher struct {
 	completed int
 	failed    int
 	answered  int
+
+	runningRenewals int
+	renewed         int
 }
 
 func (en *enricher) snapshot() EnricherStatus {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	return EnricherStatus{
-		Name:      en.Name(),
-		Running:   en.running,
-		Queued:    len(en.queue),
-		Completed: en.completed,
-		Failed:    en.failed,
-		Answered:  en.answered,
-		Produces:  en.produces,
+		Name:       en.Name(),
+		Running:    en.running,
+		Queued:     len(en.queue) - len(en.renewals),
+		Completed:  en.completed,
+		Failed:     en.failed,
+		Answered:   en.answered,
+		Produces:   en.produces,
+		Refreshing: len(en.renewals) + en.runningRenewals,
+		Renewed:    en.renewed,
 	}
 }
 
 func (en *enricher) enqueue(key string) {
 	en.mu.Lock()
 	if en.queued[key] {
+		delete(en.renewals, key) // already queued as a renewal: it is a full lookup now
 		en.mu.Unlock()
 		return
 	}
@@ -595,6 +701,25 @@ func (en *enricher) enqueue(key string) {
 	}
 }
 
+// enqueueRefresh queues a lookup that only renews a value, unless the
+// device is already queued. It reports whether anything was queued.
+func (en *enricher) enqueueRefresh(key string) bool {
+	en.mu.Lock()
+	if en.queued[key] {
+		en.mu.Unlock()
+		return false
+	}
+	en.queued[key] = true
+	en.renewals[key] = true
+	en.queue = append(en.queue, key)
+	en.mu.Unlock()
+	select {
+	case en.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 // clear empties the queue and reports how many lookups were dropped.
 func (en *enricher) clear() int {
 	en.mu.Lock()
@@ -602,25 +727,41 @@ func (en *enricher) clear() int {
 	n := len(en.queue)
 	en.queue = nil
 	en.queued = make(map[string]bool)
+	en.renewals = make(map[string]bool)
 	return n
 }
 
-func (en *enricher) pop() (string, bool) {
+// pop takes the next device off the queue and says whether its lookup
+// only renews a value.
+func (en *enricher) pop() (key string, renewal, ok bool) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	if len(en.queue) == 0 {
-		return "", false
+		return "", false, false
 	}
-	key := en.queue[0]
+	key = en.queue[0]
 	en.queue = en.queue[1:]
 	delete(en.queued, key)
-	en.running++
-	return key, true
+	renewal = en.renewals[key]
+	delete(en.renewals, key)
+	if renewal {
+		en.runningRenewals++
+	} else {
+		en.running++
+	}
+	return key, renewal, true
 }
 
-func (en *enricher) finish(err error, answered bool) {
+func (en *enricher) finish(err error, answered, renewal bool) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
+	if renewal {
+		en.runningRenewals--
+		if answered {
+			en.renewed++
+		}
+		return
+	}
 	en.running--
 	if err != nil {
 		en.failed++
@@ -635,7 +776,7 @@ func (en *enricher) finish(err error, answered bool) {
 func (en *enricher) resetCounts() {
 	en.mu.Lock()
 	defer en.mu.Unlock()
-	en.completed, en.failed, en.answered = 0, 0, 0
+	en.completed, en.failed, en.answered, en.renewed = 0, 0, 0, 0
 }
 
 func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
@@ -649,7 +790,7 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		e.publish(ev)
 	}
 	for {
-		key, ok := en.pop()
+		key, renewal, ok := en.pop()
 		if !ok {
 			select {
 			case <-ctx.Done():
@@ -660,7 +801,7 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		}
 		snap, found := e.store.Get(key)
 		if !found {
-			en.finish(nil, false)
+			en.finish(nil, false, renewal)
 			continue
 		}
 		var answered atomic.Bool
@@ -674,7 +815,7 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		if err != nil && ctx.Err() == nil {
 			e.publish(ProbeEvent{Probe: name, Kind: KindError, Target: key, Message: err.Error()})
 		}
-		en.finish(err, answered.Load())
+		en.finish(err, answered.Load(), renewal)
 		if ctx.Err() != nil {
 			return
 		}

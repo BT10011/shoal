@@ -269,7 +269,7 @@ func TestEnqueueDedupesWhileQueued(t *testing.T) {
 	if len(en.queue) != 2 {
 		t.Fatalf("queue = %v, want [a b]", en.queue)
 	}
-	if k, _ := en.pop(); k != "a" {
+	if k, _, _ := en.pop(); k != "a" {
 		t.Fatalf("popped %q", k)
 	}
 	en.enqueue("a")
@@ -639,5 +639,100 @@ func TestEnricherCountsWhatItProducedAndRestartsPerScan(t *testing.T) {
 	eventually(t, "settled again", func() bool { return settled(e, "rdns", 4)() })
 	if s := enricherStatus(e, "rdns"); s.Asked() != 4 || s.Answered != 2 {
 		t.Fatalf("counts should restart per scan, not pile up: %+v", s)
+	}
+}
+
+// namingEnricher names every device, with a TTL, like rdns or mdns.
+type namingEnricher struct {
+	*countingEnricher
+	ttl    time.Duration
+	answer atomic.Bool
+}
+
+func (n *namingEnricher) Produces() model.Field { return model.FieldHostname }
+
+func (n *namingEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit Emit, report Report) error {
+	n.mu.Lock()
+	n.calls[d.Key]++
+	n.mu.Unlock()
+	if n.answer.Load() {
+		emit(model.Observation{DeviceKey: d.Key, Field: model.FieldHostname, Value: "h-" + d.Key, Method: "PTR", Confidence: 0.7, TTL: n.ttl})
+	}
+	return nil
+}
+
+func TestValuesAreRenewedBeforeTheyExpire(t *testing.T) {
+	var clock atomic.Int64
+	t0 := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	clock.Store(t0.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	at := func(d time.Duration) time.Time { clock.Store(t0.Add(d).UnixNano()); return now() }
+
+	st := store.NewMemory(store.WithClock(now))
+	e := New(st, netif.Interface{}, WithClock(now))
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	namer := &namingEnricher{countingEnricher: newCountingEnricher("rdns", 2, model.FieldIP), ttl: 100 * time.Second}
+	namer.answer.Store(true)
+	if err := e.AddEnricher(namer); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	eventually(t, "first names", settled(e, "rdns", 2))
+
+	e.refreshDue(at(79 * time.Second))
+	if s := enricherStatus(e, "rdns"); s.Refreshing != 0 || namer.callCount("mac-1") != 1 {
+		t.Fatalf("nothing is due before 80%% of the TTL: %+v", s)
+	}
+
+	e.refreshDue(at(80 * time.Second))
+	eventually(t, "renewed", func() bool { return enricherStatus(e, "rdns").Renewed == 2 })
+	s := enricherStatus(e, "rdns")
+	if s.Asked() != 2 || s.Answered != 2 || s.Refreshing != 0 || s.Running != 0 || s.Queued != 0 {
+		t.Fatalf("renewals must not count as the scan's own lookups: %+v", s)
+	}
+	if namer.callCount("mac-1") != 2 || namer.callCount("mac-2") != 2 {
+		t.Fatalf("each name should have been asked for again once")
+	}
+	snap, _ := st.Get("mac-1")
+	if o, ok := snap.ResolvedAt(model.FieldHostname, at(150*time.Second)); !ok || !o.At.Equal(t0.Add(80*time.Second)) {
+		t.Fatalf("the renewed name should outlive the first one's expiry: %+v ok=%v", o, ok)
+	}
+	renews := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "renew" })
+	if len(renews) == 0 || !strings.Contains(renews[0].Message, "asking again for 2 values nearing expiry (rdns 2)") {
+		t.Fatalf("renewal events = %+v", renews)
+	}
+
+	// The device stops answering: asked at 80% and again at 90%, then the name expires.
+	namer.answer.Store(false)
+	e.refreshDue(at(80*time.Second + 80*time.Second))
+	eventually(t, "second round asked", func() bool { return namer.callCount("mac-1") == 3 })
+	e.refreshDue(at(80*time.Second + 85*time.Second))
+	if namer.callCount("mac-1") != 3 {
+		t.Fatal("a renewal is not asked for again within a tenth of the TTL")
+	}
+	e.refreshDue(at(80*time.Second + 90*time.Second))
+	eventually(t, "retried at 90%", func() bool { return namer.callCount("mac-1") == 4 })
+	snap, _ = st.Get("mac-1")
+	if _, ok := snap.ResolvedAt(model.FieldHostname, at(80*time.Second+101*time.Second)); ok {
+		t.Fatal("a name nobody renewed must expire")
+	}
+
+	// Stopped: the screen holds still.
+	e.Cancel()
+	if err := st.Apply(model.Observation{DeviceKey: "mac-2", Field: model.FieldHostname, Value: "x", Source: "rdns", Method: "PTR", Confidence: 0.7, TTL: 10 * time.Second, At: now()}); err != nil {
+		t.Fatal(err)
+	}
+	before := namer.callCount("mac-2")
+	e.refreshDue(now().Add(9 * time.Second))
+	time.Sleep(20 * time.Millisecond)
+	if namer.callCount("mac-2") != before {
+		t.Fatal("nothing is renewed while the scan is stopped")
 	}
 }

@@ -154,6 +154,9 @@ func (a *app) renderEnricher(e engine.EnricherStatus, width int) string {
 	if e.Failed > 0 {
 		line += fmt.Sprintf(" · %d failed", e.Failed)
 	}
+	if e.Renewed > 0 {
+		line += fmt.Sprintf(" · %d renewed", e.Renewed)
+	}
 	style := s.Item
 	if e.Answered == 0 {
 		style = s.ItemMuted
@@ -194,7 +197,7 @@ func (a *app) eventTag(kind engine.EventKind) string {
 
 // eventHead is the fixed prefix of a log line: time, probe and tag.
 func eventHead(ev engine.ProbeEvent, tag string) string {
-	return fmt.Sprintf("%s %-5s %s ", ev.At.Format("15:04:05"), ev.Probe, tag)
+	return fmt.Sprintf("%s %-6s %s ", ev.At.Format("15:04:05"), ev.Probe, tag)
 }
 
 // describe puts an event's kind and target into words for the expanded

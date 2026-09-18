@@ -33,8 +33,9 @@ Probes:
                   (see docs/protocols/arp.md)
   neigh [iface]   Kernel neighbour cache, no privileges needed (see docs/protocols/neigh.md)
   rdns <ip>       Reverse DNS (PTR) lookup, naming the resolver that answered (see docs/protocols/rdns.md)
-  mdns [ip]       Ask a device its name over multicast, or with no ip, listen to the
-                  Bonjour conversation and write down what passes (see docs/protocols/mdns.md)
+  mdns <ip>       Ask a device its name over multicast, from port 5353 (see docs/protocols/mdns.md)
+  dns-sd          Listen to the Bonjour and Avahi conversation and write down what
+                  passes; sends nothing (also: shoal probe mdns with no ip)
   icmp <ip>       Echo requests, to measure the round trip (see docs/protocols/icmp.md)
   nbns <ip>       NetBIOS node status: the name table Windows and Samba hosts keep
                   (see docs/protocols/nbns.md)
@@ -61,6 +62,8 @@ func runProbe(args []string) error {
 		return runProbeRDNS(args[1:])
 	case "mdns":
 		return runProbeMDNS(args[1:])
+	case "dns-sd":
+		return runProbeMDNS(args[1:]) // with no address it listens
 	case "icmp":
 		return runProbeICMP(args[1:])
 	case "nbns":
@@ -230,11 +233,22 @@ func runProbeMDNS(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("question   %s\ngroup      %s:%d (link-local; routers do not forward it)\n\n", name, mdns.Group, mdns.Port)
+	iface, err := netif.Default()
+	if err != nil {
+		iface = netif.Interface{} // let the system pick where multicast goes
+	}
+	fmt.Printf("question   %s\ngroup      %s:%d (link-local; routers do not forward it)\nasked on   %s, from port %d\n\n", name, mdns.Group, mdns.Port, orDefault(iface.Name), mdns.Port)
 
-	probe := mdns.New(mdns.Options{Wait: *wait})
+	probe := mdns.New(mdns.Options{Wait: *wait, Iface: iface})
 	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
 	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{probe}, os.Stdout)
+}
+
+func orDefault(name string) string {
+	if name == "" {
+		return "the default multicast interface"
+	}
+	return name
 }
 
 func runProbeICMP(args []string) error {
