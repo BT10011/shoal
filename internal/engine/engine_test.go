@@ -500,8 +500,9 @@ func TestCancelStopsDiscoverersAndDrainsQueues(t *testing.T) {
 	if got := enricherStatus(e, "slow"); got.Completed+got.Failed >= 6 {
 		t.Fatalf("queued lookups ran anyway: %+v", got)
 	}
+	e.Cancel() // a second press changes nothing and says nothing
 	infos := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "scan" && ev.Kind == KindInfo })
-	if len(infos) != 1 || !strings.HasPrefix(infos[0].Message, "scan 1 cancelled: discoverers stopped, ") {
+	if len(infos) != 1 || !strings.HasPrefix(infos[0].Message, "scan 1 stopped: discoverers cancelled, ") {
 		t.Fatalf("cancel events = %+v", infos)
 	}
 	if s := e.Status(); s.Scan != 1 || s.Sweeping() || s.Settled() {
@@ -513,6 +514,28 @@ func TestCancelStopsDiscoverersAndDrainsQueues(t *testing.T) {
 		s := e.Status()
 		return s.Scan == 2 && s.Discoverers[0].State == StateRunning && s.Discoverers[0].Err == ""
 	})
+}
+
+func TestCancelAfterScanFinishedIsSilent(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	eventually(t, "done", func() bool { return discovererState(e, 0) == StateDone })
+	e.Cancel()
+	if infos := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "scan" }); len(infos) != 0 {
+		t.Fatalf("nothing was running; cancel should not announce anything: %+v", infos)
+	}
+	if s := discovererState(e, 0); s != StateDone {
+		t.Fatalf("state = %s; a finished scan stays finished", s)
+	}
 }
 
 func TestStopDuringRescanReturns(t *testing.T) {
