@@ -22,6 +22,7 @@ import (
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/probe/rdns"
+	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/store"
 )
 
@@ -38,6 +39,9 @@ Probes:
                   (see docs/protocols/nbns.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
+  rogue <ip> [subnet]
+                  Say whether an address belongs to the subnet, and if not why: link-local
+                  or left over from another network (see docs/protocols/rogue.md)
 `
 
 func runProbe(args []string) error {
@@ -62,6 +66,8 @@ func runProbe(args []string) error {
 		return runProbeNBNS(args[1:])
 	case "oui":
 		return runProbeOUI(args[1:])
+	case "rogue":
+		return runProbeRogue(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, probeUsage)
 		return fmt.Errorf("unknown probe %q", args[0])
@@ -80,7 +86,7 @@ func runProbeFake(args []string) error {
 	if err != nil {
 		return err
 	}
-	enrichers := append([]engine.Enricher{ouiEnricher}, fake.NewEnrichers(opts)...)
+	enrichers := append([]engine.Enricher{ouiEnricher, rogue.New(fake.Subnet())}, fake.NewEnrichers(opts)...)
 	return runStandalone(netif.Interface{}, []engine.Discoverer{fake.NewDiscoverer(opts)}, enrichers, os.Stdout)
 }
 
@@ -293,6 +299,33 @@ func runProbeOUI(args []string) error {
 	}
 	seed := seedDiscoverer{key: mac.String(), field: model.FieldMAC, value: mac.String()}
 	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{ouiEnricher}, os.Stdout)
+}
+
+func runProbeRogue(args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("usage: shoal probe rogue <ip> [subnet]")
+	}
+	ip := net.ParseIP(args[0])
+	if ip == nil {
+		return fmt.Errorf("%q is not an IP address", args[0])
+	}
+	var subnet *net.IPNet
+	if len(args) == 2 {
+		_, n, err := net.ParseCIDR(args[1])
+		if err != nil {
+			return err
+		}
+		subnet = n
+	} else {
+		iface, err := pickInterface("")
+		if err != nil {
+			return err
+		}
+		subnet = iface.Subnet
+		fmt.Printf("subnet     %s (from %s)\n\n", subnet, iface.Name)
+	}
+	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
+	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{rogue.New(subnet)}, os.Stdout)
 }
 
 func realOUI() (engine.Enricher, error) {

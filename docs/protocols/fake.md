@@ -29,6 +29,15 @@ UI is honest about being invented.
   flags both with `duplicate-ip`.
 - **Randomised MAC**: the phone at `.101` has a locally-administered address, so
   no vendor can be looked up, and it drops ICMP.
+- **Devices that do not belong** (Phase 3a): a Sony PTZ camera at
+  `169.254.37.12` that got no DHCP answer and fell back to a link-local
+  address, and an Audinate (Dante) box at `192.168.0.77` still carrying a
+  static address from another venue. The sweep never asks them; part-way
+  through it "overhears" their own ARP (the camera announcing itself, the
+  Dante box asking for `192.168.0.1`), exactly as a real segment gives such
+  devices away. The `rogue` enricher then flags them `link-local-ip` and
+  `off-subnet-ip`. The camera still answers mDNS, as Bonjour works on
+  link-local; neither answers ICMP, since nothing routes to them.
 - **Timing**: requests are paced (default 15 ms per address, 150 ms lookups with
   ±50 % jitter) so progress and the event log are readable.
 

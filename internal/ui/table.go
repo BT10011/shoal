@@ -19,13 +19,61 @@ type column struct {
 }
 
 // The MAC goes first when space is short: it is always in the details pane,
-// while hostname and vendor are what make the overview readable.
+// while hostname and vendor are what make the overview readable. FLAGS
+// outlives vendor because a badge saying a device is on the wrong subnet is
+// the whole point of looking, for a technician on a venue floor.
 var columns = []column{
-	{title: "IP", field: model.FieldIP, width: 15, drop: 5},
+	{title: "IP", field: model.FieldIP, width: 15, drop: 6},
 	{title: "MAC", field: model.FieldMAC, width: 17, drop: 1},
-	{title: "HOSTNAME", field: model.FieldHostname, drop: 4},
+	{title: "HOSTNAME", field: model.FieldHostname, drop: 5},
 	{title: "VENDOR", field: model.FieldVendor, drop: 3},
 	{title: "RTT", field: model.FieldLatency, width: 7, drop: 2},
+	{title: "FLAGS", field: model.FieldFlag, width: 10, drop: 4},
+}
+
+// badges are the short forms flags take in the table, in the order they
+// are shown: a wrong address first, since that is what a technician is
+// looking for, then the rest. The details pane carries the full flag and
+// its reasoning.
+var badges = []struct{ flag, badge string }{
+	{"link-local-ip", "link-local"},
+	{"off-subnet-ip", "off-subnet"},
+	{"duplicate-ip", "dup-ip"},
+	{"this-host", "self"},
+	{"locally-administered-mac", "rand-mac"},
+}
+
+// badgeText turns a device's flags into the FLAGS cell.
+func badgeText(flags []string) string {
+	set := make(map[string]bool, len(flags))
+	for _, f := range flags {
+		set[f] = true
+	}
+	var out []string
+	for _, b := range badges {
+		if set[b.flag] {
+			out = append(out, b.badge)
+			delete(set, b.flag)
+		}
+	}
+	for _, f := range flags { // anything a future probe adds, as it is
+		if set[f] {
+			out = append(out, f)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// cell is the table text for one field of a device: the resolved value,
+// or for the multi-valued flags every badge.
+func cell(d model.DeviceSnapshot, f model.Field, now time.Time) string {
+	if f == model.FieldFlag {
+		return badgeText(d.Values(f, now))
+	}
+	if o, ok := d.ResolvedAt(f, now); ok {
+		return o.Value
+	}
+	return ""
 }
 
 const minFlexWidth = 14
@@ -220,10 +268,7 @@ func (a *app) renderTable(width, rows int) []string {
 		d := a.devices[i]
 		fr := classify(d, a.status)
 		for j, c := range cols {
-			v := ""
-			if o, ok := d.ResolvedAt(c.field, a.now); ok {
-				v = o.Value
-			}
+			v := cell(d, c.field, a.now)
 			if c.field == model.FieldHostname && d.Conflicting(c.field, a.now) {
 				v += " !"
 			}

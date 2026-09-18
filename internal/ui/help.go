@@ -74,6 +74,8 @@ MAC, oui looks the vendor up in the embedded IEEE registry.
   VENDOR: the maker, from the first three bytes of the MAC. A randomised
   or locally-administered MAC has no vendor, and says so in the details.
   RTT: the best of three ICMP round trips.
+  FLAGS: short badges for things worth a second look, explained under
+  "Devices that do not belong" below.
 
 The narrow column at the far left is freshness, described below. Columns
 that do not fit are dropped, MAC first, because it is always in the
@@ -117,6 +119,36 @@ device is still there.
   ✗: the scan finished, including every follow-up lookup, without hearing
   from it. Shown in the error colour.
   -: nothing has ever exchanged packets with it.
+
+# Devices that do not belong
+
+Gear moves between venues and arrives still carrying an address from the
+last one, or with no configuration at all. It never registers properly,
+and the question on the floor is which box it is. The FLAGS column marks
+what the details pane explains in full:
+
+  link-local: the address is in 169.254.0.0/16, which a device gives
+  itself when it asks for DHCP and nothing answers. A DHCP server that is
+  down or absent on this VLAN, a cable in the wrong socket, or a box that
+  was never set up.
+  off-subnet: the address is outside the subnet being scanned, yet the
+  device is on this segment. Usually a static address left over from
+  another network or venue, or a lease from a different VLAN.
+  dup-ip: two devices claim the same address; both are marked.
+  self: this machine.
+  rand-mac: a randomised, locally-administered MAC, so no vendor can be
+  looked up. Phones and laptops do this on purpose.
+
+The first two are found without sending anything. A device on the wrong
+subnet still broadcasts ARP for its old gateway and announces itself when
+it links up, and the ARP listener writes every such frame down for as long
+as the scan runs, after the sweep has finished. Type /link-local or
+/off-subnet to see only those devices. A row with no IP at all is a device
+seen only at layer 2, usually one still probing for an address.
+
+That also sets the limit: all of this is layer 2, so it only works on the
+same VLAN or switch segment as the device. Nothing crosses a router. When a
+box that must be there does not show, that is the first thing to check.
 
 # Scans
 

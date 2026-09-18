@@ -14,6 +14,8 @@ import (
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/store"
 )
 
@@ -286,7 +288,7 @@ func TestViewShowsDevicesDetailsAndLog(t *testing.T) {
 	for _, want := range []string{
 		"Devices", "Details", "Under the hood",
 		"192.168.1.1", "192.168.1.20", "synology.local !", "Synology Inc.",
-		"mdns said synology.local", "conf 0.9", "5s ago",
+		"mdns said synology.local", "5s ago",
 		"arp    ", "20/254", "running", "rdns   1 running · 2 queued · 3 done",
 		"who-has 192.168.1.20", "hostname conflict",
 		"DEMO", "3 devices", "q quit",
@@ -296,7 +298,7 @@ func TestViewShowsDevicesDetailsAndLog(t *testing.T) {
 		}
 	}
 	details := ansi.Strip(joinLines(a.renderDetails(80)))
-	for _, want := range []string{"nas.lan  (disagrees)", "rdns · conf 0.7", "heard from directly 5s ago via arp, since scan 1 began"} {
+	for _, want := range []string{"nas.lan  (disagrees)", "rdns · conf 0.7", "conf 0.9", "heard from directly 5s ago via arp, since scan 1 began"} {
 		if !strings.Contains(details, want) {
 			t.Errorf("details missing %q\n%s", want, details)
 		}
@@ -526,6 +528,79 @@ func TestListenerRowRollsAWaveAndCountsWhatItHeard(t *testing.T) {
 	// A sweep that has not announced its total yet is not a listener.
 	if isListener(engine.DiscovererStatus{Name: "arp", State: engine.StateRunning, Message: "sweeping 10.0.0.0/24"}) {
 		t.Error("a sweep without a total yet must not be drawn as a listener")
+	}
+}
+
+func TestFlagsColumnShowsBadgesAndFiltersByFlag(t *testing.T) {
+	a, st := sized(t, 120, 40)
+	for _, o := range []model.Observation{
+		obs("mac-c", model.FieldIP, "169.254.37.12", "arp", 0.9),
+		obs("mac-c", model.FieldFlag, "link-local-ip", "rogue", 1),
+		obs("mac-a", model.FieldFlag, "this-host", "netif", 1),
+		obs("mac-a", model.FieldFlag, "locally-administered-mac", "oui", 1),
+	} {
+		if err := st.Apply(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.Update(Batch{Devices: st.Devices(), At: t0})
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "FLAGS") {
+		t.Fatalf("no FLAGS column\n%s", plain)
+	}
+	// Table rows sit in the left pane; the details pane shares the lines.
+	row := func(ip string) string {
+		for _, l := range strings.Split(plain, "\n") {
+			left := ansi.Truncate(l, 72, "")
+			if strings.Contains(left, "  "+ip+" ") {
+				return left
+			}
+		}
+		return ""
+	}
+	if r := row("169.254.37.12"); !strings.Contains(r, "link-local") {
+		t.Errorf("link-local row should carry its badge: %q", r)
+	}
+	if r := row("192.168.1.1"); !strings.Contains(r, "self,rand") {
+		t.Errorf("host row should carry self and rand-mac badges: %q", r)
+	}
+	if strings.Contains(plain, "RTT") == false {
+		t.Errorf("RTT should still fit at 120 columns\n%s", plain)
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "link-local" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(a.devices) != 1 || a.devices[0].Key != "mac-c" {
+		t.Fatalf("/link-local should leave the flagged device: %v", keys(a.devices))
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	details := ansi.Strip(joinLines(a.renderDetails(100)))
+	if !strings.Contains(details, "link-local-ip") || !strings.Contains(details, "rogue said link-local-ip") {
+		t.Errorf("details should show the flag with its provenance\n%s", details)
+	}
+}
+
+func TestBadgeText(t *testing.T) {
+	if got := badgeText([]string{"locally-administered-mac", "this-host", "duplicate-ip", "custom-flag", "link-local-ip"}); got != "link-local,dup-ip,self,rand-mac,custom-flag" {
+		t.Fatalf("badges = %q", got)
+	}
+	if got := badgeText(nil); got != "" {
+		t.Fatalf("no flags = %q", got)
+	}
+}
+
+func TestLayerTwoOnlyDeviceIsExplained(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}) // mac-c: MAC only
+	details := ansi.Strip(joinLines(a.renderDetails(100)))
+	if !strings.Contains(details, "seen at layer 2 only") {
+		t.Errorf("a device with no address should say so\n%s", details)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if details := ansi.Strip(joinLines(a.renderDetails(100))); strings.Contains(details, "layer 2 only") {
+		t.Error("a device with an address must not")
 	}
 }
 
@@ -1108,5 +1183,78 @@ func TestDetailsFocusScrollsAndKeyBarChanges(t *testing.T) {
 	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if a.focus != paneDevices {
 		t.Fatal("esc returns")
+	}
+}
+
+// TestDemoPointsAtTheBoxesOnTheWrongSubnet runs the real engine over the
+// demo cast with the rogue enricher, as `shoal --demo` does, and checks the
+// Phase 3a promise: the table flags the link-local camera and the Dante box
+// carrying another venue's address, the filter isolates them, and the
+// details pane says why and which probe saw the address.
+func TestDemoPointsAtTheBoxesOnTheWrongSubnet(t *testing.T) {
+	st := store.NewMemory()
+	eng := engine.New(st, netif.Interface{})
+	opts := fake.Options{Interval: 50 * time.Microsecond, Latency: 200 * time.Microsecond, Seed: 7}
+	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range append([]engine.Enricher{rogue.New(fake.Subnet())}, fake.NewEnrichers(opts)...) {
+		if err := eng.AddEnricher(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+	deadline := time.Now().Add(10 * time.Second)
+	for !eng.Status().Settled() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !eng.Status().Settled() {
+		t.Fatal("demo scan did not settle")
+	}
+
+	a := newApp(Options{Store: st, Engine: eng, Demo: true, Theme: "catppuccin-mocha"})
+	a.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
+	a.Update(Batch{Devices: st.Devices(), Status: eng.Status(), At: time.Now()})
+
+	plain := ansi.Strip(a.View())
+	for _, want := range []string{"169.254.37.12", "192.168.0.77", "link-local", "off-subnet"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("table missing %q\n%s", want, plain)
+		}
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "off-subnet" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(a.devices) != 1 || a.devices[0].Key != "00:1d:c1:12:34:56" {
+		t.Fatalf("/off-subnet should isolate the Dante box: %v", keys(a.devices))
+	}
+	details := ansi.Strip(joinLines(a.renderDetails(120)))
+	for _, want := range []string{
+		"off-subnet-ip",
+		"192.168.0.77 is outside this interface's subnet 192.168.1.0/24",
+		"Learned from arp: simulated ARP request from 192.168.0.77 overheard during the sweep, asking",
+		"who-has 192.168.0.1",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(details), " "), want) {
+			t.Errorf("details missing %q\n%s", want, details)
+		}
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "link-local" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(a.devices) != 1 || a.devices[0].Key != "00:01:4a:7c:2e:01" {
+		t.Fatalf("/link-local should isolate the camera: %v", keys(a.devices))
+	}
+	if !strings.Contains(ansi.Strip(a.View()), "1 of 13 match") {
+		t.Errorf("status bar should count the match\n%s", ansi.Strip(a.View()))
 	}
 }

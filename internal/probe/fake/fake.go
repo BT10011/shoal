@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,13 @@ type Device struct {
 	Services []string
 	RTT      time.Duration
 	Silent   bool // does not answer ICMP
+	// Overheard marks a device whose address is not in the demo subnet, so
+	// the sweep never asks it; it is found because its own ARP traffic is
+	// overheard part-way through, as on a real segment.
+	Overheard bool
+	// AskingFor is the address an overheard device is looking for, usually
+	// the gateway of the network it thinks it is on.
+	AskingFor string
 }
 
 // Options tune the simulation. Zero values pick demo-friendly defaults.
@@ -42,7 +50,16 @@ const (
 	defaultLatency  = 150 * time.Millisecond
 	subnet          = "192.168.1"
 	hosts           = 254
+	// overhearAt is the address index at which the sweep overhears the
+	// devices that are not in its subnet.
+	overhearAt = 40
 )
+
+// Subnet is the network the demo pretends to scan.
+func Subnet() *net.IPNet {
+	_, n, _ := net.ParseCIDR(subnet + ".0/24")
+	return n
+}
 
 func (o Options) withDefaults() Options {
 	if o.Devices == nil {
@@ -62,8 +79,10 @@ func (o Options) withDefaults() Options {
 
 // DefaultDevices is the demo cast: genuine vendor prefixes (MikroTik,
 // Synology, Apple, HP, Google, Philips, Raspberry Pi, Sonos, Espressif), a
-// randomised-MAC phone, a hostname disagreement (the printer) and two
-// smart plugs fighting over one IP.
+// randomised-MAC phone, a hostname disagreement (the printer), two smart
+// plugs fighting over one IP, and two visitors from an AV rack: a Sony PTZ
+// camera that got no DHCP answer and fell back to a link-local address, and
+// a Dante audio box still carrying a static address from another venue.
 func DefaultDevices() []Device {
 	return []Device{
 		{IP: "192.168.1.1", MAC: "2c:c8:1b:4a:10:01", RDNS: "gateway.lan", RTT: 900 * time.Microsecond},
@@ -84,6 +103,9 @@ func DefaultDevices() []Device {
 			Services: []string{"_sonos._tcp", "_spotify-connect._tcp"}, RTT: 6 * time.Millisecond},
 		{IP: "192.168.1.230", MAC: "84:cc:a8:01:02:03", RDNS: "plug-a.lan", RTT: 12 * time.Millisecond},
 		{IP: "192.168.1.230", MAC: "84:cc:a8:04:05:06", RDNS: "plug-b.lan", RTT: 14 * time.Millisecond},
+		{IP: "169.254.37.12", MAC: "00:01:4a:7c:2e:01", MDNSName: "PTZ-CAM-1.local", Services: []string{"_rtsp._tcp"},
+			Silent: true, Overheard: true, AskingFor: "169.254.37.12"},
+		{IP: "192.168.0.77", MAC: "00:1d:c1:12:34:56", Silent: true, Overheard: true, AskingFor: "192.168.0.1"},
 	}
 }
 
@@ -169,6 +191,9 @@ func (d *Discoverer) Run(ctx context.Context, _ netif.Interface, emit engine.Emi
 		if err := sleep(ctx, d.script.rng.jitter(d.opts.Interval)); err != nil {
 			return err
 		}
+		if n == overhearAt {
+			d.overhear(emit, report)
+		}
 		for _, dev := range d.script.byIP[ip] {
 			answered++
 			report(engine.ProbeEvent{Kind: engine.KindReceived, Target: ip, Message: fmt.Sprintf("%s is-at %s", ip, dev.MAC)})
@@ -180,6 +205,27 @@ func (d *Discoverer) Run(ctx context.Context, _ netif.Interface, emit engine.Emi
 	}
 	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweep complete: %d replies from %d addresses", answered, hosts)})
 	return nil
+}
+
+// overhear plays the ARP frames of the devices that are not in the subnet:
+// the sweep never asks them, but their own traffic gives them away.
+func (d *Discoverer) overhear(emit engine.Emit, report engine.Report) {
+	for _, dev := range d.opts.Devices {
+		if !dev.Overheard {
+			continue
+		}
+		var method, message string
+		if dev.AskingFor == dev.IP {
+			method = fmt.Sprintf("simulated gratuitous ARP from %s overheard during the sweep: the device is announcing that it now holds %s (demo); %s is outside %s.0/24, yet the frame arrived on this segment", dev.IP, dev.IP, dev.IP, subnet)
+			message = fmt.Sprintf("announce: %s is-at %s (gratuitous, overheard) · outside our subnet", dev.IP, dev.MAC)
+		} else {
+			method = fmt.Sprintf("simulated ARP request from %s overheard during the sweep, asking who-has %s (demo); %s is outside %s.0/24, yet the frame arrived on this segment", dev.IP, dev.AskingFor, dev.IP, subnet)
+			message = fmt.Sprintf("who-has %s tell %s (overheard) · outside our subnet", dev.AskingFor, dev.IP)
+		}
+		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: dev.IP, Message: message})
+		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldMAC, Value: dev.MAC, Method: method, Confidence: 0.9})
+		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldIP, Value: dev.IP, Method: method, Confidence: 0.9})
+	}
 }
 
 // NewEnrichers returns the demo rdns, mdns and icmp enrichers. Pair them

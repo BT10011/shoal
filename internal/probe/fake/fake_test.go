@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,17 @@ func (c *collector) report(e engine.ProbeEvent) {
 	c.events = append(c.events, e)
 }
 
+func (c *collector) observation(key string, f model.Field) (model.Observation, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, o := range c.obs {
+		if o.DeviceKey == key && o.Field == f {
+			return o, true
+		}
+	}
+	return model.Observation{}, false
+}
+
 func (c *collector) count(kind engine.EventKind) int {
 	n := 0
 	for _, e := range c.events {
@@ -55,6 +67,23 @@ func TestDiscovererSweepsEveryAddress(t *testing.T) {
 	}
 	if got := c.count(engine.KindReceived); got != len(DefaultDevices()) {
 		t.Fatalf("got %d replies, want one per device (%d)", got, len(DefaultDevices()))
+	}
+	overheard := 0
+	for _, dev := range DefaultDevices() {
+		if !dev.Overheard {
+			continue
+		}
+		overheard++
+		if Subnet().Contains(net.ParseIP(dev.IP)) {
+			t.Errorf("%s is overheard but inside the demo subnet", dev.IP)
+		}
+		o, ok := c.observation(dev.MAC, model.FieldIP)
+		if !ok || o.Value != dev.IP || o.Confidence != 0.9 || !strings.Contains(o.Method, "overheard") || !strings.Contains(o.Method, "outside 192.168.1.0/24") {
+			t.Errorf("overheard %s: %+v ok=%v", dev.IP, o, ok)
+		}
+	}
+	if overheard != 2 {
+		t.Errorf("the cast should hold two visitors from the wrong subnet, found %d", overheard)
 	}
 	last := c.events[len(c.events)-2]
 	if last.Kind != engine.KindProgress || last.Done != hosts || last.Total != hosts {

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	sidebarRatio = 0.56
+	sidebarRatio = 0.6
 	upperRatio   = 0.5
 
 	// Below either of these the three panes cannot share the screen, so
