@@ -130,6 +130,7 @@ func New(opts Options) *Enricher { return &Enricher{opts: opts.withDefaults()} }
 
 func (e *Enricher) Name() string            { return "icmp" }
 func (e *Enricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *Enricher) Produces() model.Field   { return model.FieldLatency }
 func (e *Enricher) Concurrency() int        { return e.opts.Concurrency }
 
 // Enrich sends a few echo requests and reports the round trips. A host that

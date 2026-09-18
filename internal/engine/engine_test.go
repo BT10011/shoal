@@ -428,7 +428,7 @@ func TestRescanRunsDiscoverersAgainAndRequeuesEnrichers(t *testing.T) {
 		t.Fatalf("scan start did not advance: %v then %v", first.ScanStarted, second.ScanStarted)
 	}
 	eventually(t, "second scan done", func() bool { return discovererState(e, 0) == StateDone })
-	eventually(t, "enricher settled again", settled(e, "oui", 4))
+	eventually(t, "enricher settled again", settled(e, "oui", 2)) // counts restart per scan
 
 	sent := log.filter(func(ev ProbeEvent) bool { return ev.Kind == KindSent && ev.Probe == "arp" })
 	if len(sent) != 4 {
@@ -586,5 +586,58 @@ func TestStatusSweepingAndSettled(t *testing.T) {
 		if got := c.s.Settled(); got != c.settled {
 			t.Errorf("%s: Settled = %v", c.name, got)
 		}
+	}
+}
+
+// producingEnricher answers with a hostname for some devices and only a
+// flag for others, like oui naming most vendors but flagging a random MAC.
+type producingEnricher struct {
+	*countingEnricher
+	named map[string]bool
+}
+
+func (p producingEnricher) Produces() model.Field { return model.FieldHostname }
+
+func (p producingEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit Emit, report Report) error {
+	if p.named[d.Key] {
+		emit(model.Observation{DeviceKey: d.Key, Field: model.FieldHostname, Value: "h-" + d.Key, Method: "m", Confidence: 0.9})
+		return nil
+	}
+	emit(model.Observation{DeviceKey: d.Key, Field: model.FieldFlag, Value: "no-name", Method: "m", Confidence: 1})
+	return nil
+}
+
+func TestEnricherCountsWhatItProducedAndRestartsPerScan(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	named := producingEnricher{newCountingEnricher("rdns", 2, model.FieldIP), map[string]bool{"mac-1": true, "mac-3": true}}
+	anything := newCountingEnricher("any", 2, model.FieldIP) // no Produces: any observation counts
+	for _, en := range []Enricher{named, anything} {
+		if err := e.AddEnricher(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+
+	eventually(t, "both settled", func() bool { return settled(e, "rdns", 4)() && settled(e, "any", 4)() })
+	s := enricherStatus(e, "rdns")
+	if s.Asked() != 4 || s.Answered != 2 || s.Produces != model.FieldHostname {
+		t.Fatalf("rdns = %+v; a flag is not a name, so only 2 of 4 answered", s)
+	}
+	if a := enricherStatus(e, "any"); a.Answered != 4 || a.Produces != "" {
+		t.Fatalf("an enricher without Produces counts any observation: %+v", a)
+	}
+
+	e.Rescan()
+	eventually(t, "second scan", func() bool { return e.Status().Scan == 2 })
+	eventually(t, "settled again", func() bool { return settled(e, "rdns", 4)() })
+	if s := enricherStatus(e, "rdns"); s.Asked() != 4 || s.Answered != 2 {
+		t.Fatalf("counts should restart per scan, not pile up: %+v", s)
 	}
 }

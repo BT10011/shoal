@@ -61,7 +61,7 @@ func sized(t *testing.T, w, h int) (*app, *store.Memory) {
 		Status: engine.Status{
 			Scan: 1, ScanStarted: t0,
 			Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateRunning, Done: 20, Total: 254}},
-			Enrichers:   []engine.EnricherStatus{{Name: "rdns", Running: 1, Queued: 2, Completed: 3}},
+			Enrichers:   []engine.EnricherStatus{{Name: "rdns", Produces: model.FieldHostname, Running: 1, Queued: 2, Completed: 3, Answered: 2}},
 		},
 		At: t0.Add(5 * time.Second),
 	})
@@ -289,7 +289,7 @@ func TestViewShowsDevicesDetailsAndLog(t *testing.T) {
 		"Devices", "Details", "Under the hood",
 		"192.168.1.1", "192.168.1.20", "synology.local !", "Synology Inc.",
 		"mdns said synology.local", "5s ago",
-		"arp    ", "20/254", "running", "rdns   1 running · 2 queued · 3 done",
+		"arp    ", "20/254", "running", "rdns   4 asked · 2 named · 1 running",
 		"who-has 192.168.1.20", "hostname conflict",
 		"DEMO", "3 devices", "q quit",
 	} {
@@ -601,6 +601,30 @@ func TestLayerTwoOnlyDeviceIsExplained(t *testing.T) {
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if details := ansi.Strip(joinLines(a.renderDetails(100))); strings.Contains(details, "layer 2 only") {
 		t.Error("a device with an address must not")
+	}
+}
+
+func TestEnricherRowsCountAskedAgainstAnswered(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	row := func(e engine.EnricherStatus) string { return ansi.Strip(a.renderEnricher(e, 60)) }
+	cases := []struct {
+		e    engine.EnricherStatus
+		want string
+	}{
+		{engine.EnricherStatus{Name: "oui", Produces: model.FieldVendor, Completed: 23, Answered: 21}, "oui    23 asked · 21 named"},
+		{engine.EnricherStatus{Name: "rdns", Produces: model.FieldHostname, Completed: 23, Answered: 2}, "rdns   23 asked · 2 named"},
+		{engine.EnricherStatus{Name: "icmp", Produces: model.FieldLatency, Completed: 23, Answered: 21}, "icmp   23 asked · 21 answered"},
+		{engine.EnricherStatus{Name: "rogue", Produces: model.FieldFlag, Completed: 23, Answered: 1}, "rogue  23 asked · 1 flagged"},
+		{engine.EnricherStatus{Name: "nbns", Produces: model.FieldHostname, Running: 4, Queued: 9, Completed: 10, Failed: 1, Answered: 3}, "nbns   15 asked · 3 named · 4 running · 9 queued · 1 failed"},
+		{engine.EnricherStatus{Name: "x"}, "x      0 asked · 0 answered"},
+	}
+	for _, c := range cases {
+		if got := strings.TrimRight(row(c.e), " "); got != c.want {
+			t.Errorf("got  %q\nwant %q", got, c.want)
+		}
+	}
+	if strings.Contains(row(cases[1].e), "done") {
+		t.Error("the old 'done' wording should be gone")
 	}
 }
 
