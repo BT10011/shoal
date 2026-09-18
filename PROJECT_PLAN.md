@@ -312,9 +312,12 @@ Windows and Samba machines — and the RTT column is live.
   runs every discoverer again under a fresh scan; it also re-enqueues every
   known device to every enricher whose trigger field it has, so names and
   round trips are refreshed and an expired DNS or mDNS name comes back.
-  `Engine.Cancel` stops the discoverers and empties the enricher queues; a
-  lookup already waiting on a reply finishes on its own timeout. `Status`
-  carries the scan number and start time. **Devices are never forgotten by
+  `Engine.Cancel` (the `c` **stop** key; the UI says "stopped" throughout)
+  stops the discoverers and empties the enricher queues; a lookup already
+  waiting on a reply finishes on its own timeout. It is silent once the
+  scan has nothing running, so the key can be pressed freely. Its purpose
+  for the user is to make the screen hold still. `Status` carries the scan
+  number and start time. **Devices are never forgotten by
   a rescan** (principle 3: observations, not overwrites) — new answers sit
   beside the old with fresh timestamps, which is what makes freshness
   visible. Phase 4's "device missing" events should key off the same scan
@@ -335,18 +338,31 @@ Windows and Samba machines — and the RTT column is live.
   hint would truncate the title in a third of the width); any pane header
   hint that does not fit next to its title is dropped, and the mode text
   moves to the first line of the hood pane instead.
-- **Status bar** left: DEMO badge or interface + subnet (subnet dropped in
-  tabbed mode), device count or filter match count, scan label. Probe
+- **Status bar** left: DEMO badge or interface + subnet (subnet dropped
+  below 100 columns so the key bar keeps its main entries), device count or
+  filter match count, scan label. Probe
   progress is no longer repeated there; the mode string ("arp sweep · icmp
   dgram") lives in the "Under the hood" header.
-- **Key bar** drops whole entries, least important first (theme, rescan,
-  details, sort, filter, move, quit, help), and never truncates a word. At
-  80 columns with the subnet shown it keeps sort, help and quit; at 120 it
-  keeps everything but theme. It changes with focus: details pane, filter
-  editing and the log tab each show their own bindings.
+- **Key bar** drops whole entries, least important first (theme, details,
+  sort, filter, move, rescan, stop, quit, help), and never truncates a
+  word. Stop and rescan stay visible from 80 columns up; at 120 it keeps
+  everything but theme and details. It changes with focus: details
+  pane, filter editing and the log pane each show their own bindings.
+- **The log can be read while the scan runs** (added 2026-09-18 after the
+  first real scan). Tab reaches the "Under the hood" pane in every layout.
+  It follows the newest event until ↑ pins it: the newest event is
+  selected and shown in full, wrapped rather than cut off, followed by a
+  line in words saying what kind of event it was and which address it
+  concerned ("received from 192.168.1.20"). The usual keys move the
+  selection, `g` goes to the oldest event, `G` follows again, as does
+  stepping down onto the newest event; the header reads "pinned at
+  <time>" meanwhile. The selection stays on the same event as new ones
+  arrive and as the ring drops old ones (2000 kept). Events still carry no
+  raw bytes; attaching the frame to `sent`/`received` events so `x` can
+  show a hex dump in the log is the natural next step if wanted.
 - **Enter** focuses the details pane (scroll it with the movement keys),
-  **Esc** returns to the table or clears the filter, **Tab** cycles the two
-  panes (three when tabbed). The filter input keeps ↑↓ working on the table
+  **Esc** returns to the table or clears the filter, **Tab** cycles all
+  three panes. The filter input keeps ↑↓ working on the table
   so a device can be picked while typing. The pattern is matched against
   the device key and every live value of every field, so services and flags
   filter too.
@@ -477,7 +493,7 @@ plain words what that means and which probe saw it.
 
 - **Layout:** device table (main, widest) · details pane · scan/progress panel · event log · bottom key bar. Use a TideUI layout mode; fall back to tabbed on small terminals.
 - **Default columns:** IP · MAC · Hostname · Vendor · RTT · (later) Type · First seen · Last seen. Column set configurable later.
-- **Keys:** `↑/↓ j/k` move · `PgUp/PgDn g G` page and ends · `Enter` focus details · `Tab` next pane · `/` filter · `Esc` back/clear/close · `s`/`S` sort · `x` raw packets · `r` rescan · `c` cancel · `t` theme · `?` help · `q` quit.
+- **Keys:** `↑/↓ j/k` move · `PgUp/PgDn g G` page and ends · `Enter` focus details · `Tab` next pane · `/` filter · `Esc` back/clear/close · `s`/`S` sort · `x` raw packets · `r` rescan · `c` stop · `G` follow the log again · `t` theme · `?` help · `q` quit.
 - **Key bar:** always visible, one line, the basic bindings only; never wraps at 80 columns.
 - **Theme picker (`t`):** previews each theme live as the highlight moves; `Enter` commits, `Esc` restores the previous theme.
 - **Help (`?`):** a scrollable manual, not a key list — panes, probes, columns, provenance, keys, and a pointer to `docs/protocols/`.

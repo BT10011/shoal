@@ -116,26 +116,29 @@ type binding struct {
 	keep                 int
 }
 
+// Stop and rescan rank just below help and quit: they are the two things
+// a user reaches for once the table starts moving.
 var tableBindings = []binding{
-	{"↑↓", "^v", "move", 6},
-	{"⏎", "enter", "details", 3},
-	{"/", "/", "filter", 5},
-	{"s", "s", "sort", 4},
-	{"r", "r", "rescan", 2},
+	{"↑↓", "^v", "move", 5},
+	{"⏎", "enter", "details", 2},
+	{"/", "/", "filter", 4},
+	{"s", "s", "sort", 3},
+	{"c", "c", "stop", 7},
+	{"r", "r", "rescan", 6},
 	{"t", "t", "theme", 1},
-	{"?", "?", "help", 8},
-	{"q", "q", "quit", 7},
+	{"?", "?", "help", 9},
+	{"q", "q", "quit", 8},
 }
 
 var detailBindings = []binding{
-	{"↑↓", "^v", "scroll", 6},
-	{"x", "x", "raw", 5},
-	{"esc", "esc", "back", 4},
-	{"/", "/", "filter", 3},
-	{"s", "s", "sort", 2},
-	{"r", "r", "rescan", 1},
-	{"?", "?", "help", 8},
-	{"q", "q", "quit", 7},
+	{"↑↓", "^v", "scroll", 5},
+	{"x", "x", "raw", 4},
+	{"esc", "esc", "back", 3},
+	{"/", "/", "filter", 2},
+	{"c", "c", "stop", 7},
+	{"r", "r", "rescan", 6},
+	{"?", "?", "help", 9},
+	{"q", "q", "quit", 8},
 }
 
 var filterBindings = []binding{
@@ -145,13 +148,13 @@ var filterBindings = []binding{
 }
 
 var hoodBindings = []binding{
-	{"tab", "tab", "pane", 6},
-	{"r", "r", "rescan", 5},
-	{"c", "c", "cancel", 4},
-	{"/", "/", "filter", 3},
-	{"t", "t", "theme", 1},
-	{"?", "?", "help", 8},
-	{"q", "q", "quit", 7},
+	{"↑↓", "^v", "select", 5},
+	{"G", "G", "follow", 4},
+	{"esc", "esc", "back", 3},
+	{"c", "c", "stop", 7},
+	{"r", "r", "rescan", 6},
+	{"?", "?", "help", 9},
+	{"q", "q", "quit", 8},
 }
 
 // keyBar renders the bindings that fit in width. Rather than truncating

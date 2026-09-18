@@ -168,6 +168,7 @@ type scan struct {
 	started time.Time
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup // discoverers still running under this scan
+	stopped bool           // Cancel has been called on it
 }
 
 // Option configures an Engine.
@@ -335,14 +336,17 @@ func (e *Engine) Rescan() {
 
 // Cancel stops the current scan: discoverers are cancelled and the enricher
 // queues emptied. A lookup already waiting on a reply finishes on its own
-// timeout. Rescan starts afresh afterwards.
+// timeout. Rescan starts afresh afterwards. Once a scan has been stopped, or
+// has nothing left running, Cancel does nothing, so the key can be pressed
+// freely.
 func (e *Engine) Cancel() {
 	e.mu.Lock()
-	if !e.started || e.scan == nil {
+	if !e.started || e.scan == nil || e.scan.stopped || !e.busyLocked() {
 		e.mu.Unlock()
 		return
 	}
 	s := e.scan
+	s.stopped = true
 	dropped := 0
 	for _, en := range e.enrichers {
 		dropped += en.clear()
@@ -350,7 +354,23 @@ func (e *Engine) Cancel() {
 	e.mu.Unlock()
 	s.cancel()
 	e.publish(ProbeEvent{Probe: "scan", Kind: KindInfo,
-		Message: fmt.Sprintf("scan %d cancelled: discoverers stopped, %d queued lookups dropped", s.n, dropped)})
+		Message: fmt.Sprintf("scan %d stopped: discoverers cancelled, %d queued lookups dropped", s.n, dropped)})
+}
+
+// busyLocked reports whether any discoverer is still running or any
+// enricher has work in hand. It must be called with e.mu held.
+func (e *Engine) busyLocked() bool {
+	for _, d := range e.discoverers {
+		if d.snapshot().State == StateRunning {
+			return true
+		}
+	}
+	for _, en := range e.enrichers {
+		if s := en.snapshot(); s.Running > 0 || s.Queued > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop cancels all probes and waits for them to exit.

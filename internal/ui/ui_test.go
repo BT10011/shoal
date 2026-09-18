@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -365,10 +366,127 @@ func TestTabScrollsDetailsInsteadOfTable(t *testing.T) {
 	if a.details.Offset() != 1 {
 		t.Fatalf("details offset = %d", a.details.Offset())
 	}
-	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	a.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	a.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if a.cursor != 1 || a.details.Offset() != 0 {
 		t.Fatalf("switching device should reset details scroll: cursor=%d offset=%d", a.cursor, a.details.Offset())
+	}
+}
+
+func TestLogPinsSelectsAndExpands(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	long := strings.Repeat("PTR answer from 192.168.1.20 with a very long message ", 3)
+	for i := 0; i < 30; i++ {
+		a.Update(Batch{Events: []engine.ProbeEvent{{Probe: "arp", Kind: engine.KindSent, Target: "10.0.0.1", Message: fmt.Sprintf("who-has 10.0.0.%d", i), At: t0.Add(time.Duration(i) * time.Second)}}, At: t0})
+	}
+	a.Update(Batch{Events: []engine.ProbeEvent{{Probe: "mdns", Kind: engine.KindReceived, Target: "192.168.1.20", Message: long, At: t0.Add(31 * time.Second)}}, At: t0})
+	if !a.log.follow {
+		t.Fatal("the log follows by default")
+	}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "who-has 10.0.0.29") || strings.Contains(plain, "who-has 10.0.0.0\n") {
+		t.Errorf("following should show the tail\n%s", plain)
+	}
+	if !strings.Contains(plain, "…") {
+		t.Errorf("a long line is cut off while following\n%s", plain)
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if a.focus != paneHood {
+		t.Fatal("the log pane must take focus in the three-pane layout too")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if a.log.follow || a.log.cursor != len(a.events)-1 {
+		t.Fatalf("first step up pins the newest event: follow=%v cursor=%d", a.log.follow, a.log.cursor)
+	}
+	plain = ansi.Strip(a.View())
+	for _, want := range []string{"pinned at 12:00:31 · G follows again", "received from 192.168.1.20"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("pinned view missing %q\n%s", want, plain)
+		}
+	}
+	expanded := strings.Join(strings.Fields(ansi.Strip(strings.Join(a.renderSelectedEvent(a.events[len(a.events)-1], 51), " "))), " ")
+	if !strings.Contains(expanded, strings.Join(strings.Fields(long), " ")) {
+		t.Errorf("the selected event must be shown in full, wrapped:\n%s", expanded)
+	}
+	if strings.Contains(plain, "long message …") {
+		t.Errorf("the selected event must not be truncated\n%s", plain)
+	}
+	if a.cursor != 0 {
+		t.Fatal("log keys must not move the device table")
+	}
+
+	for i := 0; i < 5; i++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	}
+	if a.log.cursor != len(a.events)-6 {
+		t.Fatalf("cursor = %d", a.log.cursor)
+	}
+	plain = ansi.Strip(a.View())
+	if !strings.Contains(plain, "sent to 10.0.0.1") || !strings.Contains(plain, "who-has 10.0.0.25") {
+		t.Errorf("selected sent event should be described\n%s", plain)
+	}
+	// New events arrive while pinned: the selection stays put.
+	a.Update(Batch{Events: []engine.ProbeEvent{{Probe: "arp", Kind: engine.KindSent, Message: "who-has 10.0.0.99", At: t0.Add(time.Minute)}}, At: t0})
+	if a.log.follow || a.events[a.log.cursor].Message != "who-has 10.0.0.25" {
+		t.Fatalf("selection moved: follow=%v now on %q", a.log.follow, a.events[a.log.cursor].Message)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if a.log.cursor != 0 || !strings.Contains(ansi.Strip(a.View()), "who-has 10.0.0.0") {
+		t.Fatal("g goes to the oldest event")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if a.log.cursor == 0 {
+		t.Fatal("pgdown pages")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if !a.log.follow {
+		t.Fatal("G follows again")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if !a.log.follow {
+		t.Fatal("stepping down onto the newest event follows again")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.focus != paneDevices {
+		t.Fatal("esc returns to the table")
+	}
+}
+
+func TestLogSelectionSurvivesTrimming(t *testing.T) {
+	a, _ := sized(t, 100, 30)
+	var events []engine.ProbeEvent
+	for i := 0; i < logKeep; i++ {
+		events = append(events, engine.ProbeEvent{Probe: "arp", Kind: engine.KindSent, Message: fmt.Sprintf("e%d", i), At: t0})
+	}
+	a.Update(Batch{Events: events, At: t0})
+	a.focus = paneHood
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	for i := 0; i < 10; i++ {
+		a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	want := a.events[a.log.cursor].Message
+	a.Update(Batch{Events: events[:100], At: t0}) // pushes 100 old events out
+	if len(a.events) != logKeep || a.events[a.log.cursor].Message != want {
+		t.Fatalf("selection drifted from %q to %q", want, a.events[a.log.cursor].Message)
+	}
+}
+
+func TestStopIsInEveryKeyBarAndReadsStopped(t *testing.T) {
+	a, _ := sized(t, 80, 24)
+	bar := ansi.Strip(a.View())
+	if !strings.Contains(bar, "c stop") {
+		t.Errorf("stop must survive even at 80 columns: %q", bar[strings.LastIndex(bar, "\n")+1:])
+	}
+	a.status = engine.Status{Scan: 1, ScanStarted: t0,
+		Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateCancelled, Total: 254, Done: 40}}}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "scan 1 stopped") || !strings.Contains(plain, "40/254 stopped") || strings.Contains(plain, "cancelled") {
+		t.Errorf("a stopped scan should read as stopped everywhere\n%s", plain)
 	}
 }
 
@@ -614,7 +732,7 @@ func TestRescanAndCancelKeysDriveTheEngine(t *testing.T) {
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	wait("cancelled", func(s engine.Status) bool { return s.Discoverers[0].State == engine.StateCancelled })
 	a.Update(Batch{Status: eng.Status(), At: t0})
-	if got := a.scanLabel(); got != "scan 1 cancelled" {
+	if got := a.scanLabel(); got != "scan 1 stopped" {
 		t.Fatalf("label = %q", got)
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
@@ -699,7 +817,15 @@ func TestKeyBarDropsWholeEntriesRatherThanWrapping(t *testing.T) {
 		}
 	}
 	if shown < 7 || strings.Contains(bar, "t theme") {
-		t.Errorf("120 columns should fit all but the theme binding, the least important: %q", bar)
+		t.Errorf("120 columns should fit all but the least important bindings: %q", bar)
+	}
+	for _, size := range [][2]int{{80, 24}, {100, 30}, {120, 40}} {
+		a, _ := sized(t, size[0], size[1])
+		lines := strings.Split(ansi.Strip(a.View()), "\n")
+		bar := lines[len(lines)-1]
+		if !strings.Contains(bar, "c stop") || !strings.Contains(bar, "r rescan") {
+			t.Errorf("%v: stop and rescan must both be visible: %q", size, bar)
+		}
 	}
 	if got := keyBar(a.renderer.Styles, tableBindings, 5); got != "" {
 		t.Errorf("no room: %q", got)
@@ -848,15 +974,11 @@ func TestTabbedLayoutOnSmallTerminals(t *testing.T) {
 	if wide.tabbed() {
 		t.Fatal("120x40 must not be tabbed")
 	}
-	wide.focus = paneHood
-	wide.View()
-	if wide.focus != paneDevices {
-		t.Fatal("the log pane cannot hold focus in the three-pane layout")
-	}
-	wide.Update(tea.KeyMsg{Type: tea.KeyTab})
-	wide.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if wide.focus != paneDevices {
-		t.Fatal("tab cycles two panes when all three are visible")
+	for i, want := range []pane{paneDetails, paneHood, paneDevices} {
+		wide.Update(tea.KeyMsg{Type: tea.KeyTab})
+		if wide.focus != want {
+			t.Fatalf("tab %d: focus %d, want %d", i+1, wide.focus, want)
+		}
 	}
 }
 

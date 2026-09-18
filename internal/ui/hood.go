@@ -18,8 +18,11 @@ func (a *app) renderHood(width, rows int) []string {
 
 	for _, d := range a.status.Discoverers {
 		state := string(d.State)
-		if d.Err != "" {
+		switch {
+		case d.Err != "":
 			state = "failed: " + d.Err
+		case d.State == engine.StateCancelled:
+			state = "stopped"
 		}
 		// A probe that listens has nothing to count towards, so show what it
 		// has heard rather than a denominator that will never arrive.
@@ -54,43 +57,132 @@ func (a *app) renderHood(width, rows int) []string {
 	if room <= 0 {
 		return lines
 	}
-	start := max(0, len(a.events)-room)
-	for _, ev := range a.events[start:] {
-		lines = append(lines, a.renderEvent(ev, width))
+	return append(lines, a.renderLog(width, room)...)
+}
+
+// renderLog shows the newest events while following. Pinned, it keeps the
+// selected event in view and expands it to its full text.
+func (a *app) renderLog(width, room int) []string {
+	n := len(a.events)
+	if n == 0 {
+		return nil
 	}
+	var out []string
+	if a.log.follow {
+		for _, ev := range a.events[max(0, n-room):] {
+			out = append(out, a.renderEvent(ev, width))
+		}
+		return out
+	}
+	cursor := max(0, min(n-1, a.log.cursor))
+	selected := a.renderSelectedEvent(a.events[cursor], width)
+	// Slide the window so the whole selected event fits.
+	a.log.top = min(a.log.top, cursor)
+	a.log.top = max(a.log.top, cursor+len(selected)-room)
+	a.log.top = max(0, min(n-1, a.log.top))
+	for i := a.log.top; i < n && len(out) < room; i++ {
+		if i != cursor {
+			out = append(out, a.renderEvent(a.events[i], width))
+			continue
+		}
+		for _, l := range selected {
+			if len(out) < room {
+				out = append(out, l)
+			}
+		}
+	}
+	return out
+}
+
+// eventTag is the one-cell glyph for an event kind.
+func (a *app) eventTag(kind engine.EventKind) string {
+	plain := a.renderer.Styles.PlainUI
+	switch kind {
+	case engine.KindSent:
+		if plain {
+			return ">"
+		}
+		return "→"
+	case engine.KindReceived:
+		if plain {
+			return "<"
+		}
+		return "←"
+	case engine.KindError:
+		if plain {
+			return "!"
+		}
+		return "✗"
+	case engine.KindProgress:
+		if plain {
+			return "-"
+		}
+		return "…"
+	}
+	if plain {
+		return "-"
+	}
+	return "·"
+}
+
+// eventHead is the fixed prefix of a log line: time, probe and tag.
+func eventHead(ev engine.ProbeEvent, tag string) string {
+	return fmt.Sprintf("%s %-5s %s ", ev.At.Format("15:04:05"), ev.Probe, tag)
+}
+
+// describe puts an event's kind and target into words for the expanded
+// view, since the tag glyph alone is easy to misread.
+func describe(ev engine.ProbeEvent) string {
+	switch {
+	case ev.Target == "":
+		return string(ev.Kind)
+	case ev.Kind == engine.KindSent:
+		return "sent to " + ev.Target
+	case ev.Kind == engine.KindReceived:
+		return "received from " + ev.Target
+	}
+	return fmt.Sprintf("%s · %s", ev.Kind, ev.Target)
+}
+
+// renderSelectedEvent shows one event in full: the message wrapped rather
+// than truncated, then a line saying what kind of event it was and which
+// address it concerned.
+func (a *app) renderSelectedEvent(ev engine.ProbeEvent, width int) []string {
+	s := a.renderer.Styles
+	head := eventHead(ev, a.eventTag(ev.Kind))
+	indent := strings.Repeat(" ", lipgloss.Width(head))
+	msg := ev.Message
+	if msg == "" && ev.Kind == engine.KindProgress {
+		msg = fmt.Sprintf("%d/%d", ev.Done, ev.Total)
+	}
+	var lines []string
+	for i, l := range wrap(msg, max(1, width-lipgloss.Width(head))) {
+		prefix := indent
+		if i == 0 {
+			prefix = head
+		}
+		lines = append(lines, s.ItemSelected.Width(width).Render(fit(prefix+l, width)))
+	}
+	lines = append(lines, s.DetailFocusLine.Width(width).Render(fit(indent+describe(ev), width)))
 	return lines
 }
 
 func (a *app) renderEvent(ev engine.ProbeEvent, width int) string {
 	s := a.renderer.Styles
-	tag, style := "·", s.ItemMuted
+	style := s.ItemMuted
 	switch ev.Kind {
 	case engine.KindSent:
-		tag, style = "→", s.Item
+		style = s.Item
 	case engine.KindReceived:
-		tag, style = "←", s.Badge.Background(s.Theme.Bg)
+		style = s.Badge.Background(s.Theme.Bg)
 	case engine.KindError:
-		tag, style = "✗", a.alert()
-	case engine.KindProgress:
-		tag = "…"
-	}
-	if s.PlainUI {
-		switch tag {
-		case "→":
-			tag = ">"
-		case "←":
-			tag = "<"
-		case "✗":
-			tag = "!"
-		default:
-			tag = "-"
-		}
+		style = a.alert()
 	}
 	msg := ev.Message
 	if msg == "" && ev.Kind == engine.KindProgress {
 		msg = fmt.Sprintf("%d/%d", ev.Done, ev.Total)
 	}
-	return style.Render(fit(fmt.Sprintf("%s %-5s %s %s", ev.At.Format("15:04:05"), ev.Probe, tag, msg), width))
+	return style.Render(fit(eventHead(ev, a.eventTag(ev.Kind))+msg, width))
 }
 
 // Dotted, retro-looking progress bar. While a probe runs, filled cells

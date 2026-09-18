@@ -31,10 +31,16 @@ and the details pane can tell you which one. Nothing appears by magic.
 
   Under the hood: what the probes are doing right now. A progress bar per
   discoverer, a queue count per enricher, and beneath the rule a log of
-  every packet sent (→) and received (←), with the time it happened.
+  every packet sent (→) and received (←), with the time it happened. The
+  log follows the newest event until you Tab into the pane and press ↑:
+  that pins it, selects an event, and shows that event in full, wrapped
+  rather than cut off, with a line saying what kind of event it was and
+  which address it concerned. Move through the log with the usual keys,
+  g for the oldest event; G lets it follow again, as does stepping down
+  onto the newest event. The header says "pinned" while it is.
 
-On a terminal narrower than 80 columns or shorter than 16 rows the three
-panes become tabs; Tab moves between them.
+Tab moves between the three panes. On a terminal narrower than 80
+columns or shorter than 16 rows the panes become tabs instead.
 
 # Probes: discoverers and enrichers
 
@@ -111,12 +117,14 @@ device is still there.
 
 # Scans
 
-Everything shoal knows is kept until you quit. Press r to run every
-discoverer again and re-ask the enrichers about every known device: new
-answers sit beside the old ones with fresh timestamps, so the freshness
-column shows what has gone quiet. Press c to stop a scan: discoverers are
-cancelled and queued lookups dropped; a lookup already waiting for a reply
-finishes on its own timeout. The status bar shows which scan is running.
+Everything shoal knows is kept until you quit. Press c to stop a scan
+when you want the screen to hold still: discoverers are cancelled and
+queued lookups dropped, so nothing more arrives; a lookup already waiting
+for a reply finishes on its own timeout. Press r to run every discoverer
+again and re-ask the enrichers about every known device: new answers sit
+beside the old ones with fresh timestamps, so the freshness column shows
+what has gone quiet. The status bar shows which scan is running, and
+whether it has been stopped.
 
 # Filter and sort
 
@@ -133,15 +141,16 @@ always sort last.
 
 # Keys
 
-  ↑ ↓ j k      move, or scroll the details pane when it has focus
+  ↑ ↓ j k      move; scroll details or select a log event when focused
   PgUp PgDn    a page at a time
-  g G          first and last device
+  g G          first and last device; in the log, oldest event and follow
   Enter        focus the details pane          Esc   back to the table
   Tab          next pane
   /            filter                          Esc   clear the filter
   s S          sort by the next column, reverse
   x            show or hide raw packets in the details pane
-  r c          rescan, cancel the scan
+  c            stop the scan so the screen holds still
+  r            rescan
   t            theme picker: preview live, Enter keeps, Esc reverts
   ?            this manual                     q     quit
 

@@ -30,7 +30,11 @@ type Options struct {
 const (
 	batchEvery = 100 * time.Millisecond
 	clockEvery = time.Second
-	logKeep    = 500
+	logKeep    = 2000 // events kept for browsing; a /24 sweep produces about 600
+
+	// subnetBelowWidth is the terminal width under which the status bar
+	// stops showing the subnet so the key bar keeps move, rescan and stop.
+	subnetBelowWidth = 100
 )
 
 // Run starts the engine, bridges its events into the program, and blocks
@@ -85,6 +89,16 @@ type app struct {
 	showRaw bool
 	picker  tideui.ThemePicker
 	help    help
+	log     logView
+}
+
+// logView is the reader's place in the event log. While follow is set the
+// pane tails the newest events; scrolling up pins it, selects one event
+// and shows that event in full, so it can be read while the scan goes on.
+type logView struct {
+	follow bool
+	cursor int // the selected event while pinned
+	top    int // the first event shown while pinned
 }
 
 func newApp(o Options) *app {
@@ -96,6 +110,7 @@ func newApp(o Options) *app {
 		now:      time.Now(),
 		filter:   newFilter(),
 		picker:   tideui.NewThemePicker(tideui.ThemePickerOptions{InitialTheme: theme.Name}),
+		log:      logView{follow: true},
 	}
 }
 
@@ -134,8 +149,10 @@ func (a *app) applyBatch(b Batch) {
 			a.events = append(a.events, ev)
 		}
 	}
-	if len(a.events) > logKeep {
-		a.events = a.events[len(a.events)-logKeep:]
+	if drop := len(a.events) - logKeep; drop > 0 {
+		a.events = a.events[drop:]
+		a.log.cursor = max(0, a.log.cursor-drop)
+		a.log.top = max(0, a.log.top-drop)
 	}
 	if b.Devices == nil {
 		return
@@ -182,28 +199,63 @@ func (a *app) syncSelection() {
 }
 
 func (a *app) move(n int) {
-	if a.focus == paneDetails {
+	switch a.focus {
+	case paneDetails:
 		if n > 0 {
 			a.details.ScrollDown(n)
 		} else {
 			a.details.ScrollUp(-n)
 		}
-		return
+	case paneHood:
+		a.scrollLog(n)
+	default:
+		a.moveTo(a.cursor + n)
 	}
-	a.moveTo(a.cursor + n)
 }
 
+// moveTo jumps to the first row (i <= 0) or the last (anything else) of
+// the focused pane; for the table it selects row i.
 func (a *app) moveTo(i int) {
-	if a.focus == paneDetails {
+	switch a.focus {
+	case paneDetails:
 		if i <= 0 {
 			a.details.ScrollToTop()
 		} else {
 			a.details.ScrollDown(1 << 20)
 		}
+	case paneHood:
+		if i <= 0 {
+			a.log.follow = false
+			a.log.cursor = 0
+		} else {
+			a.log.follow = true
+		}
+	default:
+		a.cursor = i
+		a.syncSelection()
+	}
+}
+
+// scrollLog moves the log selection. The first step up from following
+// pins the log on the newest event; stepping down onto the newest event
+// lets it follow again.
+func (a *app) scrollLog(n int) {
+	last := len(a.events) - 1
+	if last < 0 {
 		return
 	}
-	a.cursor = i
-	a.syncSelection()
+	if a.log.follow {
+		if n >= 0 {
+			return
+		}
+		a.log.follow = false
+		a.log.cursor = last
+		n++
+	}
+	a.log.cursor = max(0, min(last, a.log.cursor+n))
+	if n > 0 && a.log.cursor == last {
+		a.log.follow = true
+	}
 }
 
 func (a *app) current() (model.DeviceSnapshot, bool) {
@@ -218,23 +270,14 @@ func (a *app) tabbed() bool {
 	return a.width < tabbedBelowWidth || a.height < tabbedBelowHeight
 }
 
-// focusable is how many panes Tab cycles through: the log only takes
-// focus when it is a tab of its own.
-func (a *app) focusable() pane {
-	if a.tabbed() {
-		return 3
-	}
-	return 2
-}
+// focusable is how many panes Tab cycles through.
+func (a *app) focusable() pane { return 3 }
 
 func (a *app) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "starting…"
 	}
 	tabbed := a.tabbed()
-	if !tabbed && a.focus == paneHood {
-		a.focus = paneDevices
-	}
 	g := geometry(a.width, a.height, tabbed)
 	a.clampTop(g.devices.rows - 1)
 
@@ -244,6 +287,9 @@ func (a *app) View() string {
 	hoodHint := a.opts.Mode
 	if a.opts.Demo {
 		hoodHint = "simulated, no packets sent"
+	}
+	if !a.log.follow && len(a.events) > 0 {
+		hoodHint = fmt.Sprintf("pinned at %s · G follows again", a.events[min(a.log.cursor, len(a.events)-1)].At.Format("15:04:05"))
 	}
 	dev, hasDev := a.current()
 	detailHint := ""
@@ -343,14 +389,15 @@ func (a *app) statusLeft() string {
 			text.Render(fmt.Sprintf("%d of %d match", len(a.devices), len(a.all))),
 		})
 	}
-	// Below 80 columns the subnet gives way to the key bar, which is what a
-	// new user needs more.
+	// Below 100 columns the subnet gives way to the key bar, which is what
+	// a new user needs more; the interface name stays.
+	narrow := a.width < subnetBelowWidth
 	switch {
-	case a.opts.Demo && a.tabbed():
+	case a.opts.Demo && narrow:
 		parts = append(parts, s.StatusNotice.Render("DEMO"))
 	case a.opts.Demo:
 		parts = append(parts, s.StatusNotice.Render("DEMO")+text.Render(" 192.168.1.0/24"))
-	case a.opts.Iface.Subnet != nil && a.tabbed():
+	case a.opts.Iface.Subnet != nil && narrow:
 		parts = append(parts, text.Render(a.opts.Iface.Name))
 	case a.opts.Iface.Subnet != nil:
 		parts = append(parts, text.Render(a.opts.Iface.Name+" "+a.opts.Iface.Subnet.String()))
@@ -381,7 +428,7 @@ func (a *app) scanLabel() string {
 	for _, d := range st.Discoverers {
 		switch d.State {
 		case engine.StateCancelled:
-			return label + " cancelled"
+			return label + " stopped"
 		case engine.StateFailed:
 			return label + " failed"
 		case engine.StateDone:
