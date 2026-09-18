@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/sys/unix"
 
+	"github.com/BT10011/shoal/internal/dnswire"
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
@@ -29,6 +31,36 @@ const readSlice = 500 * time.Millisecond
 type ListenerOptions struct {
 	Group  *net.UDPAddr
 	Listen func(ctx context.Context, iface netif.Interface, group *net.UDPAddr) (net.PacketConn, error)
+	// Browse lists service types to ask for once per scan; nil sends nothing
+	// and only listens. DefaultBrowse is what the TUI asks.
+	Browse []string
+	// Send puts a question on the wire: SendFrom5353.
+	Send func(ctx context.Context, iface netif.Interface, group *net.UDPAddr, query []byte) error
+}
+
+// DefaultBrowse is the question shoal asks the network at the start of each
+// scan: every service type on offer (RFC 6763 §9), and Dante's and NDI's
+// own types, since not every embedded responder answers the enumeration.
+// Everything that answers is credited by the same rules as an announcement.
+var DefaultBrowse = []string{MetaQuery, "_netaudio-arc._udp.local", "_ndi._tcp.local"}
+
+// browseAgain is when the question is repeated: RFC 6762 §5.2 asks that
+// the first two queries of a browse be at least a second apart, since a
+// responder may miss the first.
+const browseAgain = time.Second
+
+// BrowseQuery builds one mDNS message asking for PTR records of each name,
+// ID 0 as multicast questions carry.
+func BrowseQuery(names ...string) ([]byte, error) {
+	msg := dnsmessage.Message{}
+	for _, n := range names {
+		name, err := dnsmessage.NewName(strings.TrimSuffix(n, ".") + ".")
+		if err != nil {
+			return nil, fmt.Errorf("%q is not a usable DNS name: %w", n, err)
+		}
+		msg.Questions = append(msg.Questions, dnsmessage.Question{Name: name, Type: dnsmessage.TypePTR, Class: dnsmessage.ClassINET})
+	}
+	return msg.Pack()
 }
 
 func (o ListenerOptions) withDefaults() ListenerOptions {
@@ -37,6 +69,9 @@ func (o ListenerOptions) withDefaults() ListenerOptions {
 	}
 	if o.Listen == nil {
 		o.Listen = ListenMulticast
+	}
+	if o.Send == nil {
+		o.Send = SendFrom5353
 	}
 	return o
 }
@@ -53,12 +88,28 @@ type Listener struct {
 	// devices relay each other's records — a phone will announce a PTR for a
 	// laptop's instance — and crediting the sender would be wrong.
 	own map[string]map[string]bool
+
+	// held keeps the service types a sender listed before it had named its
+	// own address, to be credited once it does. A router running an mDNS
+	// repeater or reflector answers "which services are here?" for devices
+	// on other networks, and its answers never name the router's own
+	// address, so what it relays is never credited to it.
+	held map[string]map[string]heldService
 }
 
-// NewListener creates the passive probe.
-func NewListener(opts ListenerOptions) *Listener {
-	return &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool)}
+type heldService struct {
+	rec  Record
+	wire []byte
 }
+
+// NewListener creates the probe.
+func NewListener(opts ListenerOptions) *Listener {
+	return &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool), held: make(map[string]map[string]heldService)}
+}
+
+// speaksForItself reports whether a sender has named its own address, by
+// an address record or by answering for its own reverse name.
+func (l *Listener) speaksForItself(key string) bool { return len(l.own[key]) > 0 }
 
 // claims records that key announced name as its own.
 func (l *Listener) claims(key, name string) {
@@ -159,15 +210,39 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 	}
 	defer conn.Close()
 
-	report(engine.ProbeEvent{Kind: engine.KindInfo,
-		Message: fmt.Sprintf("listening on %s via %s, sharing the port with the system responder; nothing is sent", l.opts.Group, iface.Name)})
+	var query []byte
+	if len(l.opts.Browse) > 0 {
+		if query, err = BrowseQuery(l.opts.Browse...); err != nil {
+			return err
+		}
+		report(engine.ProbeEvent{Kind: engine.KindInfo,
+			Message: fmt.Sprintf("listening on %s via %s, sharing the port with the system responder; asking once which services are on offer, including Dante and NDI, then only listening", l.opts.Group, iface.Name)})
+	} else {
+		report(engine.ProbeEvent{Kind: engine.KindInfo,
+			Message: fmt.Sprintf("listening on %s via %s, sharing the port with the system responder; nothing is sent", l.opts.Group, iface.Name)})
+	}
+	asked := 0
+	nextAsk := time.Now()
 
 	heard := 0
 	buf := make([]byte, 9000)
 	for {
 		if err := ctx.Err(); err != nil {
+			l.reportUncredited(report)
 			report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("stopped listening after %d messages", heard)})
 			return nil
+		}
+		if query != nil && asked < 2 && !time.Now().Before(nextAsk) {
+			asked++
+			nextAsk = time.Now().Add(browseAgain)
+			if err := l.opts.Send(ctx, iface, l.opts.Group, query); err != nil {
+				query = nil
+				report(engine.ProbeEvent{Kind: engine.KindInfo, Target: l.opts.Group.String(),
+					Message: fmt.Sprintf("could not ask which services are on offer (%v); listening only, so services appear when something else browses", err)})
+			} else {
+				report(engine.ProbeEvent{Kind: engine.KindSent, Target: l.opts.Group.String(),
+					Message: fmt.Sprintf("PTR? %s → %s (%d bytes, browse %d of 2, from port %d: every responder offering these answers by multicast)", strings.Join(l.opts.Browse, ", "), l.opts.Group, len(query), asked, Port)})
+			}
 		}
 		if err := conn.SetReadDeadline(time.Now().Add(readSlice)); err != nil {
 			return err
@@ -214,7 +289,14 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 	})
 
 	// Addresses first: what a device says about its own name decides which
-	// services can be credited to it below.
+	// services can be credited to it below. Answering for its own reverse
+	// name, which shoal's mdns probe asks every device, counts as well.
+	ownReverse, _ := dnswire.ReverseName(addr.IP)
+	for _, rec := range resp.Records {
+		if rec.Type == dnsmessage.TypePTR && ownReverse != "" && trimDot(rec.Name) == trimDot(ownReverse) {
+			l.claims(key, rec.PTR)
+		}
+	}
 	for _, rec := range resp.Records {
 		if rec.Type != dnsmessage.TypeA || !rec.Addr.Equal(addr.IP) {
 			continue
@@ -227,6 +309,10 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 			Method: fmt.Sprintf("mDNS A record %s = %s, announced by the device itself (%s section, mDNS TTL %s)",
 				rec.Name, rec.Addr, rec.Section, rec.TTL),
 		})
+	}
+
+	if l.speaksForItself(key) {
+		l.release(key, emit, report)
 	}
 
 	for _, rec := range resp.Records {
@@ -278,12 +364,76 @@ func (l *Listener) service(key string, rec Record, wire []byte, emit engine.Emit
 	if name == "" {
 		return
 	}
+	if !l.speaksForItself(key) {
+		l.hold(key, name, rec, wire, report)
+		return
+	}
 	emit(model.Observation{
 		Source:    Source,
 		DeviceKey: key, Field: model.FieldService, Value: name,
 		Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
 		Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers (mDNS TTL %s)", MetaQuery, name, rec.TTL),
 	})
+}
+
+// hold keeps a listed service type until its sender names its own address.
+func (l *Listener) hold(key, name string, rec Record, wire []byte, report engine.Report) {
+	if l.held[key] == nil {
+		l.held[key] = make(map[string]heldService)
+	}
+	if _, already := l.held[key][name]; already {
+		return
+	}
+	l.held[key][name] = heldService{rec: rec, wire: wire}
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+		Message: fmt.Sprintf("%s lists %s among the service types on offer, but has not named its own address; holding it until it does, since a router relaying another network's mDNS lists types it does not offer itself", key, name)})
+}
+
+// release credits what a sender listed before it named its own address.
+func (l *Listener) release(key string, emit engine.Emit, report engine.Report) {
+	held := l.held[key]
+	if len(held) == 0 {
+		return
+	}
+	delete(l.held, key)
+	names := make([]string, 0, len(held))
+	for name := range held {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		h := held[name]
+		emit(model.Observation{
+			DeviceKey: key, Field: model.FieldService, Value: name, Source: Source,
+			Confidence: Confidence, Raw: h.wire, TTL: max(h.rec.TTL, minTTL),
+			Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers, credited once it had named its own address (mDNS TTL %s)", MetaQuery, name, h.rec.TTL),
+		})
+	}
+	what := fmt.Sprintf("the %d service types it listed earlier are its own", len(names))
+	if len(names) == 1 {
+		what = "the service type it listed earlier is its own"
+	}
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+		Message: fmt.Sprintf("%s has named its own address, so %s: %s", key, what, strings.Join(names, ", "))})
+}
+
+// reportUncredited says, when listening stops, which senders listed
+// services but never spoke for themselves: most likely relays.
+func (l *Listener) reportUncredited(report engine.Report) {
+	keys := make([]string, 0, len(l.held))
+	for key := range l.held {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		names := make([]string, 0, len(l.held[key]))
+		for name := range l.held[key] {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+			Message: fmt.Sprintf("not credited: %s listed %s but never named its own address while shoal listened. A router relaying another network's mDNS (a repeater or reflector) behaves like this, and its list belongs to the devices behind it", key, strings.Join(names, ", "))})
+	}
 }
 
 // ServiceType pulls the service type out of a DNS-SD name: "_airplay._tcp"

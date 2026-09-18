@@ -19,8 +19,7 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.handleHelpKey(msg)
 		return a, nil
 	case a.picker.Opened():
-		a.handleThemeKey(msg)
-		return a, nil
+		return a, a.handleThemeKey(msg)
 	case a.filter.editing:
 		return a, a.handleFilterKey(msg)
 	}

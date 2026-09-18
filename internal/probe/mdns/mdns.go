@@ -125,19 +125,27 @@ func (a *multicastAsker) SetReadDeadline(t time.Time) error        { return a.re
 func (a *multicastAsker) Close() error                             { return a.recv.Close() }
 
 func (a *multicastAsker) Send(query []byte, group *net.UDPAddr) error {
+	return SendFrom5353(a.ctx, a.iface, group, query)
+}
+
+// SendFrom5353 sends one mDNS question to the group from port 5353, on the
+// interface being scanned, from a socket that exists only for this write,
+// so answers come back by multicast (RFC 6762 §6). It returns ErrPortHeld
+// when the port cannot be shared.
+func SendFrom5353(ctx context.Context, iface netif.Interface, group *net.UDPAddr, query []byte) error {
 	lc := net.ListenConfig{Control: shareablePort}
-	conn, err := lc.ListenPacket(a.ctx, "udp4", fmt.Sprintf(":%d", group.Port))
+	conn, err := lc.ListenPacket(ctx, "udp4", fmt.Sprintf(":%d", group.Port))
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrPortHeld, err)
 	}
 	defer conn.Close()
 	pc := ipv4.NewPacketConn(conn)
-	if ni, err := interfaceFor(a.iface); err != nil {
+	if ni, err := interfaceFor(iface); err != nil {
 		return err
 	} else if ni != nil {
 		// Several interfaces can carry multicast; ask on the one being scanned.
 		if err := pc.SetMulticastInterface(ni); err != nil {
-			return fmt.Errorf("cannot send multicast on %s: %w", a.iface.Name, err)
+			return fmt.Errorf("cannot send multicast on %s: %w", iface.Name, err)
 		}
 	}
 	// Keep our own question from reaching this host's sockets: the

@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/BT10011/shoal/internal/config"
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
+	"github.com/BT10011/shoal/internal/probe/av"
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/history"
 	"github.com/BT10011/shoal/internal/probe/icmp"
@@ -33,6 +36,7 @@ Usage:
   shoal --demo            Scripted fake data; no privileges or network needed
   shoal iface [name]      Show the interface, subnet and gateway shoal would scan
   shoal probe <name>      Run one probe standalone and print what it sends, receives and learns
+  shoal version           Which build this is, for bug reports
 
 Flags:
   --iface NAME            Interface to scan (default: the one carrying the default route)
@@ -45,7 +49,8 @@ Flags:
   --history PATH          Where to remember networks and their devices between runs
                           (default: the per-user data directory; see shoal probe history)
   --no-history            Remember nothing and write nothing
-  --theme NAME            Colour theme, e.g. nord, dracula, gruvbox-dark, vt100
+  --theme NAME            Colour theme for this run, e.g. nord, dracula, gruvbox-dark, vt100.
+                          A theme kept in the picker (t, Enter) is remembered instead
   --demo                  Scripted fake data
 
 Only scan networks you own or are authorised to test.
@@ -55,6 +60,10 @@ the devices seen on it, so the next visit can say what is new, what moved
 and what is missing. Delete the history file, or run with --no-history, to
 keep nothing.
 `
+
+// version is stamped at build time (make build, make release); a plain
+// go build says "dev".
+var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -74,6 +83,9 @@ func run(args []string) error {
 		return runProbe(args[1:])
 	case "help":
 		fmt.Print(usage)
+		return nil
+	case "version":
+		fmt.Printf("shoal %s (%s/%s, %s)\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version())
 		return nil
 	default:
 		fmt.Fprint(os.Stderr, usage)
@@ -97,8 +109,9 @@ func runTUI(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	themeName, saveTheme := themeSettings(fs, *theme)
 	if *demo {
-		return runDemo(*theme)
+		return runDemo(themeName, saveTheme)
 	}
 
 	iface, err := pickInterface(*ifaceName)
@@ -148,9 +161,14 @@ func runTUI(args []string) error {
 	if err := eng.AddEnricher(nbns.New(nbns.Options{})); err != nil {
 		return err
 	}
-	// The listener sends nothing; it writes down the announcements already
-	// crossing the network, and keeps running after the sweep finishes.
-	if err := eng.AddDiscoverer(mdns.NewListener(mdns.ListenerOptions{})); err != nil {
+	// The listener writes down the announcements crossing the network, and
+	// keeps running after the sweep finishes. It asks once per scan which
+	// services are on offer, so Dante and NDI gear shows on a quiet network.
+	if err := eng.AddDiscoverer(mdns.NewListener(mdns.ListenerOptions{Browse: mdns.DefaultBrowse})); err != nil {
+		return err
+	}
+	// Dante and NDI devices, from what they announce about themselves.
+	if err := eng.AddEnricher(av.New()); err != nil {
 		return err
 	}
 	// ICMP is the one enricher that can be refused outright, so ask once
@@ -176,7 +194,30 @@ func runTUI(args []string) error {
 			}
 		}
 	}
-	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: *theme})
+	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: themeName, SaveTheme: saveTheme})
+}
+
+// themeSettings picks the theme to start with: --theme when given, else
+// the one kept last time in the picker, else the default. It also returns
+// how to remember a new choice, or nil when there is nowhere to keep it.
+// --theme is for this run only and leaves the remembered one alone.
+func themeSettings(fs *flag.FlagSet, flagTheme string) (string, func(string) error) {
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "theme" })
+	path, err := config.DefaultPath()
+	if err != nil {
+		return flagTheme, nil
+	}
+	save := func(name string) error {
+		return config.Update(path, func(c *config.Config) { c.Theme = name })
+	}
+	if explicit {
+		return flagTheme, save
+	}
+	if c, err := config.Load(path); err == nil && c.Theme != "" {
+		return c.Theme, save
+	}
+	return flagTheme, save
 }
 
 // openHistory opens the history file at path, or the default one.
@@ -232,7 +273,7 @@ func alsoFlag(into *[]*net.IPNet) func(string) error {
 	}
 }
 
-func runDemo(theme string) error {
+func runDemo(theme string, saveTheme func(string) error) error {
 	st := store.NewMemory()
 	eng := engine.New(st, fake.Interface())
 	opts := fake.Options{}
@@ -256,12 +297,12 @@ func runDemo(theme string) error {
 	if err != nil {
 		return err
 	}
-	for _, en := range append([]engine.Enricher{ouiEnricher, rogue.New(fake.Subnet())}, fake.NewEnrichers(opts)...) {
+	for _, en := range append([]engine.Enricher{ouiEnricher, rogue.New(fake.Subnet()), av.New()}, fake.NewEnrichers(opts)...) {
 		if err := eng.AddEnricher(en); err != nil {
 			return err
 		}
 	}
-	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Demo: true, Theme: theme})
+	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Demo: true, Theme: theme, SaveTheme: saveTheme})
 }
 
 func runIface(args []string) error {

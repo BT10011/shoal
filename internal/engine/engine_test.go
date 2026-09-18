@@ -627,7 +627,7 @@ func TestEnricherCountsWhatItProducedAndRestartsPerScan(t *testing.T) {
 
 	eventually(t, "both settled", func() bool { return settled(e, "rdns", 4)() && settled(e, "any", 4)() })
 	s := enricherStatus(e, "rdns")
-	if s.Asked() != 4 || s.Answered != 2 || s.Produces != model.FieldHostname {
+	if s.Asked != 4 || s.Answered != 2 || s.Produces != model.FieldHostname {
 		t.Fatalf("rdns = %+v; a flag is not a name, so only 2 of 4 answered", s)
 	}
 	if a := enricherStatus(e, "any"); a.Answered != 4 || a.Produces != "" {
@@ -637,7 +637,7 @@ func TestEnricherCountsWhatItProducedAndRestartsPerScan(t *testing.T) {
 	e.Rescan()
 	eventually(t, "second scan", func() bool { return e.Status().Scan == 2 })
 	eventually(t, "settled again", func() bool { return settled(e, "rdns", 4)() })
-	if s := enricherStatus(e, "rdns"); s.Asked() != 4 || s.Answered != 2 {
+	if s := enricherStatus(e, "rdns"); s.Asked != 4 || s.Answered != 2 {
 		t.Fatalf("counts should restart per scan, not pile up: %+v", s)
 	}
 }
@@ -694,7 +694,7 @@ func TestValuesAreRenewedBeforeTheyExpire(t *testing.T) {
 	e.refreshDue(at(80 * time.Second))
 	eventually(t, "renewed", func() bool { return enricherStatus(e, "rdns").Renewed == 2 })
 	s := enricherStatus(e, "rdns")
-	if s.Asked() != 2 || s.Answered != 2 || s.Refreshing != 0 || s.Running != 0 || s.Queued != 0 {
+	if s.Asked != 2 || s.Answered != 2 || s.Refreshing != 0 || s.Running != 0 || s.Queued != 0 {
 		t.Fatalf("renewals must not count as the scan's own lookups: %+v", s)
 	}
 	if namer.callCount("mac-1") != 2 || namer.callCount("mac-2") != 2 {
@@ -777,5 +777,43 @@ func TestDeviceEventsDoNotReplaceAProbeStatus(t *testing.T) {
 	d.observe(ProbeEvent{Kind: KindInfo, Message: "stopped listening after 3 messages"})
 	if d.status.Message != "stopped listening after 3 messages" {
 		t.Fatalf("a probe-wide info event should still set it: %q", d.status.Message)
+	}
+}
+
+// flagTwice looks at a device once per field it is triggered by, as av does
+// for services and vendor, and answers both times.
+type flagTwice struct{ *countingEnricher }
+
+func (f flagTwice) Produces() model.Field { return model.FieldFlag }
+func (f flagTwice) Enrich(ctx context.Context, d model.DeviceSnapshot, emit Emit, report Report) error {
+	f.mu.Lock()
+	f.calls[d.Key]++
+	f.mu.Unlock()
+	emit(model.Observation{DeviceKey: d.Key, Field: model.FieldFlag, Value: "seen", Method: "m", Confidence: 1})
+	return nil
+}
+
+func TestAskedAndAnsweredCountDevicesNotLookups(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	en := flagTwice{newCountingEnricher("av", 1, model.FieldMAC, model.FieldIP)}
+	if err := e.AddEnricher(en); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	eventually(t, "settled", func() bool {
+		s := enricherStatus(e, "av")
+		return s.Running == 0 && s.Queued == 0 && s.Completed >= 3
+	})
+	time.Sleep(20 * time.Millisecond)
+	s := enricherStatus(e, "av")
+	if s.Asked != 3 || s.Answered != 3 {
+		t.Fatalf("three devices, however many lookups (%d): asked %d answered %d", s.Completed, s.Asked, s.Answered)
 	}
 }

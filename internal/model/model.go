@@ -31,8 +31,10 @@ const (
 // network. They are memories, not fresh evidence: they show what a device
 // was, count as the last time it was heard from, and lose to anything a
 // probe learns now. They never conflict with a current value, never make a
-// device claim an address, and never prompt a probe to ask anything.
-const SourceHistory = "history"
+// device claim an address, and never prompt a probe to ask anything. The
+// history probe's own conclusions, such as a new-device flag, are made now
+// and are credited to "history", not to this.
+const SourceHistory = "memory"
 
 // Historical reports whether a source recalls the past rather than
 // observing the present.
@@ -81,7 +83,7 @@ var sourcePriority = map[string]int{
 	"ports":    30,
 	"classify": 20,
 	"store":    10,
-	"history":  5,
+	"memory":   5,
 }
 
 // SourcePriority returns the tie-break rank of a source.
@@ -102,10 +104,10 @@ var direct = map[string]bool{
 	"nbns":  true,
 	"netif": true, // this machine's own interface
 	"ports": true,
-	// history recalls when some direct probe last heard the device, on an
+	// memory recalls when some direct probe last heard the device, on an
 	// earlier visit. It counts as contact at that time, which is what lets a
 	// device from last time show as not answering when this scan misses it.
-	"history": true,
+	"memory": true,
 }
 
 // Direct reports whether a source's observations come from the device itself

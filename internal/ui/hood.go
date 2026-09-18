@@ -156,7 +156,7 @@ func answerWord(f model.Field) string {
 // produced something.
 func (a *app) renderEnricher(e engine.EnricherStatus, width int) string {
 	s := a.renderer.Styles
-	line := fmt.Sprintf("%-6s %d asked · %d %s", e.Name, e.Asked(), e.Answered, answerWord(e.Produces))
+	line := fmt.Sprintf("%-6s %d asked · %d %s", e.Name, e.Asked, e.Answered, answerWord(e.Produces))
 	if e.Running > 0 {
 		line += fmt.Sprintf(" · %d running", e.Running)
 	}

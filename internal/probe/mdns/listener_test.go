@@ -2,10 +2,12 @@ package mdns
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,7 +135,10 @@ func TestListenerIgnoresAnAddressAnnouncedForAnotherHost(t *testing.T) {
 }
 
 func TestListenerLearnsServicesFromTheMetaQueryAnswer(t *testing.T) {
-	rec := runListener(t, packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr(deviceIP)})
+	rec := runListener(t,
+		packet{wire: loadHex(t, "announce-host.hex"), from: udpAddr(deviceIP)}, // names its own address
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr(deviceIP)},
+	)
 
 	want := []string{
 		"_airplay._tcp", "_companion-link._tcp", "_raop._tcp", "_rfb._tcp",
@@ -157,6 +162,52 @@ func TestListenerLearnsServicesFromTheMetaQueryAnswer(t *testing.T) {
 	}
 	if o.TTL != 75*time.Minute {
 		t.Errorf("TTL = %s, want the announced 1h15m", o.TTL)
+	}
+}
+
+func TestListenerHoldsAListUntilTheSenderNamesItself(t *testing.T) {
+	// The list first, then the device answering for its own reverse name.
+	rec := runListener(t,
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr(deviceIP)},
+		packet{wire: loadHex(t, "reply-ptr.hex"), from: udpAddr(deviceIP)},
+	)
+	if got := rec.values(model.FieldService); len(got) != 7 {
+		t.Fatalf("held services should be credited once the device names itself: %v", got)
+	}
+	o, _ := rec.first(model.FieldService)
+	if !strings.Contains(o.Method, "credited once it had named its own address") {
+		t.Errorf("Method = %q", o.Method)
+	}
+	info := strings.Join(rec.messages(engine.KindInfo), "\n")
+	for _, want := range []string{"holding it until it does", "has named its own address, so the 7 service types it listed earlier are its own"} {
+		if !strings.Contains(info, want) {
+			t.Errorf("log missing %q\n%s", want, info)
+		}
+	}
+}
+
+func TestListenerCreditsNothingToARelay(t *testing.T) {
+	// A router repeating another VLAN's answers: it lists types but never
+	// names its own address.
+	rec := runListener(t,
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr("192.168.1.1")},
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr("192.168.1.1")},
+	)
+	if got := rec.values(model.FieldService); len(got) != 0 {
+		t.Fatalf("a relay must not be credited with what it relays: %v", got)
+	}
+	info := rec.messages(engine.KindInfo)
+	holding := 0
+	for _, m := range info {
+		if strings.Contains(m, "holding it until it does") {
+			holding++
+		}
+	}
+	if holding != 7 {
+		t.Errorf("each type should be held and logged once, not per repeat: %d", holding)
+	}
+	if last := info[len(info)-2]; !strings.Contains(last, "not credited: 192.168.1.1 listed") || !strings.Contains(last, "A router relaying another network's mDNS") {
+		t.Errorf("when listening stops the relay should be named: %q", last)
 	}
 }
 
@@ -359,5 +410,91 @@ func TestListenerRemembersANameAcrossMessages(t *testing.T) {
 
 	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_asquic._udp" {
 		t.Errorf("services = %v, want the service credited once the name was known", got)
+	}
+}
+
+// quietConn is a socket on which nothing arrives: each read waits a little,
+// like a real read deadline, so the listener's clock moves.
+type quietConn struct{ listenConn }
+
+func (c *quietConn) ReadFrom([]byte) (int, net.Addr, error) {
+	time.Sleep(20 * time.Millisecond)
+	return 0, nil, os.ErrDeadlineExceeded
+}
+
+func TestListenerBrowsesTwiceASecondApart(t *testing.T) {
+	var mu sync.Mutex
+	var sent [][]byte
+	var at []time.Time
+	send := func(_ context.Context, _ netif.Interface, _ *net.UDPAddr, q []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, q)
+		at = append(at, time.Now())
+		return nil
+	}
+	l := NewListener(ListenerOptions{
+		Listen: func(context.Context, netif.Interface, *net.UDPAddr) (net.PacketConn, error) { return &quietConn{}, nil },
+		Browse: DefaultBrowse,
+		Send:   send,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 1400*time.Millisecond)
+	defer cancel()
+	var rec recorder
+	if err := l.Run(ctx, netif.Interface{Name: "en0"}, rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("sent %d browse questions, want 2", len(sent))
+	}
+	if gap := at[1].Sub(at[0]); gap < browseAgain {
+		t.Errorf("the repeat came %s after the first; RFC 6762 asks for at least a second", gap)
+	}
+	var msg dnsmessage.Message
+	if err := msg.Unpack(sent[0]); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.ID != 0 || len(msg.Questions) != 3 {
+		t.Fatalf("header %+v, %d questions", msg.Header, len(msg.Questions))
+	}
+	var names []string
+	for _, q := range msg.Questions {
+		if q.Type != dnsmessage.TypePTR || q.Class != dnsmessage.ClassINET {
+			t.Errorf("question %+v should be a plain PTR, answered by multicast", q)
+		}
+		names = append(names, q.Name.String())
+	}
+	if got := strings.Join(names, " "); got != "_services._dns-sd._udp.local. _netaudio-arc._udp.local. _ndi._tcp.local." {
+		t.Errorf("questions = %s", got)
+	}
+	if s := rec.messages(engine.KindSent); len(s) != 2 || !strings.Contains(s[0], "browse 1 of 2") || !strings.Contains(s[1], "browse 2 of 2") {
+		t.Errorf("sent events = %v", s)
+	}
+	if info := rec.messages(engine.KindInfo); len(info) == 0 || !strings.HasPrefix(info[0], "listening on") || !strings.Contains(info[0], "including Dante and NDI") {
+		t.Errorf("the opening message should still read as listening and say it asks: %v", info)
+	}
+}
+
+func TestListenerListensWhenItCannotAsk(t *testing.T) {
+	calls := 0
+	l := NewListener(ListenerOptions{
+		Listen: func(context.Context, netif.Interface, *net.UDPAddr) (net.PacketConn, error) { return &quietConn{}, nil },
+		Browse: DefaultBrowse,
+		Send: func(context.Context, netif.Interface, *net.UDPAddr, []byte) error {
+			calls++
+			return fmt.Errorf("%w: address in use", ErrPortHeld)
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	var rec recorder
+	if err := l.Run(ctx, netif.Interface{Name: "en0"}, rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("after a refusal it should stop asking: %d attempts", calls)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), "\n"); !strings.Contains(info, "listening only, so services appear when something else browses") {
+		t.Errorf("the refusal should be explained: %q", info)
 	}
 }
