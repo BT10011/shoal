@@ -736,3 +736,46 @@ func TestValuesAreRenewedBeforeTheyExpire(t *testing.T) {
 		t.Fatal("nothing is renewed while the scan is stopped")
 	}
 }
+
+func TestRememberedFactsPromptNoProbe(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	en := newCountingEnricher("icmp", 1, model.FieldIP, model.FieldMAC)
+	if err := e.AddEnricher(en); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	past := time.Now().Add(-time.Hour)
+	for _, o := range []model.Observation{
+		{DeviceKey: "aa:aa:aa:aa:aa:aa", Field: model.FieldMAC, Value: "aa:aa:aa:aa:aa:aa", Source: model.SourceHistory, Method: "last visit", Confidence: 0.5, At: past},
+		{DeviceKey: "aa:aa:aa:aa:aa:aa", Field: model.FieldIP, Value: "10.0.0.50", Source: model.SourceHistory, Method: "last visit", Confidence: 0.5, At: past},
+	} {
+		if err := st.Apply(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	if n := en.callCount("aa:aa:aa:aa:aa:aa"); n != 0 {
+		t.Fatalf("a remembered address must not be pinged: %d calls", n)
+	}
+	if err := st.Apply(model.Observation{DeviceKey: "aa:aa:aa:aa:aa:aa", Field: model.FieldIP, Value: "10.0.0.50", Source: "arp", Method: "reply", Confidence: 1}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "asked once seen today", func() bool { return en.callCount("aa:aa:aa:aa:aa:aa") == 1 })
+}
+
+func TestDeviceEventsDoNotReplaceAProbeStatus(t *testing.T) {
+	d := &discoverer{status: DiscovererStatus{Name: "dns-sd"}}
+	d.observe(ProbeEvent{Kind: KindProgress, Message: "listening", Done: 3})
+	d.observe(ProbeEvent{Kind: KindInfo, Target: "10.0.0.9", Message: "10.0.0.9 announced the instance X"})
+	if d.status.Message != "listening" {
+		t.Fatalf("a per-device event replaced the probe's status: %q", d.status.Message)
+	}
+	d.observe(ProbeEvent{Kind: KindInfo, Message: "stopped listening after 3 messages"})
+	if d.status.Message != "stopped listening after 3 messages" {
+		t.Fatalf("a probe-wide info event should still set it: %q", d.status.Message)
+	}
+}

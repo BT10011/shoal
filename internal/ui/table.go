@@ -22,6 +22,10 @@ type column struct {
 // while hostname and vendor are what make the overview readable. FLAGS
 // outlives vendor because a badge saying a device is on the wrong subnet is
 // the whole point of looking, for a technician on a venue floor.
+//
+// FIRST SEEN and LAST SEEN go before anything else: the freshness mark and
+// the details pane already say when a device was last heard. Sorting by
+// either keeps it on screen, since no sort column is ever dropped.
 var columns = []column{
 	{title: "IP", field: model.FieldIP, width: 15, drop: 6},
 	{title: "MAC", field: model.FieldMAC, width: 17, drop: 1},
@@ -29,6 +33,50 @@ var columns = []column{
 	{title: "VENDOR", field: model.FieldVendor, drop: 3},
 	{title: "RTT", field: model.FieldLatency, width: 7, drop: 2},
 	{title: "FLAGS", field: model.FieldFlag, width: 10, drop: 4},
+	{title: "FIRST SEEN", field: model.FieldFirstSeen, width: 12, drop: -1},
+	{title: "LAST SEEN", field: fieldLastSeen, width: 12, drop: 0},
+}
+
+// fieldLastSeen is a column, not a fact: it is when any probe last heard
+// from the device, on this visit or an earlier one.
+const fieldLastSeen model.Field = "last_seen"
+
+// firstSeen is the earliest sighting of a device on this network: from
+// history when it was seen on an earlier visit, else this session's first.
+func firstSeen(d model.DeviceSnapshot, now time.Time) (time.Time, bool) {
+	var first time.Time
+	ok := false
+	for _, obs := range d.Facts {
+		for _, o := range obs {
+			if model.Historical(o.Source) {
+				continue
+			}
+			if !ok || o.At.Before(first) {
+				first, ok = o.At, true
+			}
+		}
+	}
+	if o, has := d.ResolvedAt(model.FieldFirstSeen, now); has {
+		if t, err := time.Parse(time.RFC3339, o.Value); err == nil && (!ok || t.Before(first)) {
+			first, ok = t, true
+		}
+	}
+	return first, ok
+}
+
+// remembered reports whether everything known about a device comes from
+// history: a row for something seen before that has not answered yet.
+func remembered(d model.DeviceSnapshot) bool {
+	any := false
+	for _, obs := range d.Facts {
+		for _, o := range obs {
+			if !model.Historical(o.Source) {
+				return false
+			}
+			any = true
+		}
+	}
+	return any
 }
 
 // badges are the short forms flags take in the table, in the order they
@@ -38,6 +86,9 @@ var columns = []column{
 var badges = []struct{ flag, badge string }{
 	{"link-local-ip", "link-local"},
 	{"off-subnet-ip", "off-subnet"},
+	{"ip-changed", "new-ip"},
+	{"name-changed", "renamed"},
+	{"new-device", "new"},
 	{"duplicate-ip", "dup-ip"},
 	{"this-host", "self"},
 	{"locally-administered-mac", "rand-mac"},
@@ -65,12 +116,29 @@ func badgeText(flags []string) string {
 }
 
 // cell is the table text for one field of a device: the resolved value,
-// or for the multi-valued flags every badge.
-func cell(d model.DeviceSnapshot, f model.Field, now time.Time) string {
-	if f == model.FieldFlag {
-		return badgeText(d.Values(f, now))
+// the badges for flags, or an age for the two sighting columns. A device
+// remembered from an earlier visit that this scan has finished without
+// hearing is badged missing.
+func (a *app) cell(d model.DeviceSnapshot, f model.Field) string {
+	switch f {
+	case model.FieldFlag:
+		text := badgeText(d.Values(f, a.now))
+		if remembered(d) && a.status.Settled() {
+			text = strings.TrimSuffix("missing,"+text, ",")
+		}
+		return text
+	case model.FieldFirstSeen:
+		if t, ok := firstSeen(d, a.now); ok {
+			return ago(a.now, t)
+		}
+		return ""
+	case fieldLastSeen:
+		if t, _, ok := d.LastContact(); ok {
+			return ago(a.now, t)
+		}
+		return ""
 	}
-	if o, ok := d.ResolvedAt(f, now); ok {
+	if o, ok := d.ResolvedAt(f, a.now); ok {
 		return o.Value
 	}
 	return ""
@@ -81,8 +149,10 @@ const minFlexWidth = 14
 // markWidth is the freshness mark and its gap at the left of every row.
 const markWidth = 2
 
-// layoutColumns picks the columns that fit in width and sizes the flexible ones.
-func layoutColumns(width int) ([]column, []int) {
+// layoutColumns picks the columns that fit in width and sizes the flexible
+// ones. The column named by keep, the one the table is sorted by, is never
+// dropped, so the order on screen is always explained by what is on screen.
+func layoutColumns(width int, keep model.Field) ([]column, []int) {
 	cols := append([]column(nil), columns...)
 	for {
 		fixed, flex := 0, 0
@@ -120,9 +190,12 @@ func layoutColumns(width int) ([]column, []int) {
 			}
 			return cols, widths
 		}
-		lowest := 0
+		lowest := -1
 		for i, c := range cols {
-			if c.drop < cols[lowest].drop {
+			if c.field == keep && len(cols) > 1 {
+				continue
+			}
+			if lowest < 0 || c.drop < cols[lowest].drop {
 				lowest = i
 			}
 		}
@@ -151,6 +224,18 @@ type sortKey struct {
 }
 
 func keyFor(d model.DeviceSnapshot, f model.Field, now time.Time) sortKey {
+	switch f {
+	case model.FieldFirstSeen:
+		if t, ok := firstSeen(d, now); ok {
+			return sortKey{has: true, numeric: true, num: float64(t.UnixNano())}
+		}
+		return sortKey{}
+	case fieldLastSeen:
+		if t, _, ok := d.LastContact(); ok {
+			return sortKey{has: true, numeric: true, num: float64(t.UnixNano())}
+		}
+		return sortKey{}
+	}
 	o, ok := d.ResolvedAt(f, now)
 	if !ok {
 		return sortKey{}
@@ -241,7 +326,7 @@ func (a *app) sortArrow() string {
 }
 
 func (a *app) renderTable(width, rows int) []string {
-	cols, widths := layoutColumns(max(1, width-markWidth))
+	cols, widths := layoutColumns(max(1, width-markWidth), a.sort.field())
 	s := a.renderer.Styles
 
 	cells := make([]string, len(cols))
@@ -268,7 +353,7 @@ func (a *app) renderTable(width, rows int) []string {
 		d := a.devices[i]
 		fr := classify(d, a.status)
 		for j, c := range cols {
-			v := cell(d, c.field, a.now)
+			v := a.cell(d, c.field)
 			if c.field == model.FieldHostname && d.Conflicting(c.field, a.now) {
 				v += " !"
 			}

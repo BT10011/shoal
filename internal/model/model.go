@@ -21,7 +21,22 @@ const (
 	FieldPort     Field = "port"
 	FieldType     Field = "device_type"
 	FieldFlag     Field = "flag"
+	// FieldFirstSeen is when shoal first saw the device on this network, on
+	// any visit, as an RFC 3339 time. It comes from history; a device seen
+	// for the first time has none, and its first sighting is this session's.
+	FieldFirstSeen Field = "first_seen"
 )
+
+// SourceHistory credits facts recalled from an earlier visit to the same
+// network. They are memories, not fresh evidence: they show what a device
+// was, count as the last time it was heard from, and lose to anything a
+// probe learns now. They never conflict with a current value, never make a
+// device claim an address, and never prompt a probe to ask anything.
+const SourceHistory = "history"
+
+// Historical reports whether a source recalls the past rather than
+// observing the present.
+func Historical(source string) bool { return source == SourceHistory }
 
 // MultiValued reports whether a field legitimately holds several values at
 // once (services, ports, flags). Single-valued fields with more than one live
@@ -66,6 +81,7 @@ var sourcePriority = map[string]int{
 	"ports":    30,
 	"classify": 20,
 	"store":    10,
+	"history":  5,
 }
 
 // SourcePriority returns the tie-break rank of a source.
@@ -86,6 +102,10 @@ var direct = map[string]bool{
 	"nbns":  true,
 	"netif": true, // this machine's own interface
 	"ports": true,
+	// history recalls when some direct probe last heard the device, on an
+	// earlier visit. It counts as contact at that time, which is what lets a
+	// device from last time show as not answering when this scan misses it.
+	"history": true,
 }
 
 // Direct reports whether a source's observations come from the device itself
@@ -197,12 +217,21 @@ func (d *Device) Values(f Field, now time.Time) []string {
 }
 
 // Conflicting reports whether a single-valued field has more than one distinct
-// live value. Multi-valued fields never conflict.
+// live value among current sources. Multi-valued fields never conflict, and
+// a value recalled from history does not conflict with today's: it is what
+// the device used to be, and the difference is a change, not a dispute.
 func (d *Device) Conflicting(f Field, now time.Time) bool {
 	if f.MultiValued() {
 		return false
 	}
-	return len(d.Values(f, now)) > 1
+	seen := make(map[string]struct{})
+	for _, o := range d.Live(f, now) {
+		if Historical(o.Source) {
+			continue
+		}
+		seen[o.Value] = struct{}{}
+	}
+	return len(seen) > 1
 }
 
 // LastContact returns when a probe last heard from the device directly and

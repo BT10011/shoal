@@ -88,9 +88,23 @@ func ago(now, t time.Time) string {
 		return fmt.Sprintf("%ds ago", int(d.Seconds()))
 	case d < time.Hour:
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	default:
+	case d < 48*time.Hour:
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// stamp is a time for the details pane: the clock alone today, the date
+// as well otherwise, since history reaches back across visits.
+func stamp(now, t time.Time) string {
+	now, t = now.Local(), t.Local()
+	y1, m1, d1 := now.Date()
+	y2, m2, d2 := t.Date()
+	if y1 == y2 && m1 == m2 && d1 == d2 {
+		return t.Format("15:04:05")
+	}
+	return t.Format("2006-01-02 15:04")
 }
 
 func ttl(o model.Observation, now time.Time) string {
@@ -118,5 +132,15 @@ func wrap(s string, width int) []string {
 	if width < 8 {
 		return []string{s}
 	}
-	return strings.Split(ansi.Wordwrap(s, width, ""), "\n")
+	var out []string
+	for _, line := range strings.Split(ansi.Wordwrap(s, width, ""), "\n") {
+		// Word wrapping can leave a line too long, for instance around a
+		// word starting "--"; cut such a line rather than overflow.
+		if lipgloss.Width(line) > width {
+			out = append(out, strings.Split(ansi.Hardwrap(line, width, true), "\n")...)
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }

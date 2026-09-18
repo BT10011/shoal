@@ -369,3 +369,36 @@ func TestDoesNotGuessWhenTwoDevicesClaimTheSameAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestRememberedAddressIsNotAClaim(t *testing.T) {
+	var events []Event
+	st := NewMemory(WithListener(func(ev Event) { events = append(events, ev) }))
+	past := time.Now().Add(-72 * time.Hour)
+	for _, o := range []model.Observation{
+		{DeviceKey: "aa:aa:aa:aa:aa:aa", Field: model.FieldIP, Value: "10.0.0.50", Source: model.SourceHistory, Method: "last visit", Confidence: 0.5, At: past},
+		{DeviceKey: "bb:bb:bb:bb:bb:bb", Field: model.FieldIP, Value: "10.0.0.50", Source: "arp", Method: "reply", Confidence: 1},
+	} {
+		if err := st.Apply(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st.Len() != 2 {
+		t.Fatalf("both devices should exist: %d", st.Len())
+	}
+	for _, key := range []string{"aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"} {
+		d, _ := st.Get(key)
+		if len(d.Values(model.FieldFlag, time.Now())) != 0 {
+			t.Errorf("%s flagged: a remembered address is not a duplicate of today's", key)
+		}
+	}
+	// A bare-IP observation goes to the device that holds the address now.
+	if err := st.Apply(model.Observation{DeviceKey: "10.0.0.50", Field: model.FieldHostname, Value: "cam.local", Source: "mdns", Method: "A", Confidence: 0.9}); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := st.Get("bb:bb:bb:bb:bb:bb"); len(d.Values(model.FieldHostname, time.Now())) != 1 {
+		t.Error("a fact keyed by the address belongs to today's holder")
+	}
+	if events[0].Source != model.SourceHistory || events[1].Source != "arp" {
+		t.Errorf("events should carry the observation's source: %q %q", events[0].Source, events[1].Source)
+	}
+}

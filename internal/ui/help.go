@@ -86,7 +86,10 @@ while nbns names every Windows and Samba machine.
   or locally-administered MAC has no vendor, and says so in the details.
   RTT: the best of three ICMP round trips.
   FLAGS: short badges for things worth a second look, explained under
-  "Devices that do not belong" below.
+  "Devices that do not belong" and "History" below.
+  FIRST SEEN and LAST SEEN: when a device was first seen on this network,
+  on any visit, and when a probe last heard from it. They are the first
+  columns dropped on a narrow screen, but sorting by one keeps it shown.
 
 The narrow column at the far left is freshness, described below. Columns
 that do not fit are dropped, MAC first, because it is always in the
@@ -172,6 +175,34 @@ from, and is flagged off-subnet like the rest.
 That also sets the limit: all of this is layer 2, so it only works on the
 same VLAN or switch segment as the device. Nothing crosses a router. When a
 box that must be there does not show, that is the first thing to check.
+
+# History
+
+shoal remembers each network it scans and the devices it saw there, so
+the next visit can say what changed. A network is recognised by its
+gateway's MAC as well as its subnet, since 192.168.1.0/24 behind a router
+at .1 describes half the venues in the world; history starts once the
+sweep hears the gateway. The history row in the "Under the hood" pane says
+which visit this is and how many devices are known, new and missing.
+
+Devices remembered from before appear straight away, in the table, with
+their last address and name. If one answers, today's facts take over. If
+the scan finishes without hearing it, it is marked ✗ and badged missing.
+In the details pane a remembered value reads "(last visit)", with the date
+and the probe that last heard it. The badges:
+
+  new: not seen on this network on any earlier visit. Nothing is marked
+  new on a first visit, since everything is.
+  new-ip: answering at a different address from last time.
+  renamed: known by a different name from last time. OFFICE-NAS and
+  office-nas.local count as the same name.
+  missing: remembered, and this scan has finished without hearing it.
+
+Remembered facts are memories, not evidence: no probe is asked about a
+remembered address, which another device may hold today, and an old value
+never counts as a conflict with a new one. The history file lives in the
+per-user data directory; shoal probe history lists what it holds, --history
+moves it and --no-history turns it off.
 
 # Scans
 

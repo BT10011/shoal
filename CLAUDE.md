@@ -3,7 +3,7 @@
 ## Start here
 Read `PROJECT_PLAN.md` in full before doing any work. It is the source of truth for scope, architecture, build order and conventions. If this file and the plan ever disagree, the plan wins.
 
-**Current phase: Phase 4 — History.** (Update this line as phases complete.) Not started.
+**Current phase: Phase 4 — History.** (Update this line as phases complete.) Built 2026-09-18; to be confirmed by the maintainer across two real visits to the same network, then Phase 5 — Services & device type.
 Phase 3a completed 2026-09-18: devices on the wrong subnet are found passively (ARP listener, `rogue` enricher, FLAGS column) and actively with the opt-in `--also <cidr>`; its purpose (AV-over-IP venues: find the box with the stale or link-local address) and decisions are in the plan. `--check-off-subnet` was left out as covered by `--also`.
 Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
 Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, unprivileged `neigh` fallback, vendors from the embedded IEEE registry).

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
@@ -11,7 +12,7 @@ import (
 
 var detailOrder = []model.Field{
 	model.FieldIP, model.FieldMAC, model.FieldHostname, model.FieldVendor, model.FieldLatency,
-	model.FieldType, model.FieldService, model.FieldPort, model.FieldFlag,
+	model.FieldType, model.FieldService, model.FieldPort, model.FieldFlag, model.FieldFirstSeen,
 }
 
 // rawLimit caps the hex view of one observation. mDNS announcements can run
@@ -36,8 +37,13 @@ func (a *app) renderDetails(width int) []string {
 	}
 	fr := classify(d, a.status)
 	lines := []string{s.DetailTitle.Render(ansi.Truncate(title, max(1, width-2), "…"))}
-	for _, l := range wrap(fmt.Sprintf("first seen %s · last seen %s (%s)",
-		d.FirstSeen.Format("15:04:05"), d.LastSeen.Format("15:04:05"), ago(a.now, d.LastSeen)), width) {
+	first, _ := firstSeen(d, a.now)
+	last, _, heard := d.LastContact()
+	meta := fmt.Sprintf("first seen %s", stamp(a.now, first))
+	if heard {
+		meta += fmt.Sprintf(" · last heard %s (%s)", stamp(a.now, last), ago(a.now, last))
+	}
+	for _, l := range wrap(meta, width) {
 		lines = append(lines, s.DetailMeta.Render(fit(l, width)))
 	}
 	freshStyle := s.DetailMeta
@@ -50,6 +56,11 @@ func (a *app) renderDetails(width int) []string {
 			prefix = fr.mark(s.PlainUI) + " "
 		}
 		lines = append(lines, freshStyle.Render(fit(prefix+l, width)))
+	}
+	if remembered(d) {
+		for _, l := range wrap("remembered from an earlier visit to this network and not heard on this one: every value below is what it was then", width-2) {
+			lines = append(lines, s.DetailMeta.Render(fit("  "+l, width)))
+		}
 	}
 	if len(d.Live(model.FieldIP, a.now)) == 0 {
 		for _, l := range wrap("seen at layer 2 only: no probe has learned an address for this device; it may still be probing for one", width-2) {
@@ -74,8 +85,16 @@ func (a *app) renderDetails(width int) []string {
 				name = string(f)
 			}
 			value := o.Value
+			if f == model.FieldFirstSeen {
+				if t, err := time.Parse(time.RFC3339, o.Value); err == nil {
+					value = stamp(a.now, t)
+				}
+			}
 			style := s.Item
 			switch {
+			case model.Historical(o.Source):
+				value += "  (last visit)"
+				style = muted
 			case !f.MultiValued() && i > 0 && !seen[o.Value]:
 				value += "  (disagrees)"
 				style = conflict

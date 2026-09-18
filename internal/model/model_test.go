@@ -233,3 +233,36 @@ func TestLastContactCountsOnlyDirectSources(t *testing.T) {
 		t.Fatalf("same instant should be settled by source priority, got %q", source)
 	}
 }
+
+func TestHistoryIsContactButNeverAConflict(t *testing.T) {
+	d := NewDevice("k", t0)
+	past := t0.Add(-48 * time.Hour)
+	d.Add(obs(FieldHostname, "old-name.local", SourceHistory, 0.5, past, 0))
+	d.Add(obs(FieldHostname, "new-name.local", "mdns", 0.9, t0, 0))
+	if d.Conflicting(FieldHostname, t0) {
+		t.Fatal("a remembered name differing from today's is a change, not a conflict")
+	}
+	if got, _ := d.ResolvedAt(FieldHostname, t0); got.Value != "new-name.local" {
+		t.Fatalf("today's value must win: %q", got.Value)
+	}
+	if vs := d.Values(FieldHostname, t0); len(vs) != 2 {
+		t.Fatalf("the remembered value is still a value to show: %v", vs)
+	}
+	d.Add(obs(FieldHostname, "nas.lan", "rdns", 0.7, t0, 0))
+	if !d.Conflicting(FieldHostname, t0) {
+		t.Fatal("two current sources disagreeing is still a conflict")
+	}
+
+	ghost := NewDevice("g", past)
+	ghost.Add(obs(FieldMAC, "aa:bb:cc:dd:ee:ff", SourceHistory, 0.5, past, 0))
+	at, source, ok := ghost.LastContact()
+	if !ok || source != SourceHistory || !at.Equal(past) {
+		t.Fatalf("history counts as contact at the time it recalls: %v %q %v", at, source, ok)
+	}
+	if !Historical(SourceHistory) || Historical("arp") {
+		t.Fatal("Historical classification wrong")
+	}
+	if SourcePriority(SourceHistory) >= SourcePriority("classify") {
+		t.Fatal("history must lose every tie")
+	}
+}

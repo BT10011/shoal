@@ -41,6 +41,16 @@ UI is honest about being invented.
 - **Timing**: requests are paced (default 15 ms per address, 150 ms lookups with
   ±50 % jitter) so progress and the event log are readable.
 
+## A previous visit
+
+`shoal --demo` also runs the real `history` probe over an in-memory history
+seeded by `fake.SeedHistory` with an invented visit three days earlier: an
+Epson projector at `.88` that is not in today's cast (missing), the printer
+at `.51` (now `.50`, so new address), the Raspberry Pi as `octopi.local`
+(now `raspberrypi.local`, so renamed), and no Chromecast, PTZ camera or
+Dante box (new). The demo interface has its gateway at `.1`, whose MAC
+identifies the network. The real history file is never touched.
+
 ## Running it
 
 ```

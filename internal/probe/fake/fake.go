@@ -17,6 +17,7 @@ import (
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/store"
 )
 
 // Device is one scripted host.
@@ -59,6 +60,12 @@ const (
 func Subnet() *net.IPNet {
 	_, n, _ := net.ParseCIDR(subnet + ".0/24")
 	return n
+}
+
+// Interface is the interface the demo pretends to scan on: the subnet and
+// the gateway at .1, whose MAC the history probe uses to recognise it.
+func Interface() netif.Interface {
+	return netif.Interface{Name: "demo0", Subnet: Subnet(), Gateway: net.ParseIP(subnet + ".1"), IP: net.ParseIP(subnet + ".10")}
 }
 
 func (o Options) withDefaults() Options {
@@ -351,4 +358,39 @@ func (e *icmpEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit 
 
 func formatRTT(d time.Duration) string {
 	return fmt.Sprintf("%.1fms", float64(d)/float64(time.Millisecond))
+}
+
+// SeedHistory writes an invented previous visit into h, three days before
+// now, so the demo shows what history does: an Epson projector that was
+// here and is now missing, a printer that has moved address, a Raspberry
+// Pi that has been renamed, and the Chromecast, the PTZ camera and the
+// Dante box, which were not here before and so are new.
+func SeedHistory(h *store.History, now time.Time) error {
+	then := now.Add(-72 * time.Hour)
+	id := store.NetworkID{Subnet: subnet + ".0/24", GatewayMAC: "2c:c8:1b:4a:10:01"}
+	if _, _, err := h.Visit(id, subnet+".1", then); err != nil {
+		return err
+	}
+	firstVisit := then.Add(-40 * 24 * time.Hour)
+	var known []store.Remembered
+	for _, d := range DefaultDevices() {
+		switch d.MAC {
+		case "f4:f5:d8:12:34:56", "00:01:4a:7c:2e:01", "00:1d:c1:12:34:56":
+			continue // new today
+		}
+		r := store.Remembered{MAC: d.MAC, IP: d.IP, Hostname: d.MDNSName, FirstSeen: firstVisit, LastSeen: then, LastSource: "arp"}
+		if r.Hostname == "" {
+			r.Hostname = d.RDNS
+		}
+		switch d.MAC {
+		case "00:1e:0b:55:d3:1a":
+			r.IP = subnet + ".51" // the printer took a new lease
+		case "b8:27:eb:6d:2f:90":
+			r.Hostname = "octopi.local" // repurposed since
+		}
+		known = append(known, r)
+	}
+	known = append(known, store.Remembered{MAC: "00:26:ab:5e:77:10", IP: subnet + ".88", Hostname: "EPSON-PROJ.local",
+		Vendor: "Seiko Epson Corporation", FirstSeen: firstVisit, LastSeen: then, LastSource: "arp"})
+	return h.Record(id, known...)
 }

@@ -595,10 +595,59 @@ Not done: `--check-off-subnet`, a single unicast ARP to confirm an
 overheard off-subnet address is live now. `--also` covers the case that
 motivated it (the device that never speaks); revisit only if wanted.
 
-### Phase 4 — History
-- SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.
-- First seen / last seen columns; "new since last scan" badge.
-- Change events: IP changed, hostname changed, device missing, duplicate IP.
+### Phase 4 — History *(built 2026-09-18; to be confirmed across two real visits)*
+- ✅ SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.
+- ✅ First seen / last seen columns; "new since last scan" badge.
+- ✅ Change events: IP changed, hostname changed, device missing, duplicate IP (the last already raised by the store since Phase 0).
+
+*Decisions, 2026-09-18:*
+
+- **Storage** is `store/sqlite.go` (`store.History`) on `modernc.org/sqlite`
+  (pure Go; builds for macOS, FreeBSD and Windows). Tables `networks` (id,
+  subnet, gateway MAC and IP, first/last visit, visits) and `devices`
+  (network, MAC, last IP, hostname, vendor, first/last seen, last source).
+  `Visit` returns what was known *before* this visit, so comparisons never
+  see this visit's own writes; `Record` batches in one transaction, never
+  blanks a remembered value, and only moves first seen earlier and last seen
+  later. Default path is the per-user data directory (XDG on Linux/BSD,
+  Application Support on macOS, `%LOCALAPPDATA%` on Windows), directory 0700;
+  `--history PATH`, `--no-history`. A file that cannot be opened never stops
+  a scan: the mode line says "no history (why)".
+- **The `history` probe** (`internal/probe/history`, a discoverer that sends
+  nothing) waits for the gateway's MAC, opens the visit, emits every
+  remembered device as facts with source `model.SourceHistory` (confidence
+  0.5, dated at its last sighting), then every 500 ms compares and records:
+  flags `new-device` (not on a first visit), `ip-changed`, `name-changed`
+  (first label, case-insensitive), each once, with a method saying what it
+  was and when. Once per settled scan it logs `missing:` for remembered
+  devices not heard since the scan began. It records on change or every
+  30 s, and flushes when stopped or on quit. A silent gateway means nothing
+  is remembered that visit, and the log says so. The probe keeps its state
+  across rescans, so the baseline stays what was known before the visit.
+- **Memories are not evidence.** `model.Historical(source)`: history facts
+  count as contact (so a remembered device reads "did not answer; last heard
+  on an earlier visit"), never conflict with a current value (`Conflicting`
+  skips them; the details pane labels them "(last visit)"), never claim an
+  address in the store (no `duplicate-ip`, no routing of IP-keyed facts to a
+  ghost), and never trigger an enricher (the engine skips store events whose
+  `Source` is historical: pinging last week's address would credit today's
+  holder's reply to the wrong device).
+- **UI:** FIRST SEEN (history's `first_seen` fact, else this session's first
+  sighting) and LAST SEEN (last contact, any visit) columns, dropped first
+  on narrow screens; the sort column is never dropped. Badges `new`,
+  `new-ip`, `renamed`, and a derived `missing` for a device known only from
+  history once the scan settles. Details show dates when not today and a
+  "remembered from an earlier visit" note. A discoverer with no total and a
+  status message (history) gets its message as its row. The log's probe
+  column is seven characters.
+- **Fixed on the way:** a per-device info event (one with a Target) no longer
+  replaces a discoverer's status line. It had been making the mDNS
+  listener's wave drop back to a plain count whenever it logged a relayed
+  instance.
+- **Demo:** an in-memory history seeded by `fake.SeedHistory` with a visit
+  three days earlier (missing projector, printer on a new address, renamed
+  Pi, three new devices); `fake.Interface()` gives the demo a gateway.
+- `shoal probe history` lists the file; `docs/protocols/history.md`.
 
 ### Phase 5 — Services & device type
 - `ports`: small curated, opt-in TCP connect list (e.g. 22, 53, 80, 443, 445, 548, 554, 631, 5000, 5001, 8080, 9100), rate-limited. **Not** a general port scanner.

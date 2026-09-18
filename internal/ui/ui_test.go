@@ -15,6 +15,7 @@ import (
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/history"
 	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/store"
 )
@@ -678,7 +679,7 @@ func TestStopIsInEveryKeyBarAndReadsStopped(t *testing.T) {
 
 func TestLayoutColumnsNeverExceedWidth(t *testing.T) {
 	for w := 10; w <= 160; w++ {
-		cols, widths := layoutColumns(w)
+		cols, widths := layoutColumns(w, "")
 		total := len(cols) - 1
 		for _, cw := range widths {
 			total += cw
@@ -690,7 +691,7 @@ func TestLayoutColumnsNeverExceedWidth(t *testing.T) {
 			t.Fatalf("width %d: no columns", w)
 		}
 	}
-	cols, _ := layoutColumns(120)
+	cols, _ := layoutColumns(200, "")
 	if len(cols) != len(columns) {
 		t.Fatalf("wide table dropped columns: %v", cols)
 	}
@@ -1314,5 +1315,200 @@ func TestDemoPointsAtTheBoxesOnTheWrongSubnet(t *testing.T) {
 	}
 	if !strings.Contains(ansi.Strip(a.View()), "1 of 13 match") {
 		t.Errorf("status bar should count the match\n%s", ansi.Strip(a.View()))
+	}
+}
+
+func TestHistoryShowsInTableAndDetails(t *testing.T) {
+	a, st := sized(t, 120, 40)
+	lastWeek := t0.Add(-7 * 24 * time.Hour)
+	past := func(key string, f model.Field, v string) model.Observation {
+		return model.Observation{DeviceKey: key, Field: f, Value: v, Source: model.SourceHistory,
+			Method: "remembered from an earlier visit: last heard on this network on 2026-09-09 12:00 by arp", Confidence: 0.5, At: lastWeek}
+	}
+	for _, o := range []model.Observation{
+		// A projector from last week that has not answered.
+		past("aa:26:ab:00:00:04", model.FieldMAC, "aa:26:ab:00:00:04"),
+		past("aa:26:ab:00:00:04", model.FieldIP, "192.168.1.88"),
+		past("aa:26:ab:00:00:04", model.FieldHostname, "EPSON-PROJ.local"),
+		// The NAS, seen today at .20, was at .21 last week.
+		past("mac-b", model.FieldIP, "192.168.1.21"),
+		past("mac-b", model.FieldFirstSeen, lastWeek.Add(-30*24*time.Hour).Format(time.RFC3339)),
+		{DeviceKey: "mac-b", Field: model.FieldFlag, Value: "ip-changed", Source: "history", Method: "was at 192.168.1.21 when last heard on 2026-09-09 12:00; now at 192.168.1.20 (arp)", Confidence: 1, At: t0},
+	} {
+		if err := st.Apply(o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settled := engine.Status{Scan: 1, ScanStarted: t0,
+		Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateDone, Done: 254, Total: 254},
+			{Name: "history", State: engine.StateRunning, Message: "visit 2 · 5 known · 1 new · 1 missing"}}}
+	a.Update(Batch{Devices: st.Devices(), Status: settled, At: t0.Add(5 * time.Second)})
+
+	row := func(ip string) string {
+		for _, l := range strings.Split(ansi.Strip(a.View()), "\n") {
+			if left := ansi.Truncate(l, 72, ""); strings.Contains(left, " "+ip+" ") {
+				return left
+			}
+		}
+		return ""
+	}
+	if r := row("192.168.1.88"); !strings.Contains(r, "✗") || !strings.Contains(r, "missing") {
+		t.Errorf("a remembered device the scan did not hear should be marked missing: %q", r)
+	}
+	if r := row("192.168.1.20"); !strings.Contains(r, "new-ip") {
+		t.Errorf("the NAS should carry its new-ip badge: %q", r)
+	}
+	if nas, _ := st.Get("mac-b"); nas.Conflicting(model.FieldIP, t0) {
+		t.Error("last week's address is not a conflict")
+	}
+	if !strings.Contains(ansi.Strip(a.View()), "history visit 2 · 5 known · 1 new · 1 missing") {
+		t.Errorf("the history probe's row should say where the visit stands\n%s", ansi.Strip(a.View()))
+	}
+
+	// Sorting by FIRST SEEN keeps that column on screen, oldest first.
+	for a.sort.field() != model.FieldFirstSeen {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "FIRST SEEN ▾") || !strings.Contains(plain, "37d ago") {
+		t.Errorf("the sort column must stay visible, with the NAS first seen 37 days ago\n%s", plain)
+	}
+	if a.devices[0].Key != "mac-b" {
+		t.Errorf("oldest first: %v", keys(a.devices))
+	}
+
+	for i, d := range a.devices {
+		if d.Key == "mac-b" {
+			a.cursor = i
+		}
+	}
+	a.syncSelection()
+	details := strings.Join(strings.Fields(ansi.Strip(joinLines(a.renderDetails(100)))), " ")
+	for _, want := range []string{"192.168.1.21 (last visit)", "first_seen", "was at 192.168.1.21 when last heard", "first seen 2026-08-10"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("NAS details missing %q\n%s", want, details)
+		}
+	}
+	if strings.Contains(details, "192.168.1.21 (disagrees)") {
+		t.Error("a remembered value must read as last visit, not a disagreement")
+	}
+	for i, d := range a.devices {
+		if d.Key == "aa:26:ab:00:00:04" {
+			a.cursor = i
+		}
+	}
+	a.syncSelection()
+	details = strings.Join(strings.Fields(ansi.Strip(joinLines(a.renderDetails(100)))), " ")
+	for _, want := range []string{"remembered from an earlier visit to this network and not heard on this one", "did not answer scan 1, which has finished; last heard on an earlier visit, 7d ago"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("projector details missing %q\n%s", want, details)
+		}
+	}
+}
+
+func TestSortColumnIsNeverDropped(t *testing.T) {
+	for w := 20; w <= 160; w += 7 {
+		for _, c := range columns {
+			cols, _ := layoutColumns(w, c.field)
+			found := false
+			for _, got := range cols {
+				found = found || got.field == c.field
+			}
+			if !found {
+				t.Fatalf("width %d: sorting by %s dropped it", w, c.title)
+			}
+		}
+	}
+}
+
+// TestDemoRemembersThePreviousVisit runs the demo as shoal --demo does,
+// with its invented visit three days ago, and checks each change reads as
+// it should once the scan has run its course.
+func TestDemoRemembersThePreviousVisit(t *testing.T) {
+	st := store.NewMemory()
+	eng := engine.New(st, fake.Interface())
+	opts := fake.Options{Interval: 50 * time.Microsecond, Latency: 200 * time.Microsecond, Seed: 7}
+	h, err := store.OpenHistory("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := fake.SeedHistory(h, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.AddDiscoverer(history.New(history.Options{History: h, Store: st, Status: eng.Status, Poll: 5 * time.Millisecond})); err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range append([]engine.Enricher{rogue.New(fake.Subnet())}, fake.NewEnrichers(opts)...) {
+		if err := eng.AddEnricher(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+
+	flagsOf := func(key string) string {
+		d, _ := st.Get(key)
+		return strings.Join(d.Values(model.FieldFlag, time.Now()), ",")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if eng.Status().Settled() && strings.Contains(flagsOf("b8:27:eb:6d:2f:90"), "name-changed") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	for key, want := range map[string]string{
+		"00:1e:0b:55:d3:1a": "ip-changed",   // the printer, .51 last time
+		"b8:27:eb:6d:2f:90": "name-changed", // the Pi, octopi.local last time
+		"f4:f5:d8:12:34:56": "new-device",   // the Chromecast
+	} {
+		if got := flagsOf(key); !strings.Contains(got, want) {
+			t.Errorf("%s flags = %q, want %s", key, got, want)
+		}
+	}
+	if got := flagsOf("2c:c8:1b:4a:10:01"); got != "" {
+		t.Errorf("the gateway was here last time and has not changed: %q", got)
+	}
+
+	a := newApp(Options{Store: st, Engine: eng, Demo: true, Theme: "nord"})
+	a.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
+	a.Update(Batch{Devices: st.Devices(), Status: eng.Status(), At: time.Now()})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "epson" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(a.devices) != 1 {
+		t.Fatalf("/epson should find the projector remembered from last time: %v", keys(a.devices))
+	}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "192.168.1.88") || !strings.Contains(plain, "missing") {
+		t.Errorf("the projector should be a missing row\n%s", plain)
+	}
+	var row string
+	for _, d := range eng.Status().Discoverers {
+		if d.Name == "history" {
+			row = d.Message
+		}
+	}
+	if row != "visit 2 · 11 known · 3 new · 1 missing" {
+		t.Errorf("the history row should sum up the visit: %q", row)
+	}
+}
+
+func TestWrapNeverOverflows(t *testing.T) {
+	text := "in the per-user data directory; shoal probe history lists what it holds, --history moves it and --no-history turns it off"
+	for w := 8; w <= 80; w++ {
+		for _, l := range wrap(text, w) {
+			if lipgloss.Width(l) > w {
+				t.Fatalf("width %d: %q is %d wide", w, l, lipgloss.Width(l))
+			}
+		}
 	}
 }
