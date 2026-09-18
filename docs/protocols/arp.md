@@ -67,6 +67,44 @@ A frame is 14 bytes of Ethernet header plus 28 bytes of ARP:
 Progress is reported per request; the bar's total grows when the retry pass
 adds requests, which is honest about the extra work.
 
+## Extra ranges: `--also`
+
+Listening finds a device on the wrong subnet only when it speaks, and a box
+with a static address that sits idle may never ARP at all. `--also CIDR`
+(repeatable) adds a range to the sweep: every host address in it is asked
+too, on this segment, in the same paced passes and retry, e.g.
+
+```
+shoal --also 192.168.1.0/24          # the venue's usual subnet
+shoal probe arp --also 192.168.0.0/23 --also 10.0.0.10
+```
+
+ARP answers regardless of subnet: a host that holds the address being asked
+for replies, whatever network the question came from. So a camera left on
+`192.168.1.50` answers a sweep run from `172.16.10.0/24`, as long as it is on
+the same VLAN or switch segment.
+
+The extra requests are sent as **RFC 5227 probes**, with sender address
+`0.0.0.0` rather than this machine's address:
+
+- they claim no address on the foreign network, and leave no entry in
+  anyone's ARP cache;
+- a host holding the address must answer, since that is how it defends it;
+- Linux answers them without the reverse-path check that silently drops an
+  ordinary request from a sender outside the device's own subnet, and most
+  AV gear runs Linux.
+
+The reply comes back addressed to our MAC with target `0.0.0.0`; it is
+recorded at confidence **1.0**, "answering our probe", and the `rogue`
+enricher then flags the address `off-subnet-ip`. Ranges are refused above
+the `--max-hosts` limit, as the subnet is (so `169.254.0.0/16`, 65 536
+addresses, is refused; link-local devices are found by listening), and
+addresses already inside the subnet are not asked twice. `--also` needs raw
+access; without it shoal refuses to start rather than quietly scan less.
+
+Sending to addresses outside the subnet is off by default (§9 of the plan);
+`--also` is the explicit opt-in.
+
 ## The listener that outlives the sweep
 
 The sweep listens for the seven seconds it runs. A device on the wrong

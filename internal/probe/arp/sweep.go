@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,10 @@ type Options struct {
 	Settle   time.Duration                       // wait for replies after each pass: 1s
 	MaxHosts int                                 // refuse larger subnets: 1022 (/22)
 	NoRetry  bool                                // skip the second pass for silent hosts
+	// Also lists extra IPv4 ranges to ask on this segment (--also): a
+	// venue's usual subnet, say, where gear carrying a stale static address
+	// sits silent. They are asked with RFC 5227 probes (sender 0.0.0.0).
+	Also []*net.IPNet
 }
 
 const (
@@ -87,6 +92,11 @@ func (s *Sweep) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; raise it with -max-hosts if you are authorised to scan this network", iface.Subnet, n, s.opts.MaxHosts)
 	}
 	targets := hostIPs(iface.Subnet, iface.IP)
+	extra, err := s.extraTargets(iface)
+	if err != nil {
+		return err
+	}
+	targets = append(targets, extra...)
 
 	conn, err := s.opts.Open(iface)
 	if err != nil {
@@ -99,8 +109,11 @@ func (s *Sweep) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 	emit(model.Observation{DeviceKey: iface.MAC.String(), Field: model.FieldFlag, Value: FlagSelf, Source: "netif", Method: self, Confidence: 1})
 
 	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweeping %s on %s: %d addresses at %d/s, then retry silent ones", iface.Subnet, iface.Name, len(targets), s.opts.Rate)})
+	if len(extra) > 0 {
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("also asking %d addresses in %s on this segment, as --also requested. Those requests are RFC 5227 probes, sender 0.0.0.0: they claim no address on that network and leave no entry in anyone's ARP cache, and a device holding the address must answer", len(extra), joinNets(s.opts.Also))})
+	}
 
-	l := &listener{iface: iface, emit: emit, report: report, seen: make(map[string]bool)}
+	l := &listener{iface: iface, emit: emit, report: report, seen: make(map[string]bool), wanted: s.wanted(iface)}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -162,17 +175,69 @@ func (s *Sweep) pass(ctx context.Context, conn Conn, iface netif.Interface, targ
 			return done, ctx.Err()
 		case <-ticker.C:
 		}
-		if err := conn.WriteFrame(Request(iface.MAC, iface.IP, ip)); err != nil {
+		sender, note := iface.IP, ""
+		if !iface.Subnet.Contains(ip) {
+			sender, note = net.IPv4zero, fmt.Sprintf(" (probe, --also %s)", s.rangeOf(ip))
+		}
+		if err := conn.WriteFrame(Request(iface.MAC, sender, ip)); err != nil {
 			return done, fmt.Errorf("send who-has %s: %w", ip, err)
 		}
 		done++
-		report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("who-has %s tell %s", ip, iface.IP)})
+		report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("who-has %s tell %s%s", ip, sender, note)})
 		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: done, Total: total})
 	}
 	return done, nil
 }
 
-// listener turns received ARP frames into observations.
+// extraTargets lists the addresses of the --also ranges that the subnet
+// sweep does not already cover, each once, refusing a range too large to
+// ask politely.
+func (s *Sweep) extraTargets(iface netif.Interface) ([]net.IP, error) {
+	seen := make(map[string]bool)
+	var out []net.IP
+	for _, r := range s.opts.Also {
+		ones, bits := r.Mask.Size()
+		if r.IP.To4() == nil || bits != 32 {
+			return nil, fmt.Errorf("--also %s: only IPv4 ranges can be asked with ARP", r)
+		}
+		if size := 1 << (32 - ones); size > s.opts.MaxHosts {
+			return nil, fmt.Errorf("--also %s has %d addresses, more than the limit of %d; raise it with -max-hosts if you are authorised to scan that range", r, size, s.opts.MaxHosts)
+		}
+		for _, ip := range hostIPs(r, iface.IP) {
+			if iface.Subnet.Contains(ip) || seen[ip.String()] {
+				continue
+			}
+			seen[ip.String()] = true
+			out = append(out, ip)
+		}
+	}
+	return out, nil
+}
+
+// rangeOf names the --also range an address was asked under.
+func (s *Sweep) rangeOf(ip net.IP) *net.IPNet {
+	for _, r := range s.opts.Also {
+		if r.Contains(ip) {
+			return r
+		}
+	}
+	return nil
+}
+
+// wanted reports whether an address is one the sweep asks about, so a
+// reply from it counts as an answer and the retry pass can skip it.
+func (s *Sweep) wanted(iface netif.Interface) func(net.IP) bool {
+	return func(ip net.IP) bool { return iface.Subnet.Contains(ip) || s.rangeOf(ip) != nil }
+}
+
+func joinNets(nets []*net.IPNet) string {
+	parts := make([]string, len(nets))
+	for i, n := range nets {
+		parts[i] = n.String()
+	}
+	return strings.Join(parts, ", ")
+}
+
 // listener turns every ARP frame on the interface into facts. It is shared
 // by the sweep, which listens while it asks, and by Listener, which only
 // listens. Frames are kept whatever address they carry: a device on the
@@ -182,8 +247,9 @@ type listener struct {
 	iface   netif.Interface
 	emit    engine.Emit
 	report  engine.Report
-	onFrame func()      // called for every frame handled, if set
-	skip    func() bool // when set and true, frames are left to another probe
+	onFrame func()            // called for every frame handled, if set
+	skip    func() bool       // when set and true, frames are left to another probe
+	wanted  func(net.IP) bool // addresses being asked about; nil means the subnet
 
 	mu   sync.Mutex
 	seen map[string]bool
@@ -233,7 +299,10 @@ func (l *listener) handle(p Packet, frame []byte) {
 		return
 	}
 
-	toUs := p.IsReply() && p.TargetIP.Equal(l.iface.IP) && bytes.Equal(p.TargetMAC, l.iface.MAC)
+	// A reply to one of our probes (sent from 0.0.0.0 to an --also range)
+	// comes back addressed to our MAC with target address 0.0.0.0.
+	toUs := p.IsReply() && bytes.Equal(p.TargetMAC, l.iface.MAC) && (p.TargetIP.Equal(l.iface.IP) || p.TargetIP.IsUnspecified())
+	toProbe := toUs && p.TargetIP.IsUnspecified()
 	inSubnet := l.iface.Subnet.Contains(p.SenderIP)
 	where := ""
 	if !inSubnet {
@@ -243,6 +312,10 @@ func (l *listener) handle(p Packet, frame []byte) {
 	var method, message string
 	var conf float32
 	switch {
+	case toProbe:
+		method = fmt.Sprintf("ARP reply from %s on %s answering our probe for it (sent from 0.0.0.0, as --also does for extra ranges): %s is-at %s%s", p.SenderIP, l.iface.Name, p.SenderIP, p.SenderMAC, where)
+		message = fmt.Sprintf("%s is-at %s (answering our probe)", p.SenderIP, p.SenderMAC)
+		conf = 1
 	case toUs:
 		method = fmt.Sprintf("ARP reply from %s on %s answering our who-has: %s is-at %s%s", p.SenderIP, l.iface.Name, p.SenderIP, p.SenderMAC, where)
 		message = fmt.Sprintf("%s is-at %s", p.SenderIP, p.SenderMAC)
@@ -264,7 +337,11 @@ func (l *listener) handle(p Packet, frame []byte) {
 		message += " · outside our subnet"
 	}
 
-	if inSubnet {
+	wanted := inSubnet
+	if l.wanted != nil {
+		wanted = l.wanted(p.SenderIP)
+	}
+	if wanted {
 		l.mu.Lock()
 		l.seen[p.SenderIP.String()] = true
 		l.mu.Unlock()

@@ -423,7 +423,7 @@ generating from a key table.
 
 **Done when:** a new user can pick any value on screen and discover exactly where it came from within two keypresses.
 
-### Phase 3a — Rogue and off-subnet devices *(passive part done 2026-09-18; active follow-ups pending)*
+### Phase 3a — Rogue and off-subnet devices *(done 2026-09-18, except `--check-off-subnet`)*
 
 **Why this phase matters more than "optional" suggests (the maintainer, 2026-09-18):**
 shoal will be used most on AV-over-IP networks. Equipment goes in and out of
@@ -494,7 +494,7 @@ crosses a router. That is also the honest answer to "why can't shoal see it".
   sweep, so `shoal --demo` shows the feature.
 - `shoal probe rogue <ip> [subnet]` and `docs/protocols/rogue.md`.
 
-#### Second step, opt-in, pending the maintainer's go-ahead
+#### Second step, opt-in *(`--also` approved by the maintainer and built 2026-09-18)*
 
 An idle device with a static address may never ARP, so passive listening
 can miss it. Two active follow-ups, both off by default because §9 forbids
@@ -538,7 +538,27 @@ sweep. `shoal probe rogue <ip> [subnet]` and `docs/protocols/rogue.md`
 exist. The sidebar ratio went from 0.56 to 0.6 so RTT still fits beside the
 new column at 120 columns. An end-to-end UI test runs the real engine over
 the demo cast and checks both boxes are flagged, filterable and explained.
-Not done: the opt-in active follow-ups above.
+*`--also`, 2026-09-18:* `arp.Options.Also` adds ranges to the sweep's
+passes and retry, on this segment only. Decisions: the extra requests are
+**RFC 5227 probes (sender 0.0.0.0)** — they claim no address on the foreign
+network, plant nothing in ARP caches, must be answered by the holder, and
+bypass Linux's reverse-path check on ARP requests from off-subnet senders.
+Never sender = target (it would look like an address conflict and could
+make a link-local device give its address up). Replies addressed to our MAC
+with target 0.0.0.0 are recorded at 1.0, "answering our probe". Each range
+is refused above `--max-hosts`; addresses inside the subnet are not asked
+twice; a bare address means /32. `--also` without raw access is an error at
+startup, not a silent downgrade. The hood's mode reads "· also <cidr>".
+
+*Presentation, 2026-09-18:* the ARP listener is drawn as a continuation
+line (`└`) under the sweep's bar rather than a second `arp` row, since it is
+the same probe carrying on: flat and "listens once the sweep ends" while the
+sweep runs, then a wave and "still listening · N heard". The maintainer read two `arp`
+rows as a bug on the first real run.
+
+Not done: `--check-off-subnet`, a single unicast ARP to confirm an
+overheard off-subnet address is live now. `--also` covers the case that
+motivated it (the device that never speaks); revisit only if wanted.
 
 ### Phase 4 — History
 - SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.

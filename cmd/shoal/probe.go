@@ -29,7 +29,8 @@ import (
 const probeUsage = `Usage: shoal probe <name> [flags]
 
 Probes:
-  arp [iface]     Active ARP sweep of the interface's subnet (see docs/protocols/arp.md)
+  arp [iface]     Active ARP sweep of the interface's subnet, plus any --also ranges
+                  (see docs/protocols/arp.md)
   neigh [iface]   Kernel neighbour cache, no privileges needed (see docs/protocols/neigh.md)
   rdns <ip>       Reverse DNS (PTR) lookup, naming the resolver that answered (see docs/protocols/rdns.md)
   mdns [ip]       Ask a device its name over multicast, or with no ip, listen to the
@@ -95,6 +96,8 @@ func runProbeARP(args []string) error {
 	rate := fs.Int("rate", 0, "who-has requests per second (default 100)")
 	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses (default 1022)")
 	noRetry := fs.Bool("no-retry", false, "do not re-ask addresses that stayed silent")
+	var also []*net.IPNet
+	fs.Func("also", "also ask every address in this IPv4 range, with RFC 5227 probes (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -103,7 +106,7 @@ func runProbeARP(args []string) error {
 		return err
 	}
 	fmt.Print(iface.Describe(), "\n")
-	sweep := arp.New(arp.Options{Rate: *rate, MaxHosts: *maxHosts, NoRetry: *noRetry})
+	sweep := arp.New(arp.Options{Rate: *rate, MaxHosts: *maxHosts, NoRetry: *noRetry, Also: also})
 	return runStandalone(iface, []engine.Discoverer{sweep}, nil, os.Stdout)
 }
 

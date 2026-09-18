@@ -604,6 +604,39 @@ func TestLayerTwoOnlyDeviceIsExplained(t *testing.T) {
 	}
 }
 
+func TestSweepAndItsListenerReadAsOneProbe(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	sweep := engine.DiscovererStatus{Name: "arp", State: engine.StateRunning, Done: 120, Total: 253}
+	listen := engine.DiscovererStatus{Name: "arp", State: engine.StateRunning, Message: "listening for ARP on eth0"}
+	mdns := engine.DiscovererStatus{Name: "mdns", State: engine.StateRunning, Done: 9, Message: "listening"}
+	a.status = engine.Status{Scan: 1, ScanStarted: t0, Discoverers: []engine.DiscovererStatus{sweep, listen, mdns}}
+
+	rows := func() []string {
+		var out []string
+		for _, l := range a.renderHood(56, 10)[:3] {
+			out = append(out, ansi.Strip(l))
+		}
+		return out
+	}
+	r := rows()
+	if !strings.HasPrefix(r[0], "arp ") || !strings.HasPrefix(r[1], "  └") || strings.HasPrefix(r[1], "arp") {
+		t.Fatalf("the listener should hang under the sweep, not repeat its name:\n%s", strings.Join(r, "\n"))
+	}
+	if !strings.Contains(r[1], "listens once the sweep ends") || !strings.Contains(r[1], strings.Repeat(waveFlat, 5)) {
+		t.Errorf("while the sweep runs the listener waits, flat:\n%s", r[1])
+	}
+	if !strings.HasPrefix(r[2], "mdns ") || !strings.Contains(r[2], "listening · 9 heard") {
+		t.Errorf("a listener with no sweep keeps its own name:\n%s", r[2])
+	}
+
+	a.status.Discoverers[0].State, a.status.Discoverers[0].Done = engine.StateDone, 253
+	a.status.Discoverers[1].Done = 14
+	r = rows()
+	if !strings.Contains(r[0], "253/253 done") || !strings.Contains(r[1], "still listening · 14 heard") || strings.Contains(r[1], strings.Repeat(waveFlat, 8)) {
+		t.Errorf("after the sweep the listener carries on, rolling:\n%s", strings.Join(r, "\n"))
+	}
+}
+
 func TestStopIsInEveryKeyBarAndReadsStopped(t *testing.T) {
 	a, _ := sized(t, 80, 24)
 	bar := ansi.Strip(a.View())

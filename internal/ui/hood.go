@@ -16,7 +16,7 @@ func (a *app) renderHood(width, rows int) []string {
 	s := a.renderer.Styles
 	var lines []string
 
-	for _, d := range a.status.Discoverers {
+	for i, d := range a.status.Discoverers {
 		state := string(d.State)
 		switch {
 		case d.Err != "":
@@ -27,8 +27,28 @@ func (a *app) renderHood(width, rows int) []string {
 		// A probe that listens has no end to count towards, so its row
 		// says what it has heard and carries a wave rather than a bar.
 		listener := isListener(d)
+		// A listener straight after a sweep of the same name is that probe's
+		// second stage (the ARP listener takes over when the sweep ends), so
+		// it is drawn as a continuation of the sweep's row, not a second
+		// probe with the same name.
+		var sweep *engine.DiscovererStatus
+		if listener && i > 0 && a.status.Discoverers[i-1].Name == d.Name && a.status.Discoverers[i-1].Total > 0 {
+			sweep = &a.status.Discoverers[i-1]
+		}
+		waiting := sweep != nil && sweep.State == engine.StateRunning && d.State == engine.StateRunning
+		name := d.Name
+		if sweep != nil {
+			name = "  └"
+			if s.PlainUI {
+				name = "  \\"
+			}
+		}
 		tail := fmt.Sprintf(" %d/%d %s", d.Done, d.Total, state)
 		switch {
+		case waiting:
+			tail = " listens once the sweep ends"
+		case sweep != nil && d.State == engine.StateRunning:
+			tail = fmt.Sprintf(" still listening · %d heard", d.Done)
 		case listener && d.State == engine.StateRunning:
 			tail = fmt.Sprintf(" listening · %d heard", d.Done)
 		case listener:
@@ -38,14 +58,18 @@ func (a *app) renderHood(width, rows int) []string {
 		}
 		barW := width - 7 - lipgloss.Width(tail)
 		if barW < 4 {
-			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))
+			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", name, tail), width)))
 			continue
 		}
 		graphic := progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())
 		if listener {
-			graphic = listenWave(barW, a.waveFrame(), d.State == engine.StateRunning, a.barStyles())
+			graphic = listenWave(barW, a.waveFrame(), d.State == engine.StateRunning && !waiting, a.barStyles())
 		}
-		lines = append(lines, s.Item.Render(fit(d.Name, 7))+graphic+s.Item.Render(fit(tail, width-7-barW)))
+		label := s.Item.Render(fit(name, 7))
+		if sweep != nil {
+			label = s.ItemMuted.Render(fit(name, 7))
+		}
+		lines = append(lines, label+graphic+s.Item.Render(fit(tail, width-7-barW)))
 	}
 	for _, e := range a.status.Enrichers {
 		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)

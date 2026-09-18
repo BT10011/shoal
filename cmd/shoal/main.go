@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -36,6 +37,9 @@ Flags:
   --unprivileged          Skip raw ARP; read the kernel neighbour table instead
   --rate N                Probe packets per second (default 100)
   --max-hosts N           Largest subnet to sweep, in addresses (default 1022, a /22)
+  --also CIDR             Also ask every address in CIDR with ARP, on this segment only,
+                          e.g. a venue's usual 192.168.1.0/24, to find gear carrying a stale
+                          static address that never speaks. Repeatable. Needs raw access
   --theme NAME            Colour theme, e.g. nord, dracula, gruvbox-dark, vt100
   --demo                  Scripted fake data
 
@@ -76,6 +80,8 @@ func runTUI(args []string) error {
 	rate := fs.Int("rate", 0, "probe packets per second")
 	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses")
 	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
+	var also []*net.IPNet
+	fs.Func("also", "also ask every address in this IPv4 range with ARP (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -89,7 +95,11 @@ func runTUI(args []string) error {
 	}
 	st := store.NewMemory()
 	eng := engine.New(st, iface)
-	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate, *maxHosts)
+	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate, *maxHosts, also)
+	if _, ok := discoverer.(*arp.Sweep); !ok && len(also) > 0 {
+		// Asked for, and impossible: say so rather than quietly scan less.
+		return fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", mode)
+	}
 	if err := eng.AddDiscoverer(discoverer); err != nil {
 		return err
 	}
@@ -147,18 +157,41 @@ func runTUI(args []string) error {
 // chooseDiscoverer prefers a real ARP sweep and falls back to the kernel
 // neighbour table when raw packet access is refused. The chosen probe
 // explains itself in the event log, so the caller only needs the label.
-func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate, maxHosts int) (engine.Discoverer, string) {
+func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate, maxHosts int, also []*net.IPNet) (engine.Discoverer, string) {
 	fallback := neigh.New(neigh.Options{Rate: rate, MaxHosts: maxHosts})
 	if unprivileged {
 		return fallback, "neigh · unprivileged"
 	}
 	switch err := arp.CheckAccess(iface); {
 	case err == nil:
-		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts}), "arp sweep + listen"
+		mode := "arp sweep + listen"
+		for _, r := range also {
+			mode += " · also " + r.String()
+		}
+		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts, Also: also}), mode
 	case errors.Is(err, arp.ErrPermission):
 		return fallback, "neigh · no raw packet access"
 	default:
 		return fallback, "neigh · " + err.Error()
+	}
+}
+
+// alsoFlag parses one --also value into the list. A bare address is taken
+// as that one host.
+func alsoFlag(into *[]*net.IPNet) func(string) error {
+	return func(v string) error {
+		if !strings.Contains(v, "/") {
+			v += "/32"
+		}
+		_, n, err := net.ParseCIDR(v)
+		if err != nil {
+			return err
+		}
+		if n.IP.To4() == nil {
+			return fmt.Errorf("%s: only IPv4 ranges can be asked with ARP", v)
+		}
+		*into = append(*into, n)
+		return nil
 	}
 }
 
