@@ -739,9 +739,18 @@ Release 1 is Phases 0 to 4 and 3a, the Dante/NDI slice of Phase 5, and:
   bash and zsh, a tampered archive, a refused sudo, a missing release. A
   PowerShell equivalent comes with the Windows release.
 - **Publishing a release:** `git tag v1.0.0`, `make release`, then
-  `gh release create v1.0.0 dist/* --title "Shoal v1.0.0"`. The one-liner
-  only works once the repository is public, since curl cannot fetch release
-  files from a private one.
+  `gh release create v1.0.0 dist/* --title "Shoal v1.0.0" --latest`. The
+  one-liner only works once the repository is public, since curl cannot
+  fetch release files from a private one.
+- **Betas before going public** (decided 2026-09-18): a public,
+  download-only repository, `BT10011/shoal-beta`, holds nothing but a short
+  README and releases; the source stays private. `make release
+  RELEASE_REPO=BT10011/shoal-beta` points the shipped installer at it, and
+  the release is published there with `gh release create ... --repo
+  BT10011/shoal-beta --latest` (marked latest, never pre-release, since the
+  installer fetches "latest"). Friends install with the same one-liner
+  against that repository. When the main repository goes public, delete
+  `shoal-beta`; the installer's default already points at the main one.
 - **Licence: MIT** (decided 2026-09-18), copyright as stated in `LICENSE`.
   The shortest and most widely recognised permissive licence, and the one
   TideUI and the Charm libraries use. Every dependency is MIT or BSD, so

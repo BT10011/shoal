@@ -41,6 +41,7 @@ go vet ./...
 make setcap                    # Linux: grant cap_net_raw to the built binary (Phase 1+)
 make notices                   # regenerate THIRD_PARTY_NOTICES.md after changing dependencies
 make release                   # vet, race tests, notices, then archives for every platform in dist/
-gh release create vX.Y.Z dist/* --title "Shoal vX.Y.Z"   # publish, after git tag vX.Y.Z and make release
+gh release create vX.Y.Z dist/* --title "Shoal vX.Y.Z" --latest   # publish, after git tag vX.Y.Z and make release
+make release RELEASE_REPO=BT10011/shoal-beta                        # a beta: installer aimed at the public download-only repo
 shoal version                  # the version make stamps in (a plain go build says "dev")
 ```

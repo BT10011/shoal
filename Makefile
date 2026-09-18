@@ -11,6 +11,11 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64
 DIST := dist
 
+# The GitHub repository the shipped installer downloads from. Point it at a
+# public download-only repository to hand out betas while the source stays
+# private, e.g. make release RELEASE_REPO=BT10011/shoal-beta
+RELEASE_REPO ?= BT10011/shoal
+
 .PHONY: build test vet race check demo iface setcap notices release clean
 
 build:
@@ -52,8 +57,12 @@ notices:
 # which build it is.
 #
 # To publish: tag the commit (git tag v1.0.0), make release, then
-#   gh release create v1.0.0 dist/* --title "Shoal v1.0.0"
-# The installer's one-liner works once the repository is public.
+#   gh release create v1.0.0 dist/* --title "Shoal v1.0.0" --latest
+# The installer's one-liner works once the repository is public. For a beta
+# from a public download-only repository:
+#   make release RELEASE_REPO=BT10011/shoal-beta
+#   gh release create v1.0.0-beta.1 dist/* --repo BT10011/shoal-beta --latest --title "Shoal v1.0.0-beta.1"
+# Mark it latest, not a pre-release: the installer fetches "latest".
 release: check notices
 	rm -rf $(DIST) && mkdir -p $(DIST)
 	@set -e; for p in $(PLATFORMS); do \
@@ -66,7 +75,9 @@ release: check notices
 		rm -rf $(DIST)/$$folder; \
 	done
 	cd $(DIST) && sha256sum *.tar.gz > SHA256SUMS
-	cp install.sh $(DIST)/
+	sed -e 's|repo="BT10011/shoal"|repo="$(RELEASE_REPO)"|' \
+	    -e 's|github.com/BT10011/shoal/|github.com/$(RELEASE_REPO)/|g' install.sh > $(DIST)/install.sh
+	@echo "installer in $(DIST)/ downloads from github.com/$(RELEASE_REPO)"
 	@echo "release files in $(DIST)/:" && ls -1 $(DIST)
 
 clean:
