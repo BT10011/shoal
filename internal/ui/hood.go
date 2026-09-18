@@ -54,6 +54,13 @@ func (a *app) renderHood(width, rows int) []string {
 			tail = fmt.Sprintf(" listening · %d heard", d.Done)
 		case listener:
 			tail = fmt.Sprintf(" %s · %d heard", state, d.Done)
+		case d.Total == 0 && d.Message != "":
+			// A probe with nothing to count says what it is doing instead,
+			// the way the history probe reports the visit it is on.
+			tail = " " + d.Message
+			if d.State != engine.StateRunning {
+				tail = fmt.Sprintf(" %s · %s", state, d.Message)
+			}
 		case d.Total == 0:
 			tail = fmt.Sprintf(" %d %s", d.Done, state)
 		}
@@ -63,6 +70,11 @@ func (a *app) renderHood(width, rows int) []string {
 			continue
 		}
 		graphic := progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())
+		if !listener && d.Total == 0 && d.Message != "" {
+			// No bar for something that does not progress: the words fill the row.
+			lines = append(lines, s.Item.Render(fit(name, 7))+s.ItemMuted.Render(fit(tail, width-7)))
+			continue
+		}
 		if listener {
 			graphic = listenWave(barW, a.waveFrame(), d.State == engine.StateRunning && !waiting, a.barStyles())
 		}
@@ -197,7 +209,7 @@ func (a *app) eventTag(kind engine.EventKind) string {
 
 // eventHead is the fixed prefix of a log line: time, probe and tag.
 func eventHead(ev engine.ProbeEvent, tag string) string {
-	return fmt.Sprintf("%s %-6s %s ", ev.At.Format("15:04:05"), ev.Probe, tag)
+	return fmt.Sprintf("%s %-7s %s ", ev.At.Format("15:04:05"), ev.Probe, tag)
 }
 
 // describe puts an event's kind and target into words for the expanded

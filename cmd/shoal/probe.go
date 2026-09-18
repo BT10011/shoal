@@ -41,6 +41,9 @@ Probes:
                   (see docs/protocols/nbns.md)
   fake            Scripted demo probes; no network access (see docs/protocols/fake.md)
   oui <mac>       Vendor lookup in the embedded IEEE registry (see docs/protocols/oui.md)
+  history [-history PATH]
+                  List every network shoal remembers and the devices seen on each
+                  (see docs/protocols/history.md)
   rogue <ip> [subnet]
                   Say whether an address belongs to the subnet, and if not why: link-local
                   or left over from another network (see docs/protocols/rogue.md)
@@ -72,6 +75,8 @@ func runProbe(args []string) error {
 		return runProbeOUI(args[1:])
 	case "rogue":
 		return runProbeRogue(args[1:])
+	case "history":
+		return runProbeHistory(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, probeUsage)
 		return fmt.Errorf("unknown probe %q", args[0])
@@ -343,6 +348,57 @@ func runProbeRogue(args []string) error {
 	}
 	seed := seedDiscoverer{key: ip.String(), field: model.FieldIP, value: ip.String()}
 	return runStandalone(netif.Interface{}, []engine.Discoverer{seed}, []engine.Enricher{rogue.New(subnet)}, os.Stdout)
+}
+
+// runProbeHistory prints what the history file holds. The probe itself
+// only works during a scan, since it needs the gateway to answer; this
+// shows what it has to compare against.
+func runProbeHistory(args []string) error {
+	fs := flag.NewFlagSet("shoal probe history", flag.ContinueOnError)
+	path := fs.String("history", "", "history file (default: the per-user data directory)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *path == "" {
+		p, err := store.DefaultHistoryPath()
+		if err != nil {
+			return err
+		}
+		*path = p
+	}
+	if _, err := os.Stat(*path); err != nil {
+		fmt.Printf("history    %s\n\nnothing remembered yet: the file is created on the first scan\n", *path)
+		return nil
+	}
+	h, err := store.OpenHistory(*path)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	nets, err := h.Networks()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("history    %s\nnetworks   %d\n", *path, len(nets))
+	for _, n := range nets {
+		_, known, err := h.Recall(n.ID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("\n%s\n  gateway %s · %d visits · first %s · last %s · %d devices\n",
+			n.ID, orNone(n.GatewayIP), n.Visits, n.FirstVisit.Local().Format("2006-01-02 15:04"), n.LastVisit.Local().Format("2006-01-02 15:04"), len(known))
+		for _, r := range known {
+			fmt.Printf("  %-17s  %-15s  %-28s  last heard %s by %s\n", r.MAC, r.IP, r.Hostname, r.LastSeen.Local().Format("2006-01-02 15:04"), orNone(r.LastSource))
+		}
+	}
+	return nil
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func realOUI() (engine.Enricher, error) {

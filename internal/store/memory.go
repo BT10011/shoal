@@ -33,6 +33,9 @@ type Event struct {
 	Changed bool
 	Device  model.DeviceSnapshot
 	At      time.Time
+	// Source is the probe whose observation caused the event, so listeners
+	// can tell a fact learned now from one recalled from history.
+	Source string
 
 	// MergedFrom is set on EventDeviceMerged: the key that has just stopped
 	// existing, its facts now held by Key.
@@ -145,12 +148,14 @@ func (m *Memory) apply(o model.Observation) []Event {
 	if !exists {
 		kind = EventDeviceAdded
 	}
-	events = append(events, Event{Kind: kind, Key: dev.Key, Field: o.Field, Changed: changed, Device: dev.Snapshot(), At: now})
+	events = append(events, Event{Kind: kind, Key: dev.Key, Field: o.Field, Changed: changed, Device: dev.Snapshot(), At: now, Source: o.Source})
 	if changed && dev.Conflicting(o.Field, now) {
-		events = append(events, Event{Kind: EventConflict, Key: dev.Key, Field: o.Field, Changed: true, Device: dev.Snapshot(), At: now})
+		events = append(events, Event{Kind: EventConflict, Key: dev.Key, Field: o.Field, Changed: true, Device: dev.Snapshot(), At: now, Source: o.Source})
 	}
 
-	if o.Field == model.FieldIP && changed {
+	// An address remembered from an earlier visit is not a claim on it now:
+	// another device may hold it today, and that is not a duplicate.
+	if o.Field == model.FieldIP && changed && !model.Historical(o.Source) {
 		// Fold in any device that existed only because a probe knew this
 		// address, before indexing, so the two never look like two devices
 		// fighting over one IP.

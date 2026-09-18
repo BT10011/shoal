@@ -55,6 +55,10 @@ func (f freshness) mark(plain bool) string {
 // the probe and the time so the reader can check the reasoning.
 func (f freshness) explain(d model.DeviceSnapshot, st engine.Status, now time.Time) string {
 	at, source, _ := d.LastContact()
+	contact := fmt.Sprintf("last contact %s via %s", ago(now, at), source)
+	if model.Historical(source) {
+		contact = fmt.Sprintf("last heard on an earlier visit, %s (%s)", ago(now, at), stamp(now, at))
+	}
 	switch f {
 	case fresh:
 		if st.Scan == 0 {
@@ -62,9 +66,9 @@ func (f freshness) explain(d model.DeviceSnapshot, st engine.Status, now time.Ti
 		}
 		return fmt.Sprintf("heard from directly %s via %s, since scan %d began", ago(now, at), source, st.Scan)
 	case stale:
-		return fmt.Sprintf("not heard from since scan %d began; last contact %s via %s, and the scan is still running", st.Scan, ago(now, at), source)
+		return fmt.Sprintf("not heard from since scan %d began; %s, and the scan is still running", st.Scan, contact)
 	case notAnswering:
-		return fmt.Sprintf("did not answer scan %d, which has finished; last contact %s via %s", st.Scan, ago(now, at), source)
+		return fmt.Sprintf("did not answer scan %d, which has finished; %s", st.Scan, contact)
 	default:
 		return "no probe has exchanged packets with this device; everything known about it came from a third party"
 	}

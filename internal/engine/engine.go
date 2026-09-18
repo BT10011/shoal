@@ -563,7 +563,9 @@ func (e *Engine) onStoreEvent(ev store.Event) {
 			At:      ev.At,
 		})
 	}
-	if !ev.Changed {
+	// A fact recalled from history is not news: nothing is asked about it.
+	// An address from last week may belong to someone else today.
+	if !ev.Changed || model.Historical(ev.Source) {
 		return
 	}
 	e.mu.Lock()
@@ -598,7 +600,12 @@ func (d *discoverer) observe(ev ProbeEvent) {
 			d.status.Message = ev.Message
 		}
 	case KindInfo:
-		d.status.Message = ev.Message
+		// An event about one device is log material, not the probe's own
+		// status: letting it through would, say, replace a listener's
+		// "listening" and stop its wave.
+		if ev.Target == "" {
+			d.status.Message = ev.Message
+		}
 	}
 }
 

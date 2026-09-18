@@ -9,11 +9,13 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/fake"
+	"github.com/BT10011/shoal/internal/probe/history"
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
 	"github.com/BT10011/shoal/internal/probe/nbns"
@@ -40,10 +42,18 @@ Flags:
   --also CIDR             Also ask every address in CIDR with ARP, on this segment only,
                           e.g. a venue's usual 192.168.1.0/24, to find gear carrying a stale
                           static address that never speaks. Repeatable. Needs raw access
+  --history PATH          Where to remember networks and their devices between runs
+                          (default: the per-user data directory; see shoal probe history)
+  --no-history            Remember nothing and write nothing
   --theme NAME            Colour theme, e.g. nord, dracula, gruvbox-dark, vt100
   --demo                  Scripted fake data
 
 Only scan networks you own or are authorised to test.
+
+shoal remembers each network it scans, recognised by its gateway's MAC, and
+the devices seen on it, so the next visit can say what is new, what moved
+and what is missing. Delete the history file, or run with --no-history, to
+keep nothing.
 `
 
 func main() {
@@ -80,6 +90,8 @@ func runTUI(args []string) error {
 	rate := fs.Int("rate", 0, "probe packets per second")
 	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses")
 	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
+	historyPath := fs.String("history", "", "where to remember networks between runs")
+	noHistory := fs.Bool("no-history", false, "remember nothing")
 	var also []*net.IPNet
 	fs.Func("also", "also ask every address in this IPv4 range with ARP (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
@@ -151,7 +163,32 @@ func runTUI(args []string) error {
 		}
 		mode += " · icmp " + icmpMode.Short()
 	}
+	// Remember this network for next time. A history file that cannot be
+	// opened never stops a scan: the mode line says what happened.
+	if !*noHistory {
+		h, err := openHistory(*historyPath)
+		if err != nil {
+			mode += " · no history (" + err.Error() + ")"
+		} else {
+			defer h.Close()
+			if err := eng.AddDiscoverer(history.New(history.Options{History: h, Store: st, Status: eng.Status})); err != nil {
+				return err
+			}
+		}
+	}
 	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: *theme})
+}
+
+// openHistory opens the history file at path, or the default one.
+func openHistory(path string) (*store.History, error) {
+	if path == "" {
+		p, err := store.DefaultHistoryPath()
+		if err != nil {
+			return nil, err
+		}
+		path = p
+	}
+	return store.OpenHistory(path)
 }
 
 // chooseDiscoverer prefers a real ARP sweep and falls back to the kernel
@@ -197,9 +234,22 @@ func alsoFlag(into *[]*net.IPNet) func(string) error {
 
 func runDemo(theme string) error {
 	st := store.NewMemory()
-	eng := engine.New(st, netif.Interface{})
+	eng := engine.New(st, fake.Interface())
 	opts := fake.Options{}
 	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
+		return err
+	}
+	// The demo's history lives in memory, seeded with an invented visit
+	// three days ago, so it shows what changed without touching the real file.
+	h, err := store.OpenHistory("")
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	if err := fake.SeedHistory(h, time.Now()); err != nil {
+		return err
+	}
+	if err := eng.AddDiscoverer(history.New(history.Options{History: h, Store: st, Status: eng.Status})); err != nil {
 		return err
 	}
 	ouiEnricher, err := realOUI()
