@@ -128,6 +128,7 @@ func New(reg *Registry) *Enricher { return &Enricher{reg: reg} }
 
 func (e *Enricher) Name() string            { return "oui" }
 func (e *Enricher) Triggers() []model.Field { return []model.Field{model.FieldMAC} }
+func (e *Enricher) Produces() model.Field   { return model.FieldVendor }
 func (e *Enricher) Concurrency() int        { return 2 }
 
 // Enrich looks up the device's MAC. It emits a vendor, or the

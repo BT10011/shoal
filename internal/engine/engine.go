@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BT10011/shoal/internal/model"
@@ -36,6 +37,15 @@ type Enricher interface {
 	Triggers() []model.Field
 	Concurrency() int
 	Enrich(ctx context.Context, d model.DeviceSnapshot, emit Emit, report Report) error
+}
+
+// Producer is implemented by an enricher that exists to fill one field,
+// such as a name or a round trip. A lookup then counts as answered only
+// when that field came back, so the status can say how many devices a
+// probe actually told us something about, not just how many it asked.
+// An enricher without it counts any observation as an answer.
+type Producer interface {
+	Produces() model.Field
 }
 
 // EventKind classifies a probe event.
@@ -81,14 +91,20 @@ type DiscovererStatus struct {
 	Err     string
 }
 
-// EnricherStatus is a snapshot of one enricher's queue.
+// EnricherStatus is a snapshot of one enricher's queue. The counts cover
+// the current scan: a rescan starts them again from zero.
 type EnricherStatus struct {
 	Name      string
+	Produces  model.Field // what an answer means; empty for "anything"
 	Running   int
 	Queued    int
-	Completed int
+	Completed int // lookups finished without error
 	Failed    int
+	Answered  int // lookups that produced the Produces field
 }
+
+// Asked is every lookup this scan has started: finished or still waiting.
+func (s EnricherStatus) Asked() int { return s.Running + s.Completed + s.Failed }
 
 // Status is a snapshot of the whole engine.
 type Status struct {
@@ -225,10 +241,15 @@ func (e *Engine) AddEnricher(en Enricher) error {
 	for _, f := range en.Triggers() {
 		triggers[f] = true
 	}
+	var produces model.Field
+	if p, ok := en.(Producer); ok {
+		produces = p.Produces()
+	}
 	e.enrichers = append(e.enrichers, &enricher{
 		Enricher: en,
 		workers:  workers,
 		triggers: triggers,
+		produces: produces,
 		queued:   make(map[string]bool),
 		wake:     make(chan struct{}, workers),
 	})
@@ -283,6 +304,11 @@ func (e *Engine) startScan() []ProbeEvent {
 		return nil
 	}
 
+	// Counts describe one scan, so they can be read against the devices on
+	// screen; a lookup from the last scan still finishing lands in this one.
+	for _, en := range e.enrichers {
+		en.resetCounts()
+	}
 	requeued := 0
 	for _, dev := range e.store.Devices() {
 		for _, en := range e.enrichers {
@@ -528,6 +554,7 @@ type enricher struct {
 	Enricher
 	workers  int
 	triggers map[model.Field]bool
+	produces model.Field
 	wake     chan struct{}
 
 	mu        sync.Mutex
@@ -536,6 +563,7 @@ type enricher struct {
 	running   int
 	completed int
 	failed    int
+	answered  int
 }
 
 func (en *enricher) snapshot() EnricherStatus {
@@ -547,6 +575,8 @@ func (en *enricher) snapshot() EnricherStatus {
 		Queued:    len(en.queue),
 		Completed: en.completed,
 		Failed:    en.failed,
+		Answered:  en.answered,
+		Produces:  en.produces,
 	}
 }
 
@@ -588,7 +618,7 @@ func (en *enricher) pop() (string, bool) {
 	return key, true
 }
 
-func (en *enricher) finish(err error) {
+func (en *enricher) finish(err error, answered bool) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	en.running--
@@ -597,6 +627,15 @@ func (en *enricher) finish(err error) {
 	} else {
 		en.completed++
 	}
+	if answered {
+		en.answered++
+	}
+}
+
+func (en *enricher) resetCounts() {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	en.completed, en.failed, en.answered = 0, 0, 0
 }
 
 func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
@@ -621,14 +660,21 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		}
 		snap, found := e.store.Get(key)
 		if !found {
-			en.finish(nil)
+			en.finish(nil, false)
 			continue
 		}
-		err := en.Enrich(ctx, snap, emit, report)
+		var answered atomic.Bool
+		counted := func(o model.Observation) {
+			if en.produces == "" || o.Field == en.produces {
+				answered.Store(true)
+			}
+			emit(o)
+		}
+		err := en.Enrich(ctx, snap, counted, report)
 		if err != nil && ctx.Err() == nil {
 			e.publish(ProbeEvent{Probe: name, Kind: KindError, Target: key, Message: err.Error()})
 		}
-		en.finish(err)
+		en.finish(err, answered.Load())
 		if ctx.Err() != nil {
 			return
 		}

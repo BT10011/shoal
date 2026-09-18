@@ -84,6 +84,7 @@ func New(opts Options) *Enricher { return &Enricher{opts: opts.withDefaults()} }
 
 func (e *Enricher) Name() string            { return "rdns" }
 func (e *Enricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *Enricher) Produces() model.Field   { return model.FieldHostname }
 func (e *Enricher) Concurrency() int        { return e.opts.Concurrency }
 
 // Resolvers returns the servers this probe will ask, for display.

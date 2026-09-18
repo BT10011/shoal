@@ -378,6 +378,16 @@ Windows and Samba machines — and the RTT column is live.
   probe's name for as long as it runs (the UI ticks at 200 ms while one
   does) and goes flat when it stops. A discoverer is drawn this way when it
   has no total and its own message says "listening".
+- **Enricher rows count answers, not work** (2026-09-18). "0 running · 0
+  queued · 23 done" read as idle, and "done" never said whether anything
+  came back. Each enricher may now declare the one field it exists to fill
+  (`engine.Producer`: oui → vendor, rdns/mdns/nbns → hostname, icmp →
+  latency, rogue → flag); a lookup counts as answered only when that field
+  was emitted, so oui's flag for a random MAC is not a vendor. Rows read
+  "23 asked · 2 named" ("answered" for icmp, "flagged" for rogue), with
+  running, queued and failed only while non-zero, and are muted until the
+  probe has produced something. Counts restart with each scan so they read
+  against the devices on screen.
 - **A finished sweep bar is solid in the theme's Unread colour** (2026-09-18),
   the green the log uses for packets received, so "done" reads at a glance.
 - Hex view: 16, 8 or 4 bytes per line depending on pane width, capped at

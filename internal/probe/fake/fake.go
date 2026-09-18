@@ -247,6 +247,7 @@ type rdnsEnricher struct {
 
 func (e *rdnsEnricher) Name() string            { return "rdns" }
 func (e *rdnsEnricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *rdnsEnricher) Produces() model.Field   { return model.FieldHostname }
 func (e *rdnsEnricher) Concurrency() int        { return 3 }
 func (e *rdnsEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engine.Emit, report engine.Report) error {
 	dev, ok := e.script.lookup(d, time.Now())
@@ -283,6 +284,7 @@ type mdnsEnricher struct {
 
 func (e *mdnsEnricher) Name() string            { return "mdns" }
 func (e *mdnsEnricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *mdnsEnricher) Produces() model.Field   { return model.FieldHostname }
 func (e *mdnsEnricher) Concurrency() int        { return 2 }
 func (e *mdnsEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engine.Emit, report engine.Report) error {
 	dev, ok := e.script.lookup(d, time.Now())
@@ -322,6 +324,7 @@ type icmpEnricher struct {
 
 func (e *icmpEnricher) Name() string            { return "icmp" }
 func (e *icmpEnricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *icmpEnricher) Produces() model.Field   { return model.FieldLatency }
 func (e *icmpEnricher) Concurrency() int        { return 5 }
 func (e *icmpEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engine.Emit, report engine.Report) error {
 	dev, ok := e.script.lookup(d, time.Now())

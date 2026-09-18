@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/BT10011/shoal/internal/engine"
+	"github.com/BT10011/shoal/internal/model"
 )
 
 // renderHood draws the progress of every probe, then tails the event log
@@ -72,11 +73,7 @@ func (a *app) renderHood(width, rows int) []string {
 		lines = append(lines, label+graphic+s.Item.Render(fit(tail, width-7-barW)))
 	}
 	for _, e := range a.status.Enrichers {
-		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)
-		if e.Failed > 0 {
-			line += fmt.Sprintf(" · %d failed", e.Failed)
-		}
-		lines = append(lines, s.ItemMuted.Render(fit(line, width)))
+		lines = append(lines, a.renderEnricher(e, width))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, s.ItemMuted.Render(fit("no probes running", width)))
@@ -126,6 +123,42 @@ func (a *app) renderLog(width, room int) []string {
 		}
 	}
 	return out
+}
+
+// answerWord says what an answer from an enricher is, by the field it
+// exists to fill: a name or vendor is "named", a round trip "answered", a
+// flag "flagged".
+func answerWord(f model.Field) string {
+	switch f {
+	case model.FieldHostname, model.FieldVendor:
+		return "named"
+	case model.FieldFlag:
+		return "flagged"
+	}
+	return "answered"
+}
+
+// renderEnricher counts what an enricher asked this scan against what it
+// got back, so a probe that is asking and learning nothing is plain to
+// see. Work still in hand follows; the row is muted until the probe has
+// produced something.
+func (a *app) renderEnricher(e engine.EnricherStatus, width int) string {
+	s := a.renderer.Styles
+	line := fmt.Sprintf("%-6s %d asked · %d %s", e.Name, e.Asked(), e.Answered, answerWord(e.Produces))
+	if e.Running > 0 {
+		line += fmt.Sprintf(" · %d running", e.Running)
+	}
+	if e.Queued > 0 {
+		line += fmt.Sprintf(" · %d queued", e.Queued)
+	}
+	if e.Failed > 0 {
+		line += fmt.Sprintf(" · %d failed", e.Failed)
+	}
+	style := s.Item
+	if e.Answered == 0 {
+		style = s.ItemMuted
+	}
+	return style.Render(fit(line, width))
 }
 
 // eventTag is the one-cell glyph for an event kind.

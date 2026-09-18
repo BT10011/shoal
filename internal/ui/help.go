@@ -32,9 +32,11 @@ and the details pane can tell you which one. Nothing appears by magic.
   Under the hood: what the probes are doing right now. A progress bar per
   discoverer that sweeps, a rolling wave for one that only listens (it has
   no end to count towards, so the row says how many messages it has heard
-  and the wave goes flat when it stops), a queue count per enricher, and
-  beneath the rule a log of every packet sent (→) and received (←), with
-  the time it happened. The
+  and the wave goes flat when it stops), and a line per enricher counting,
+  for this scan, how many devices it asked and how many it named, or for
+  icmp answered and for rogue flagged. An enricher that has asked and
+  learned nothing is shown muted. Beneath the rule is a log of every packet
+  sent (→) and received (←), with the time it happened. The
   log follows the newest event until you Tab into the pane and press ↑:
   that pins it, selects an event, and shows that event in full, wrapped
   rather than cut off, with a line saying what kind of event it was and
@@ -60,8 +62,14 @@ devices announce about themselves on the multicast group.
 An enricher adds facts to a device that is already known. Each one is
 triggered by a field: when a device gains an IP, rdns asks the resolver
 for a PTR record, mdns asks the device its own name, nbns asks for its
-NetBIOS name table and icmp measures the round trip. When a device gains a
-MAC, oui looks the vendor up in the embedded IEEE registry.
+NetBIOS name table, icmp measures the round trip and rogue checks the
+address belongs to this subnet. When a device gains a MAC, oui looks the
+vendor up in the embedded IEEE registry. They work in moments and then go
+quiet, which is why their rows count answers rather than show a bar: "23
+asked · 2 named" for rdns means the resolver knew a name for two devices.
+Which probes earn their keep depends on the network. A network whose DNS
+server keeps no names for its DHCP clients leaves rdns with little to do,
+while nbns names every Windows and Samba machine.
 
 # The columns
 

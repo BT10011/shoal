@@ -47,6 +47,7 @@ func New(subnet *net.IPNet) *Enricher { return &Enricher{subnet: subnet} }
 
 func (e *Enricher) Name() string            { return "rogue" }
 func (e *Enricher) Triggers() []model.Field { return []model.Field{model.FieldIP} }
+func (e *Enricher) Produces() model.Field   { return model.FieldFlag }
 func (e *Enricher) Concurrency() int        { return 1 }
 
 // Subnet returns what addresses are judged against, for display.
