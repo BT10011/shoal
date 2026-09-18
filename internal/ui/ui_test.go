@@ -476,6 +476,59 @@ func TestLogSelectionSurvivesTrimming(t *testing.T) {
 	}
 }
 
+func TestListenerRowRollsAWaveAndCountsWhatItHeard(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	listening := engine.DiscovererStatus{Name: "mdns", State: engine.StateRunning, Done: 57, Message: "listening"}
+	a.status = engine.Status{Scan: 1, ScanStarted: t0, Discoverers: []engine.DiscovererStatus{
+		{Name: "arp", State: engine.StateDone, Done: 428, Total: 428}, listening}}
+	plain := ansi.Strip(a.View())
+	if !strings.Contains(plain, "listening · 57 heard") || strings.Contains(plain, "57 running") {
+		t.Errorf("listener row should say what it heard\n%s", plain)
+	}
+	row := ""
+	for _, l := range strings.Split(plain, "\n") {
+		if strings.Contains(l, "listening · 57 heard") {
+			row = l
+		}
+	}
+	if !strings.ContainsAny(row, strings.Join(waveGlyphs, "")) {
+		t.Errorf("listener row should carry the wave: %q", row)
+	}
+	if strings.Contains(plain, "428/428 done") && !strings.Contains(plain, "⣿") {
+		t.Errorf("the sweep keeps its bar\n%s", plain)
+	}
+
+	// The wave rolls as time passes, even with nothing new heard.
+	before := ansi.Strip(listenWave(30, a.waveFrame(), true, a.barStyles()))
+	a.now = a.now.Add(waveEvery)
+	after := ansi.Strip(listenWave(30, a.waveFrame(), true, a.barStyles()))
+	if before == after || lipgloss.Width(before) != 30 || lipgloss.Width(after) != 30 {
+		t.Errorf("wave should advance one step per tick: %q then %q", before, after)
+	}
+	if before[3:] != after[:len(after)-3] && before[:len(before)-3] != after[3:] {
+		t.Errorf("wave should travel, not scramble: %q then %q", before, after)
+	}
+	if cmd := a.tick(); cmd == nil {
+		t.Fatal("tick")
+	}
+
+	// Stopped: a flat line and the count it reached.
+	listening.State = engine.StateCancelled
+	a.status.Discoverers[1] = listening
+	plain = ansi.Strip(a.View())
+	if !strings.Contains(plain, "stopped · 57 heard") || !strings.Contains(plain, strings.Repeat(waveFlat, 10)) {
+		t.Errorf("stopped listener should go flat\n%s", plain)
+	}
+	if got := ansi.Strip(listenWave(8, 5, true, barStyles{plain: true})); lipgloss.Width(got) != 8 || strings.ContainsAny(got, "⣀⠉") {
+		t.Errorf("plain themes get an ASCII wave: %q", got)
+	}
+
+	// A sweep that has not announced its total yet is not a listener.
+	if isListener(engine.DiscovererStatus{Name: "arp", State: engine.StateRunning, Message: "sweeping 10.0.0.0/24"}) {
+		t.Error("a sweep without a total yet must not be drawn as a listener")
+	}
+}
+
 func TestStopIsInEveryKeyBarAndReadsStopped(t *testing.T) {
 	a, _ := sized(t, 80, 24)
 	bar := ansi.Strip(a.View())
@@ -616,6 +669,12 @@ func TestBarBrightnessLevelsAreDistinct(t *testing.T) {
 	}
 	if st.bright.GetForeground() == st.mid.GetForeground() || !st.bright.GetBold() {
 		t.Fatal("peak flare must be a distinct colour and bold")
+	}
+	if st.solid.GetForeground() != a.renderer.Styles.Theme.Unread || st.solid.GetBold() {
+		t.Fatal("a finished bar is solid in the theme's Unread colour, the green of received packets")
+	}
+	if a.renderer.Styles.Badge.GetForeground() != st.solid.GetForeground() {
+		t.Fatal("the finished bar and the received-packet badge must share a colour")
 	}
 }
 

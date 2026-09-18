@@ -24,10 +24,16 @@ func (a *app) renderHood(width, rows int) []string {
 		case d.State == engine.StateCancelled:
 			state = "stopped"
 		}
-		// A probe that listens has nothing to count towards, so show what it
-		// has heard rather than a denominator that will never arrive.
+		// A probe that listens has no end to count towards, so its row
+		// says what it has heard and carries a wave rather than a bar.
+		listener := isListener(d)
 		tail := fmt.Sprintf(" %d/%d %s", d.Done, d.Total, state)
-		if d.Total == 0 {
+		switch {
+		case listener && d.State == engine.StateRunning:
+			tail = fmt.Sprintf(" listening · %d heard", d.Done)
+		case listener:
+			tail = fmt.Sprintf(" %s · %d heard", state, d.Done)
+		case d.Total == 0:
 			tail = fmt.Sprintf(" %d %s", d.Done, state)
 		}
 		barW := width - 7 - lipgloss.Width(tail)
@@ -35,7 +41,11 @@ func (a *app) renderHood(width, rows int) []string {
 			lines = append(lines, s.Item.Render(fit(fmt.Sprintf("%-6s%s", d.Name, tail), width)))
 			continue
 		}
-		lines = append(lines, s.Item.Render(fit(d.Name, 7))+progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())+s.Item.Render(fit(tail, width-7-barW)))
+		graphic := progressBar(d.Done, d.Total, barW, a.frame(), a.barStyles())
+		if listener {
+			graphic = listenWave(barW, a.waveFrame(), d.State == engine.StateRunning, a.barStyles())
+		}
+		lines = append(lines, s.Item.Render(fit(d.Name, 7))+graphic+s.Item.Render(fit(tail, width-7-barW)))
 	}
 	for _, e := range a.status.Enrichers {
 		line := fmt.Sprintf("%-6s %d running · %d queued · %d done", e.Name, e.Running, e.Queued, e.Completed)
@@ -199,7 +209,9 @@ var (
 
 // barStyles are the three brightness levels of a running bar: dim at rest,
 // full foreground while a flare fades, accent and bold at its peak. A
-// finished bar is drawn at full foreground.
+// finished bar is drawn solid in the theme's Unread colour, the same one
+// the log uses for packets received, so a sweep that has run its course
+// reads as done at a glance.
 type barStyles struct {
 	plain                   bool
 	dim, mid, bright, solid lipgloss.Style
@@ -212,7 +224,7 @@ func (a *app) barStyles() barStyles {
 		dim:    s.ItemMuted,
 		mid:    s.Item,
 		bright: s.Item.Foreground(s.Theme.Unread).Bold(true),
-		solid:  s.Item,
+		solid:  s.Item.Foreground(s.Theme.Unread),
 	}
 }
 
@@ -222,6 +234,56 @@ const frameEvery = 100 * time.Millisecond
 
 func (a *app) frame() int {
 	return int(a.now.UnixNano() / int64(frameEvery))
+}
+
+// isListener spots a discoverer that has no total to count towards and
+// says so in its own words: the passive mDNS probe reports "listening".
+// A sweep that has not yet announced its total is not a listener.
+func isListener(d engine.DiscovererStatus) bool {
+	return d.Total == 0 && strings.HasPrefix(d.Message, "listening")
+}
+
+// The listener's wave. A probe that listens never finishes, so a bar that
+// fills would be a lie; instead a wave rolls away from the probe's name
+// for as long as it runs, like a signal being received, and goes flat
+// when it stops. Each glyph is one step of a braille sine curve.
+var (
+	waveGlyphs = []string{"⣀", "⡠", "⠔", "⠊", "⠉", "⠑", "⠢", "⢄"}
+	waveFlat   = "⣀"
+	asciiWave  = []string{"_", ".", "-", "~", "-", "."}
+	asciiFlat  = "_"
+)
+
+// waveEvery is the wave's own clock: slower than the bar's so a cell
+// advances once per tick and the motion reads as a roll, not a flicker.
+const waveEvery = 200 * time.Millisecond
+
+func (a *app) waveFrame() int {
+	return int(a.now.UnixNano() / int64(waveEvery))
+}
+
+func listenWave(width, frame int, running bool, st barStyles) string {
+	if width < 1 {
+		return ""
+	}
+	glyphs, flat := waveGlyphs, waveFlat
+	if st.plain {
+		glyphs, flat = asciiWave, asciiFlat
+	}
+	if !running {
+		return st.dim.Render(strings.Repeat(flat, width))
+	}
+	n := len(glyphs)
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		k := ((i-frame)%n + n) % n // shifts right as frame grows: the wave travels away from the name
+		style := st.dim
+		if k == n/2 { // the crest
+			style = st.mid
+		}
+		b.WriteString(style.Render(glyphs[k]))
+	}
+	return b.String()
 }
 
 func progressBar(done, total, width, frame int, st barStyles) string {

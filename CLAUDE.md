@@ -3,7 +3,7 @@
 ## Start here
 Read `PROJECT_PLAN.md` in full before doing any work. It is the source of truth for scope, architecture, build order and conventions. If this file and the plan ever disagree, the plan wins.
 
-**Current phase: Phase 4 — History.** (Update this line as phases complete.) Not started. Phase 3a (optional, rogue and off-subnet devices) has not been done; ask the maintainer whether to do it before Phase 4.
+**Current phase: Phase 3a — Rogue and off-subnet devices.** (Update this line as phases complete.) Started 2026-09-18; the plan's Phase 3a section carries the purpose (AV-over-IP venues: find the box with the stale or link-local address) and the design. Phase 4 — History follows.
 Phase 0 completed 2026-09-16: `shoal --demo` works end to end.
 Phase 1 completed 2026-09-17: `shoal` scans for real (ARP sweep on macOS/Linux, unprivileged `neigh` fallback, vendors from the embedded IEEE registry).
 Phase 2 completed 2026-09-17: names and latency — `rdns`, `mdns` (reverse queries + passive listener), `nbns` and `icmp`. Two optional pieces were deferred; see the end of Phase 2 in the plan.

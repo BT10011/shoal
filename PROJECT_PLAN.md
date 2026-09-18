@@ -372,6 +372,14 @@ Windows and Samba machines — and the RTT column is live.
 - **Help** is a written manual (`internal/ui/help.go`), wrapped and
   scrolled in-app, covering panes, the two probe kinds, columns, provenance,
   freshness, scans, filter and sort, keys, and where `docs/protocols/` is.
+- **A listener's row carries a wave, not a bar** (2026-09-18). The passive
+  mDNS probe never finishes, so a bar would either sit empty or lie. Its
+  row reads "listening · N heard", a braille wave rolls away from the
+  probe's name for as long as it runs (the UI ticks at 200 ms while one
+  does) and goes flat when it stops. A discoverer is drawn this way when it
+  has no total and its own message says "listening".
+- **A finished sweep bar is solid in the theme's Unread colour** (2026-09-18),
+  the green the log uses for packets received, so "done" reads at a glance.
 - Hex view: 16, 8 or 4 bytes per line depending on pane width, capped at
   1 KiB per observation with a trailer saying how much was left out. Values
   with no raw packet (a table lookup, the store's own flags) say so.
@@ -415,50 +423,89 @@ generating from a key table.
 
 **Done when:** a new user can pick any value on screen and discover exactly where it came from within two keypresses.
 
-### Phase 3a — Rogue and off-subnet devices *(optional add-on)*
+### Phase 3a — Rogue and off-subnet devices *(in progress, started 2026-09-18)*
 
-**Optional.** Phase 3 is complete without it, and it can be skipped or
-deferred. It earns its place under the scope test in §2 because an address
-that does not belong to this network is one of the clearest cases of "help me
-understand what I am looking at": something is on the wire that the subnet
-does not explain, and shoal can say exactly what and how it knows.
+**Why this phase matters more than "optional" suggests (the maintainer, 2026-09-18):**
+shoal will be used most on AV-over-IP networks. Equipment goes in and out of
+venues constantly, and devices get plugged in carrying an old static address,
+a lease from another site, or nothing at all and fall back to link-local.
+They never register properly and technicians struggle to find *which* box has
+the wrong address. The goal is that a tech looks at the scan and says "there
+it is: that PTZ camera is on 169.254.x.x", then goes and fixes it.
 
 #### What counts as not belonging
 
 | Condition | What it usually means |
 |---|---|
 | **IPv4 link-local**, `169.254.0.0/16` (RFC 3927) | The device asked for DHCP, got no answer, and configured itself. A dead DHCP server, a wrong VLAN, a cable in the wrong socket, or a device that was never configured. |
-| **Off-subnet IPv4** — an address outside the scanning interface's subnet | A static address left over from another network, a device moved between sites, a second uplink, a misconfigured VLAN — or something that does not want to be handed an address it can be traced by. |
-| **IPv6 link-local only**, `fe80::/10`, no IPv4 at all | Heard over mDNS but never answered ARP. Common for IoT devices; also what a host looks like when it has no v4 configuration. |
-| **On-link but silent** — a MAC seen in frames that claims no IP | Present at layer 2 only. Passive taps, bridges, and devices mid-boot look like this. |
+| **Off-subnet IPv4** — an address outside the scanning interface's subnet | A static address left over from another network or venue, a device moved between sites, a second uplink, a misconfigured VLAN. |
+| **On-link but silent** — a MAC seen in frames that claims no IP | Present at layer 2 only. A device still probing for an address, passive taps, bridges, and devices mid-boot look like this. |
+| ~~IPv6 link-local only~~ | *Deferred:* the mDNS listener is IPv4-only, so shoal has no IPv6 evidence yet. |
 
-#### How it is found
+#### How it is found — passively, which is what a venue floor needs
 
-No new packets are needed: every source already exists by the end of Phase 2.
+A device with the wrong address still talks at layer 2 on the segment the
+tech is plugged into, and none of it needs a matching subnet to be heard:
 
-- The ARP sweep reads **every** frame on the interface, not only replies to
-  its own requests, so it overhears addresses it never asked about.
+- It broadcasts ARP requests for its old gateway whenever it tries to send
+  anything, and gratuitous ARP and RFC 5227 probes when it links up. The
+  sweep's frame listener already decodes every ARP frame on the interface,
+  but until this phase it **discarded** senders outside the subnet and
+  probes from 0.0.0.0 — exactly the frames this phase is about. Now it
+  keeps them, with a method saying the address is not in our subnet.
+- AV gear multicasts constantly (mDNS/Bonjour, Dante, NDI, SSDP), and the
+  mDNS listener records the source address of everything it hears.
 - The kernel neighbour table holds entries for addresses shoal never probed.
-- The mDNS listener records the **source address** of everything it hears, and
-  the A/AAAA records inside those announcements.
-- An ICMP reply arriving from an unexpected source is itself evidence.
+
+**Decision:** the sweep only listens for the seven seconds it runs, and AV
+gear ARPs sporadically, so a **continuous ARP listener** discoverer runs
+next to the mDNS listener whenever raw access is available. It shares the
+sweep's frame decoder and connection, sends nothing, and shows as a wave in
+the hood pane. It reports as `arp`, like the sweep, so its facts carry the
+same source, priority and freshness weight; the method strings say
+"overheard".
+
+**Caveat to state in the docs and the help:** all of this is layer 2. The
+tech must be on the same VLAN or switch segment as the device; nothing
+crosses a router. That is also the honest answer to "why can't shoal see it".
 
 #### Shape
 
 - A `rogue` **enricher** in its own package, triggered on `ip`, holding the
-  interface's subnet. It performs no I/O: it compares what is known against
-  what the subnet allows and emits `flag` observations —
-  `link-local-ip`, `off-subnet-ip`, `ipv6-link-local-only`, `no-ip` — each with
-  a `Method` that states the reasoning in full, e.g. *"169.254.11.8 is inside
-  169.254.0.0/16, which a host assigns itself when no DHCP server answers;
-  this interface's subnet is 192.168.1.0/24"*.
-- UI: a badge in the table, `/` filtering by flag, and the detail pane
-  explaining what the flag means and which probe saw the address. Nothing
-  blinks red; the tone stays diagnostic.
-- **Active follow-up is opt-in and off by default.** Confirming an off-subnet
-  address means sending to an address outside the local subnet, which §9
-  forbids by default, so a single unicast ARP probe sits behind an explicit
-  flag (`--check-off-subnet`) and is rate-limited like everything else.
+  interface's subnet. It performs no I/O: it compares every live address
+  against what the subnet allows and emits `flag` observations,
+  `link-local-ip` and `off-subnet-ip`, each with a `Method` that states the
+  reasoning in full, e.g. *"169.254.11.8 is inside 169.254.0.0/16, which a
+  host assigns itself when no DHCP server answers; this interface's subnet
+  is 172.16.10.0/24"*. Flags are never retracted (the model has no
+  retraction), which is right for these: a device that was on the wrong
+  address at 12:01 is worth remembering after the tech fixes it.
+- "No IP" is **derived in the UI** rather than stored as a flag, for the
+  same reason: a flag could not be withdrawn when the address arrives a
+  second later. A row with an empty IP cell and a sentence in the details
+  pane ("seen at layer 2 only") says it.
+- UI: a **FLAGS column** in the table (kept in preference to MAC and RTT
+  when space is short), `/` filtering by flag (already works: the filter
+  matches every value), and the details pane explaining what the flag
+  means and which probe saw the address, in the flag's own method line.
+  Nothing blinks red; the tone stays diagnostic.
+- The demo cast gains a PTZ camera on a link-local address and a device
+  with a stale static address from another site, overheard by the fake
+  sweep, so `shoal --demo` shows the feature.
+- `shoal probe rogue <ip> [subnet]` and `docs/protocols/rogue.md`.
+
+#### Second step, opt-in, pending the maintainer's go-ahead
+
+An idle device with a static address may never ARP, so passive listening
+can miss it. Two active follow-ups, both off by default because §9 forbids
+sending outside the local subnet unprompted, and both rate-limited:
+
+- `--check-off-subnet`: one unicast ARP who-has to an overheard off-subnet
+  address to confirm it is live now.
+- `--also <cidr>`: sweep an extra range with ARP, e.g. the venue's usual
+  `192.168.1.0/24`, on the local segment. ARP answers regardless of the
+  sender's subnet, so this finds stale static devices that are otherwise
+  silent. Refuses ranges above the `--max-hosts` limit like the main sweep.
 
 #### Still not a security tool (§2)
 
@@ -469,8 +516,9 @@ useful than a warning icon. Anyone who needs to go further should be pointed
 at Nmap and Wireshark.
 
 **Done when:** a device with a `169.254.x.x` address, or one outside the
-scanning subnet, is flagged in the table, and the detail view explains in
-plain words what that means and which probe saw it.
+scanning subnet, is flagged in the table within moments of it speaking on
+the segment, and the detail view explains in plain words what that means and
+which probe saw it.
 
 ### Phase 4 — History
 - SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.
