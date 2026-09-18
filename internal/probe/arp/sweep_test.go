@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,16 +224,195 @@ func TestSweepOverhearsOtherTraffic(t *testing.T) {
 	if !ok || rep.Value != "10.0.0.10" || rep.Confidence != 0.9 || !strings.Contains(rep.Method, "not addressed to us") {
 		t.Fatalf("overheard reply = %+v ok=%v", rep, ok)
 	}
-	if _, ok := c.observation("01:02:03:04:05:06", model.FieldIP); ok {
-		t.Fatal("off-subnet sender must be ignored")
+	off, ok := c.observation("01:02:03:04:05:06", model.FieldIP)
+	if !ok || off.Value != "192.168.9.9" || off.Confidence != 0.9 || !strings.Contains(off.Method, "outside this interface's subnet 10.0.0.0/28") {
+		t.Fatalf("off-subnet sender must be kept and explained: %+v ok=%v", off, ok)
 	}
 	for _, o := range c.obs {
 		if o.DeviceKey == ourMAC.String() && o.Source != "netif" {
 			t.Fatalf("our own echoed frame produced an arp observation: %+v", o)
 		}
 	}
-	if c.count(engine.KindReceived) != 2 {
-		t.Fatalf("received events = %d, want 2", c.count(engine.KindReceived))
+	if c.count(engine.KindReceived) != 3 {
+		t.Fatalf("received events = %d, want 3", c.count(engine.KindReceived))
+	}
+}
+
+func TestListenerKeepsProbesAnnouncementsAndStrangers(t *testing.T) {
+	iface := testIface(t, "10.0.0.0/24")
+	c := &capture{}
+	l := &listener{iface: iface, emit: c.emit, report: c.report, seen: make(map[string]bool)}
+	cam := net.HardwareAddr{0x00, 0x01, 0x4a, 0x00, 0x00, 0x01}
+	stale := net.HardwareAddr{0x00, 0x1d, 0xc1, 0x00, 0x00, 0x02}
+	linkLocal := net.IPv4(169, 254, 37, 12)
+
+	// A camera choosing a link-local address: probe, then announce.
+	probe := Request(cam, net.IPv4zero, linkLocal)
+	p, _ := Decode(probe)
+	l.handle(p, probe)
+	if _, ok := c.observation(cam.String(), model.FieldIP); ok {
+		t.Fatal("a probe from 0.0.0.0 must not give the device an address")
+	}
+	mac, ok := c.observation(cam.String(), model.FieldMAC)
+	if !ok || mac.Confidence != 0.9 || !strings.Contains(mac.Method, "RFC 5227") || !strings.Contains(mac.Method, "no address yet") {
+		t.Fatalf("probe should still record the MAC: %+v ok=%v", mac, ok)
+	}
+	announce := Request(cam, linkLocal, linkLocal)
+	p, _ = Decode(announce)
+	l.handle(p, announce)
+	ip, ok := c.observation(cam.String(), model.FieldIP)
+	if !ok || ip.Value != "169.254.37.12" || !strings.Contains(ip.Method, "gratuitous") || !strings.Contains(ip.Method, "outside this interface's subnet 10.0.0.0/24") {
+		t.Fatalf("announcement = %+v ok=%v", ip, ok)
+	}
+
+	// A stale static address asking for its old gateway.
+	req := Request(stale, net.IPv4(192, 168, 1, 50), net.IPv4(192, 168, 1, 1))
+	p, _ = Decode(req)
+	l.handle(p, req)
+	ip, ok = c.observation(stale.String(), model.FieldIP)
+	if !ok || ip.Value != "192.168.1.50" || !strings.Contains(ip.Method, "who-has 192.168.1.1") || !strings.Contains(ip.Method, "outside this interface's subnet") {
+		t.Fatalf("stale static = %+v ok=%v", ip, ok)
+	}
+	if l.answered() != 0 {
+		t.Fatal("strangers must not count as answered subnet addresses")
+	}
+	var msgs []string
+	for _, e := range c.events {
+		msgs = append(msgs, e.Message)
+	}
+	joined := strings.Join(msgs, "\n")
+	for _, want := range []string{"probe: who-has 169.254.37.12 tell 0.0.0.0", "announce: 169.254.37.12 is-at", "who-has 192.168.1.1 tell 192.168.1.50 (overheard) · outside our subnet"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("events missing %q:\n%s", want, joined)
+		}
+	}
+	// A reply from 0.0.0.0 is nonsense and is dropped.
+	bad := Reply(stale, net.IPv4zero, ourMAC, ourIP)
+	p, _ = Decode(bad)
+	before := len(c.obs)
+	l.handle(p, bad)
+	if len(c.obs) != before {
+		t.Fatal("a reply claiming 0.0.0.0 must be ignored")
+	}
+}
+
+func TestListenerStandsAsideWhileTheSweepRuns(t *testing.T) {
+	var sweeping atomic.Bool
+	sweeping.Store(true)
+	conn := newFakeConn(nil)
+	c := &capture{}
+	l := NewListener(ListenOptions{
+		Open:       func(netif.Interface) (Conn, error) { return conn, nil },
+		StandAside: sweeping.Load,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx, testIface(t, "10.0.0.0/24"), c.emit, c.report) }()
+
+	during := net.HardwareAddr{0xb8, 0x27, 0xeb, 0, 0, 1}
+	after := net.HardwareAddr{0xb8, 0x27, 0xeb, 0, 0, 2}
+	conn.frames <- Request(during, net.IPv4(10, 0, 0, 9), net.IPv4(10, 0, 0, 1))
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := c.observation(during.String(), model.FieldIP); ok || c.count(engine.KindReceived) != 0 {
+		t.Fatal("while the sweep runs, the sweep handles the frame and the listener must not repeat it")
+	}
+	sweeping.Store(false)
+	conn.frames <- Request(after, net.IPv4(10, 0, 0, 10), net.IPv4(10, 0, 0, 1))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := c.observation(after.String(), model.FieldIP); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := c.observation(after.String(), model.FieldIP); !ok {
+		t.Fatal("once the sweep finishes the listener must take over")
+	}
+	c.mu.Lock()
+	first := c.events[0]
+	c.mu.Unlock()
+	if !strings.HasPrefix(first.Message, "listening for ARP") || !strings.Contains(first.Message, "takes over when the sweep finishes") {
+		t.Fatalf("the opening message should explain the hand-over and still read as listening: %q", first.Message)
+	}
+	cancel()
+	<-done
+}
+
+func TestSweepSaysWhenItIsSweeping(t *testing.T) {
+	conn := newFakeConn(nil)
+	opts := fastOptions(conn)
+	opts.NoRetry = true
+	s := New(opts)
+	if s.Sweeping() {
+		t.Fatal("not sweeping before Run")
+	}
+	seen := false
+	c := &capture{}
+	report := func(e engine.ProbeEvent) {
+		if e.Kind == engine.KindSent && s.Sweeping() {
+			seen = true
+		}
+		c.report(e)
+	}
+	if err := s.Run(context.Background(), testIface(t, "10.0.0.0/29"), c.emit, report); err != nil {
+		t.Fatal(err)
+	}
+	if !seen || s.Sweeping() {
+		t.Fatalf("Sweeping should be true while asking and false after: during=%v after=%v", seen, s.Sweeping())
+	}
+}
+
+func TestPassiveListenerRunsUntilCancelled(t *testing.T) {
+	conn := newFakeConn(nil)
+	c := &capture{}
+	l := NewListener(ListenOptions{Open: func(netif.Interface) (Conn, error) { return conn, nil }})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx, testIface(t, "10.0.0.0/24"), c.emit, c.report) }()
+
+	cam := net.HardwareAddr{0x00, 0x01, 0x4a, 0x00, 0x00, 0x01}
+	conn.frames <- Request(cam, net.IPv4(169, 254, 37, 12), net.IPv4(169, 254, 37, 12))
+	conn.frames <- Request(net.HardwareAddr{0xb8, 0x27, 0xeb, 0, 0, 1}, net.IPv4(10, 0, 0, 9), net.IPv4(10, 0, 0, 1))
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := c.observation(cam.String(), model.FieldIP); ok && c.count(engine.KindProgress) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := c.observation(cam.String(), model.FieldIP); !ok {
+		t.Fatal("listener did not record the overheard frame")
+	}
+	c.mu.Lock()
+	var progress []engine.ProbeEvent
+	for _, e := range c.events {
+		if e.Kind == engine.KindProgress {
+			progress = append(progress, e)
+		}
+	}
+	c.mu.Unlock()
+	if len(progress) < 2 || progress[len(progress)-1].Message != "listening" || progress[len(progress)-1].Total != 0 || progress[len(progress)-1].Done != len(progress) {
+		t.Fatalf("progress should count frames heard with no total: %+v", progress)
+	}
+	if c.count(engine.KindSent) != 0 || len(conn.requests()) != 0 {
+		t.Fatal("the listener must send nothing")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	last := c.events[len(c.events)-1]
+	if last.Kind != engine.KindInfo || !strings.Contains(last.Message, "stopped listening after 2 ARP frames") {
+		t.Fatalf("final event = %+v", last)
+	}
+	if err := NewListener(ListenOptions{}).Run(context.Background(), netif.Interface{Name: "utun0"}, c.emit, c.report); err == nil {
+		t.Fatal("interface without MAC/subnet should be rejected")
 	}
 }
 

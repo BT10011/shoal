@@ -51,6 +51,11 @@ func (a *app) renderDetails(width int) []string {
 		}
 		lines = append(lines, freshStyle.Render(fit(prefix+l, width)))
 	}
+	if len(d.Live(model.FieldIP, a.now)) == 0 {
+		for _, l := range wrap("seen at layer 2 only: no probe has learned an address for this device; it may still be probing for one", width-2) {
+			lines = append(lines, s.DetailMeta.Render(fit("  "+l, width)))
+		}
+	}
 
 	label := s.Item.Bold(true)
 	muted := s.ItemMuted

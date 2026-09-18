@@ -43,19 +43,45 @@ A frame is 14 bytes of Ethernet header plus 28 bytes of ARP:
    the scanner appears in the table without being probed.
 3. Sends one **who-has** per host address, paced at 100/s by default, and
    reports each as a `sent` event.
-4. Listens the whole time. For every ARP frame from an address inside the
-   subnet it emits `mac` and `ip`, keyed by MAC, with the raw frame attached:
+4. Listens the whole time. For every ARP frame it sees, whatever address
+   the sender carries, it emits `mac` and `ip`, keyed by MAC, with the raw
+   frame attached:
    - a reply addressed to us → confidence **1.0**,
      "ARP reply from … answering our who-has";
-   - a reply to someone else, or a request from another host → confidence
-     **0.9**, "overheard on en0". The sender field of any ARP frame is the
-     host's own statement of its address, so these are nearly as good.
+   - a reply to someone else, a request from another host, or a gratuitous
+     announcement → confidence **0.9**, "overheard on en0". The sender field
+     of any ARP frame is the host's own statement of its address, so these
+     are nearly as good;
+   - a sender **outside the subnet** is kept, and the method says so: *"…;
+     192.168.1.50 is outside this interface's subnet 172.16.10.0/24, yet the
+     frame arrived on this segment"*. That is how a box carrying a stale
+     static or link-local address gives itself away (see
+     [rogue.md](rogue.md));
+   - an **ARP probe** (RFC 5227), a request whose sender address is 0.0.0.0,
+     records the MAC only: the device is checking whether the address it
+     wants is free, and does not hold it yet.
 5. Waits one second, then asks every address that stayed silent **once more**
    (sleeping devices, slow Wi-Fi clients), and waits again.
 6. Reports `sweep complete: N of M addresses answered`.
 
 Progress is reported per request; the bar's total grows when the retry pass
 adds requests, which is honest about the extra work.
+
+## The listener that outlives the sweep
+
+The sweep listens for the seven seconds it runs. A device on the wrong
+subnet speaks when it feels like it — a camera on a link-local address ARPs
+for its gateway when something prods it, a host with a stale static address
+announces itself when it links up — so a second discoverer, `arp.Listener`,
+opens its own raw socket and keeps writing frames down for as long as the
+scan runs. It sends nothing, shares the sweep's decoder and rules above,
+reports as `arp` so its facts carry the same weight, and shows in the hood
+pane as a wave with a count of frames heard. It runs whenever raw access is
+available; the unprivileged neighbour-table fallback has no equivalent.
+
+While the sweep is running both sockets receive every frame. The listener
+asks the sweep (`Sweep.Sweeping`) and stands aside until it finishes, so the
+log shows each frame once; its "heard" count starts when it takes over.
 
 ## How the frames get on the wire
 

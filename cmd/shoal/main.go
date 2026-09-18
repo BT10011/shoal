@@ -18,6 +18,7 @@ import (
 	"github.com/BT10011/shoal/internal/probe/nbns"
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/rdns"
+	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/store"
 	"github.com/BT10011/shoal/internal/ui"
 )
@@ -92,6 +93,18 @@ func runTUI(args []string) error {
 	if err := eng.AddDiscoverer(discoverer); err != nil {
 		return err
 	}
+	// With raw access, keep listening for ARP after the sweep: a device on
+	// the wrong subnet only gives itself away when it happens to speak.
+	if sweep, ok := discoverer.(*arp.Sweep); ok {
+		if err := eng.AddDiscoverer(arp.NewListener(arp.ListenOptions{StandAside: sweep.Sweeping})); err != nil {
+			return err
+		}
+	}
+	// Judge every address against the subnet, so a box carrying an old
+	// static or link-local address is pointed out.
+	if err := eng.AddEnricher(rogue.New(iface.Subnet)); err != nil {
+		return err
+	}
 	ouiEnricher, err := realOUI()
 	if err != nil {
 		return err
@@ -141,7 +154,7 @@ func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate, maxHosts i
 	}
 	switch err := arp.CheckAccess(iface); {
 	case err == nil:
-		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts}), "arp sweep"
+		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts}), "arp sweep + listen"
 	case errors.Is(err, arp.ErrPermission):
 		return fallback, "neigh · no raw packet access"
 	default:
@@ -160,7 +173,7 @@ func runDemo(theme string) error {
 	if err != nil {
 		return err
 	}
-	for _, en := range append([]engine.Enricher{ouiEnricher}, fake.NewEnrichers(opts)...) {
+	for _, en := range append([]engine.Enricher{ouiEnricher, rogue.New(fake.Subnet())}, fake.NewEnrichers(opts)...) {
 		if err := eng.AddEnricher(en); err != nil {
 			return err
 		}

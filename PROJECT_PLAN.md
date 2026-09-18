@@ -423,7 +423,7 @@ generating from a key table.
 
 **Done when:** a new user can pick any value on screen and discover exactly where it came from within two keypresses.
 
-### Phase 3a — Rogue and off-subnet devices *(in progress, started 2026-09-18)*
+### Phase 3a — Rogue and off-subnet devices *(passive part done 2026-09-18; active follow-ups pending)*
 
 **Why this phase matters more than "optional" suggests (the maintainer, 2026-09-18):**
 shoal will be used most on AV-over-IP networks. Equipment goes in and out of
@@ -519,6 +519,26 @@ at Nmap and Wireshark.
 scanning subnet, is flagged in the table within moments of it speaking on
 the segment, and the detail view explains in plain words what that means and
 which probe saw it.
+
+*Outcome, 2026-09-18 (passive part):* the sweep's frame listener keeps every
+ARP frame and explains the unusual ones (off-subnet senders, gratuitous
+announcements, RFC 5227 probes from 0.0.0.0, which record the MAC only);
+`arp.Listener` keeps listening after the sweep whenever raw access is
+available, shown as a second `arp` row with a wave, and stands aside while
+the sweep is running (`Sweep.Sweeping`) so no frame is logged twice; `internal/probe/rogue`
+judges every live address and emits `link-local-ip` and `off-subnet-ip`
+with the full reasoning and the provenance of the address; the table has a
+FLAGS column (badges `link-local`, `off-subnet`, `dup-ip`, `self`,
+`rand-mac`, wrong addresses first) that outlives VENDOR when space is short,
+`/link-local` filters, the details pane says "seen at layer 2 only" for a
+MAC with no address, and the manual has a "Devices that do not belong"
+section with the same-segment caveat. The demo cast gained a link-local
+Sony PTZ camera and an off-subnet Dante box, overheard part-way through the
+sweep. `shoal probe rogue <ip> [subnet]` and `docs/protocols/rogue.md`
+exist. The sidebar ratio went from 0.56 to 0.6 so RTT still fits beside the
+new column at 120 columns. An end-to-end UI test runs the real engine over
+the demo cast and checks both boxes are flagged, filterable and explained.
+Not done: the opt-in active follow-ups above.
 
 ### Phase 4 — History
 - SQLite persistence keyed by network identity (gateway MAC + subnet) and device MAC.
