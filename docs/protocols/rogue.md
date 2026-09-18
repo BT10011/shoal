@@ -49,6 +49,14 @@ correct address shows in the table because it is the most recent claim.
   (see [mdns.md](mdns.md)).
 - The kernel neighbour table, in unprivileged mode (see [neigh.md](neigh.md)).
 
+## When a device never speaks
+
+A box with a static address that sits idle may never send an ARP frame for
+the listener to hear. `--also 192.168.1.0/24` asks every address in a range
+you name — the venue's usual subnet, say — with ARP on this segment, and a
+device holding one of those addresses must answer. See the `--also` section
+of [arp.md](arp.md).
+
 ## The one thing it cannot do
 
 All of this is layer 2. The technician must be on the same VLAN or switch

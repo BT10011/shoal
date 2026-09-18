@@ -142,9 +142,17 @@ what the details pane explains in full:
 The first two are found without sending anything. A device on the wrong
 subnet still broadcasts ARP for its old gateway and announces itself when
 it links up, and the ARP listener writes every such frame down for as long
-as the scan runs, after the sweep has finished. Type /link-local or
+as the scan runs, after the sweep has finished. In the "Under the hood"
+pane it hangs under the arp sweep's bar as a second line, because it is
+the same probe carrying on: it waits while the sweep runs, then rolls. Type /link-local or
 /off-subnet to see only those devices. A row with no IP at all is a device
 seen only at layer 2, usually one still probing for an address.
+
+A box with a static address that sits idle may never speak at all. Start
+shoal with --also and a range, such as --also 192.168.1.0/24 for a
+venue's usual subnet, and the sweep asks every address in it too. A device
+holding one of those addresses answers, whatever subnet the question came
+from, and is flagged off-subnet like the rest.
 
 That also sets the limit: all of this is layer 2, so it only works on the
 same VLAN or switch segment as the device. Nothing crosses a router. When a

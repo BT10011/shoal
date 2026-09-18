@@ -468,3 +468,92 @@ func TestSweepStopsOnCancel(t *testing.T) {
 		t.Fatal("connection was not closed")
 	}
 }
+
+func cidr(t *testing.T, s string) *net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestSweepAlsoAsksExtraRangesWithProbes(t *testing.T) {
+	stale := net.HardwareAddr{0x00, 0x1d, 0xc1, 0x00, 0x00, 0x07}
+	local := net.HardwareAddr{0x00, 0x11, 0x32, 0x00, 0x00, 0x01}
+	// The fake answers a probe the way Linux does: to our MAC, target 0.0.0.0.
+	conn := newFakeConn(map[string]net.HardwareAddr{"10.0.0.1": local, "192.168.1.2": stale})
+	c := &capture{}
+	opts := fastOptions(conn)
+	// /30 = .1 and .2; the /28 overlaps our own /29 and must not repeat it.
+	opts.Also = []*net.IPNet{cidr(t, "192.168.1.0/30"), cidr(t, "10.0.0.0/28")}
+	if err := New(opts).Run(context.Background(), testIface(t, "10.0.0.0/29"), c.emit, c.report); err != nil {
+		t.Fatal(err)
+	}
+
+	conn.mu.Lock()
+	sent := append([][]byte(nil), conn.sent...)
+	conn.mu.Unlock()
+	senders := map[string]string{}
+	var order []string
+	for _, f := range sent {
+		p, _ := Decode(f)
+		if _, dup := senders[p.TargetIP.String()]; !dup {
+			order = append(order, p.TargetIP.String())
+		}
+		senders[p.TargetIP.String()] = p.SenderIP.String()
+	}
+	// Subnet first (5), then 192.168.1.1-2, then the /28's hosts outside the /29 (.8-.14).
+	want := "10.0.0.1 10.0.0.3 10.0.0.4 10.0.0.5 10.0.0.6 192.168.1.1 192.168.1.2 10.0.0.8 10.0.0.9 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13 10.0.0.14"
+	if got := strings.Join(order, " "); got != want {
+		t.Fatalf("asked %s\nwant  %s", got, want)
+	}
+	if senders["10.0.0.3"] != "10.0.0.2" || senders["192.168.1.2"] != "0.0.0.0" || senders["10.0.0.9"] != "0.0.0.0" {
+		t.Fatalf("subnet requests carry our address, extra-range ones 0.0.0.0: %v", senders)
+	}
+	// 14 asked, 2 answered: the 12 silent ones are retried once.
+	if len(sent) != 14+12 {
+		t.Fatalf("sent %d frames, want 14 plus 12 retries", len(sent))
+	}
+
+	ip, ok := c.observation(stale.String(), model.FieldIP)
+	if !ok || ip.Value != "192.168.1.2" || ip.Confidence != 1 || !strings.Contains(ip.Method, "answering our probe") || !strings.Contains(ip.Method, "outside this interface's subnet 10.0.0.0/29") {
+		t.Fatalf("stale device = %+v ok=%v", ip, ok)
+	}
+	var msgs []string
+	for _, e := range c.events {
+		msgs = append(msgs, e.Message)
+	}
+	joined := strings.Join(msgs, "\n")
+	for _, w := range []string{
+		"also asking 9 addresses in 192.168.1.0/30, 10.0.0.0/28 on this segment",
+		"who-has 192.168.1.2 tell 0.0.0.0 (probe, --also 192.168.1.0/30)",
+		"192.168.1.2 is-at 00:1d:c1:00:00:07 (answering our probe) · outside our subnet",
+		"sweep complete: 2 of 14 addresses answered",
+	} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("events missing %q", w)
+		}
+	}
+}
+
+func TestSweepAlsoRefusesWhatItShouldNotAsk(t *testing.T) {
+	c := &capture{}
+	for _, tc := range []struct {
+		also *net.IPNet
+		want string
+	}{
+		{cidr(t, "169.254.0.0/16"), "169.254.0.0/16 has 65536 addresses, more than the limit of 1022"},
+		{cidr(t, "fd00::/120"), "only IPv4 ranges"},
+	} {
+		opts := fastOptions(newFakeConn(nil))
+		opts.Also = []*net.IPNet{tc.also}
+		err := New(opts).Run(context.Background(), testIface(t, "10.0.0.0/29"), c.emit, c.report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("--also %s: err = %v", tc.also, err)
+		}
+	}
+	if len(c.obs) != 0 {
+		t.Fatal("nothing should be sent or emitted when a range is refused")
+	}
+}
