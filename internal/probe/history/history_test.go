@@ -140,6 +140,10 @@ func TestSecondVisitRecallsComparesAndRecords(t *testing.T) {
 	r.seen(me, "10.0.0.2", model.Observation{Field: model.FieldFlag, Value: "this-host", Source: "netif", Method: "self", Confidence: 1})
 	r.seen(cam, "10.0.0.51")
 	r.seen(prn, "10.0.0.60", model.Observation{Field: model.FieldHostname, Value: "HP-NEW.local", Source: "mdns", Method: "A", Confidence: 0.9})
+	// The camera answers to its old name over DNS and a new one over mDNS:
+	// still answering to the old name, so not renamed.
+	r.emit(model.Observation{DeviceKey: cam, Field: model.FieldHostname, Value: "cam-7.local", Source: "mdns", Method: "A", Confidence: 0.9})
+	r.emit(model.Observation{DeviceKey: cam, Field: model.FieldHostname, Value: "cam.lan", Source: "rdns", Method: "PTR", Confidence: 0.7})
 	r.seen(nu, "10.0.0.70")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -150,7 +154,16 @@ func TestSecondVisitRecallsComparesAndRecords(t *testing.T) {
 		ip, has := d.ResolvedAt(model.FieldIP, time.Now())
 		return ok && has && ip.Value == "10.0.0.88" && ip.Source == model.SourceHistory
 	})
-	eventually(t, "flags raised", func() bool { return len(flags(r.st, nu)) == 1 && len(flags(r.st, prn)) == 1 })
+	eventually(t, "new and moved flagged", func() bool { return len(flags(r.st, nu)) == 1 && len(flags(r.st, cam)) == 1 })
+	time.Sleep(30 * time.Millisecond)
+	if f := flags(r.st, prn); len(f) != 0 {
+		t.Fatalf("a rename is judged only once the scan has settled: %v", f)
+	}
+	if strings.Contains(r.log(), "missing:") {
+		t.Error("nothing is missing until the scan has run its course")
+	}
+	r.settled.Store(true)
+	eventually(t, "rename judged", func() bool { return len(flags(r.st, prn)) == 1 })
 
 	for key, want := range map[string]string{cam: FlagNewIP, prn: FlagRenamed, nu: FlagNew} {
 		if got := strings.Join(flags(r.st, key), ","); got != want {
@@ -182,11 +195,7 @@ func TestSecondVisitRecallsComparesAndRecords(t *testing.T) {
 			t.Errorf("log missing %q\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "missing:") {
-		t.Error("nothing is missing until the scan has run its course")
-	}
 
-	r.settled.Store(true)
 	eventually(t, "missing reported", func() bool { return strings.Contains(r.log(), "missing: "+proj) })
 	time.Sleep(30 * time.Millisecond)
 	if n := strings.Count(r.log(), "missing: "); n != 1 {
@@ -205,8 +214,8 @@ func TestSecondVisitRecallsComparesAndRecords(t *testing.T) {
 	for _, k := range known {
 		byMAC[k.MAC] = k
 	}
-	if byMAC[cam].IP != "10.0.0.51" || byMAC[cam].Hostname != "cam.local" || byMAC[cam].Vendor != "Sony" {
-		t.Errorf("camera should be saved on its new address, keeping its name: %+v", byMAC[cam])
+	if byMAC[cam].IP != "10.0.0.51" || byMAC[cam].Hostname != "cam-7.local" || byMAC[cam].Vendor != "Sony" {
+		t.Errorf("camera should be saved on its new address, with today's best name and its remembered vendor: %+v", byMAC[cam])
 	}
 	if byMAC[prn].Hostname != "HP-NEW.local" || byMAC[nu].IP != "10.0.0.70" {
 		t.Errorf("today's facts should be saved: %+v %+v", byMAC[prn], byMAC[nu])

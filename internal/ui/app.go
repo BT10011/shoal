@@ -25,6 +25,9 @@ type Options struct {
 	Demo   bool
 	Mode   string // how discovery is running, shown in the "under the hood" header
 	Theme  string
+	// SaveTheme remembers a theme kept in the picker for next time. The UI
+	// does no file I/O itself; nil means nothing is remembered.
+	SaveTheme func(name string) error
 }
 
 const (
@@ -143,6 +146,8 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.tick()
 	case Batch:
 		a.applyBatch(msg)
+	case themeSavedMsg:
+		a.themeSaved(msg)
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 	default:

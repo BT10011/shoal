@@ -115,8 +115,16 @@ responder, and the log says that rather than reporting a failure.
 
 Bonjour networks talk to themselves constantly: devices announce when they
 join, when they wake, when a service changes, and they answer each other's
-queries in the open. The listener is a **discoverer** that sends nothing at
-all and writes down what passes. It appears in the hood pane and the log as
+queries in the open. The listener is a **discoverer** that writes down what
+passes. In a scan it also asks one question, at the start of each scan and
+again a second later as RFC 6762 §5.2 asks: every service type on offer
+(`_services._dns-sd._udp.local`, RFC 6763 §9), plus Dante's
+`_netaudio-arc._udp` and NDI's `_ndi._tcp`, since not every embedded
+responder answers the enumeration. It is sent from port 5353, so every
+answer is multicast and the listener hears it like any announcement.
+Without it, services appear only when something else, such as Dante
+Controller, is browsing. `shoal probe dns-sd` alone sends nothing unless
+given `-ask`. It appears in the hood pane and the log as
 **`dns-sd`**, after the DNS Service Discovery announcements (RFC 6763) that
 make up most of what it hears, so it is not mistaken for this probe. Its
 facts are still credited to `mdns`: they are mDNS records, and share this
@@ -135,7 +143,7 @@ What each overheard message is worth:
 |---|---|
 | any message at all | `ip` — something at that address is speaking mDNS |
 | `A` record whose address **is the sender's** | `hostname`, confidence 0.9 |
-| `PTR` under `_services._dns-sd._udp.local` | `service` — the sender listing the types it offers |
+| `PTR` under `_services._dns-sd._udp.local` | `service` — the sender listing the types it offers, once the sender has named its own address (see below) |
 | `SRV` whose target is a name **the sender has claimed** | `service`, with the host and port in the method |
 | `PTR` from a type to an instance | nothing — see below |
 | a query | `ip` only; a question reveals no facts |
@@ -158,6 +166,25 @@ a name the sender has published an address record for. The listener remembers
 those names for the length of the run, so an address in one packet ties up a
 service in the next.
 
+The list of service types is the same problem one level up. A router
+running an **mDNS repeater or reflector** (MikroTik's repeater, Avahi's
+reflector, Ubiquiti's mDNS option) answers "which services are here?" on
+behalf of devices on other VLANs, from its own address. The first live run
+of the browse showed exactly that: a gateway listing, as its own,
+the service types of devices on another VLAN. Crediting
+that to the router would have been wrong, and on a venue network where Dante
+sits on its own VLAN it would have badged the router as a Dante device.
+
+So a listed type is credited only once the sender has **named its own
+address**: an `A` record for its own address, or an answer for its own
+reverse name, which the `mdns` probe asks every device during a scan. A list
+heard before that is held, and credited, with a note saying so, when the
+device names itself. A relay's answers only ever carry other devices'
+addresses, so what it relays is never credited to it, and when listening
+stops the log names every sender whose list was never credited. That
+wording is careful: a genuine device whose responder never names itself
+looks the same, and the log says so rather than accusing it.
+
 The event log says what it declined and why, so a missing service is
 explained rather than silently absent.
 
@@ -168,6 +195,8 @@ shoal probe mdns 192.168.1.42           # ask one device for its name
 shoal probe mdns 192.168.1.42 -wait 3s  # wait longer for a slow responder
 shoal probe dns-sd                        # listen; ^C to stop
 shoal probe dns-sd -for 30s               # listen for half a minute
+shoal probe dns-sd -ask -for 10s          # ask which services are on offer, then listen
+shoal probe av                            # ask, and point out Dante and NDI devices
 shoal probe mdns                          # the same: with no address, mdns listens
 ```
 
@@ -177,10 +206,6 @@ terminal will stir up traffic to watch.
 
 ## Limits, for now
 
-- **No active service discovery yet.** Shoal never asks
-  `_services._dns-sd._udp.local` itself; it credits the answers it overhears
-  when another device asks. Asking directly would fill the `service` field on
-  a quiet network.
 - **TXT records are logged, not read.** `_device-info` already carries the
   hardware model, which is what Phase 5's `classify` will want.
 - **IPv4 only**, matching the rest of shoal.

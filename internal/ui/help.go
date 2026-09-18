@@ -86,7 +86,12 @@ while nbns names every Windows and Samba machine.
   or locally-administered MAC has no vendor, and says so in the details.
   RTT: the best of three ICMP round trips.
   FLAGS: short badges for things worth a second look, explained under
-  "Devices that do not belong" and "History" below.
+  "Devices that do not belong", "Dante and NDI" and "History" below.
+  When more badges than fit, the cell ends +N; the details pane lists
+  them all, each with its reasoning.
+  SERVICES: the service types a device announces over mDNS, shortened:
+  ipp is a printer's, airplay an AirPlay receiver's, and Dante's several
+  _netaudio types show once as dante. The details pane lists them in full.
   FIRST SEEN and LAST SEEN: when a device was first seen on this network,
   on any visit, and when a probe last heard from it. They are the first
   columns dropped on a narrow screen, but sorting by one keeps it shown.
@@ -176,6 +181,23 @@ That also sets the limit: all of this is layer 2, so it only works on the
 same VLAN or switch segment as the device. Nothing crosses a router. When a
 box that must be there does not show, that is the first thing to check.
 
+# Dante and NDI
+
+On an AV network the first question after "which box is on the wrong
+address" is usually "which of these is the stagebox". The FLAGS column
+answers it with two badges:
+
+  dante: the device announces a Dante service type (_netaudio-arc and its
+  siblings), or its network interface is made by Audinate, which makes
+  only Dante modules.
+  ndi: the device announces _ndi._tcp, the type NDI devices are found by.
+
+Both come from what the device says about itself; shoal does not guess
+from a maker's name or an open port. To make sure there is something to
+hear, the dns-sd listener asks the network once per scan, and again a
+second later, which service types are on offer and who offers Dante and
+NDI. Type /dante or /ndi to see only those devices.
+
 # History
 
 shoal remembers each network it scans and the devices it saw there, so
@@ -240,7 +262,7 @@ always sort last.
   x            show or hide raw packets in the details pane
   c            stop the scan so the screen holds still
   r            rescan
-  t            theme picker: preview live, Enter keeps, Esc reverts
+  t            theme picker: preview live, Enter keeps and remembers it
   ?            this manual                     q     quit
 
 # Going deeper

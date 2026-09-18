@@ -252,6 +252,11 @@ func self(d model.DeviceSnapshot, now time.Time) bool {
 // the last visit, on a new address, or under a new name.
 func (p *Probe) compare(emit engine.Emit, report engine.Report) {
 	now := p.opts.Now()
+	// A device often answers to several names, from different probes that
+	// answer at different moments. Judging a rename before they have all
+	// had their say would flag a NAS as renamed because DNS answered before
+	// mDNS did, so names are compared once the scan has run its course.
+	namesSettled := p.opts.Status == nil || p.opts.Status().Settled()
 	for _, d := range p.opts.Store.Devices() {
 		mac, ok := current(d, model.FieldMAC, now)
 		if !ok || self(d, now) {
@@ -272,7 +277,7 @@ func (p *Probe) compare(emit engine.Emit, report engine.Report) {
 				fmt.Sprintf("was at %s when last heard on %s; now at %s (%s)", before.IP, stamp(before.LastSeen), ip.Value, ip.Source),
 				fmt.Sprintf("%s changed address: was %s on %s", label, before.IP, stamp(before.LastSeen)))
 		}
-		if known && name.Value != "" && before.Hostname != "" && !sameName(name.Value, before.Hostname) {
+		if known && namesSettled && name.Value != "" && before.Hostname != "" && !anyName(d, before.Hostname, now) {
 			p.raise(d.Key, FlagRenamed, name.Value, emit, report,
 				fmt.Sprintf("was named %s when last heard on %s; now %s (%s)", before.Hostname, stamp(before.LastSeen), name.Value, name.Source),
 				fmt.Sprintf("%s renamed: was %s on %s", label, before.Hostname, stamp(before.LastSeen)))
@@ -291,6 +296,18 @@ func (p *Probe) raise(key, flag, detail string, emit engine.Emit, report engine.
 	}
 	emit(model.Observation{DeviceKey: key, Field: model.FieldFlag, Value: flag, Source: "history", Method: method, Confidence: 1})
 	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key, Message: message})
+}
+
+// anyName reports whether any name a probe gives the device today is the
+// remembered one: a device still answering to its old name under one
+// protocol has not been renamed.
+func anyName(d model.DeviceSnapshot, remembered string, now time.Time) bool {
+	for _, o := range d.Live(model.FieldHostname, now) {
+		if !model.Historical(o.Source) && sameName(o.Value, remembered) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameName compares names the way a person would: a device called

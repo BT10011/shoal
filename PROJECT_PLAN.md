@@ -76,12 +76,12 @@ The value is **transparency and learning**: seeing how ARP, DNS, mDNS/Bonjour, N
 | Themed chrome | `github.com/allisonhere/tideui` **v0.2.2** | Panes, status bar, modals, theme picker. Licence verified 2026-09-16: **MIT**. Credit in README. Do not "Tide"-brand this project. |
 | Routing table | `golang.org/x/net/route` | pure Go; reads the BSD/macOS routing socket to find the default gateway. Linux reads `/proc/net/route`. |
 | Raw L2 (Linux) | `github.com/mdlayher/packet`, `github.com/mdlayher/arp` | pure Go, AF_PACKET |
-| Raw L2 (macOS) | BPF via `/dev/bpf` (pure Go if feasible) or `github.com/gopacket/gopacket/pcap` | **TODO: verify** best pure-Go option on macOS; pcap needs cgo |
+| Raw L2 (macOS) | BPF via `/dev/bpf`, pure Go through `golang.org/x/sys/unix` | Built in Phase 1 (`arp/conn_bpf.go`); no cgo or pcap needed. |
 | Packet decode | `github.com/gopacket/gopacket` (maintained fork) | also used later for LLDP, 802.1Q, pcapng export |
 | DNS / mDNS | `golang.org/x/net/dns/dnsmessage` | **Changed 2026-09-17** (was `github.com/miekg/dns`): `x/net` is already a dependency for the routing table, so this adds no new module, and its explicit pack/unpack suits a probe that must show the packet. Queries are hand-rolled either way, for full visibility (not a black-box zeroconf lib). Revisit for `mdns` if SRV/TXT parsing proves painful; the probe logic does not depend on the choice. |
 | ICMP | `golang.org/x/net/icmp` + `golang.org/x/net/ipv4` | **Changed 2026-09-17** (was `github.com/prometheus-community/pro-bing`): same reasoning as the DNS row — `x/net` is already a dependency, and building the echo request by hand is what lets the probe show the id, sequence and socket kind. pro-bing would also hide which socket type it fell back to, which is exactly the privilege detail shoal wants to display. |
 | Persistence | `modernc.org/sqlite` | pure Go, no cgo |
-| Config | TOML (`github.com/pelletier/go-toml/v2`) | later phase |
+| Config | TOML (`github.com/pelletier/go-toml/v2`) | Added 2026-09-18 for the remembered theme: `internal/config`, `config.toml` in `os.UserConfigDir()/shoal`. |
 
 Avoid cgo where possible to keep cross-compilation easy.
 
@@ -391,9 +391,12 @@ Windows and Samba machines — and the RTT column is live.
   so a device can be picked while typing. The pattern is matched against
   the device key and every live value of every field, so services and flags
   filter too.
-- **Theme choice lasts for the session** (`--theme` sets the initial one);
-  persisting it waits for config (§4). The picker is TideUI's, rendered as
-  a soft panel with the `shoal` prefix.
+- **Theme choice is remembered** (2026-09-18): Enter in the picker saves it
+  to `config.toml` through a `SaveTheme` callback, run off the UI goroutine;
+  the log says it was kept, or why it could not be. Start-up takes
+  `--theme` if given (for that run only, not saved), else the remembered
+  theme, else the default. The picker is TideUI's, rendered as a soft panel
+  with the `shoal` prefix.
 - **Help** is a written manual (`internal/ui/help.go`), wrapped and
   scrolled in-app, covering panes, the two probe kinds, columns, provenance,
   freshness, scans, filter and sort, keys, and where `docs/protocols/` is.
@@ -649,15 +652,157 @@ motivated it (the device that never speaks); revisit only if wanted.
   Pi, three new devices); `fake.Interface()` gives the demo a gateway.
 - `shoal probe history` lists the file; `docs/protocols/history.md`.
 
-### Phase 5 — Services & device type
-- `ports`: small curated, opt-in TCP connect list (e.g. 22, 53, 80, 443, 445, 548, 554, 631, 5000, 5001, 8080, 9100), rate-limited. **Not** a general port scanner.
-- `classify`: explainable rules combining vendor + mDNS service types (`_airplay._tcp`, `_ipp._tcp`, `_googlecast._tcp`, `_smb._tcp`, `_hap._tcp`, …) + ports. `Method` must state the reasoning, e.g. `vendor Synology + _smb._tcp + port 5000 → NAS`.
+### Phase 5 — Dante, NDI and the services each device offers *(release 1)*
+
+Cut down 2026-09-18. The original Phase 5 guessed device types from weak
+evidence: a vendor says who made the network chip, not what the box does,
+and a firewalled port proves nothing. On a typical network many guesses
+would have been "a virtual machine" or "a Raspberry Pi", which the vendor column
+already says, and a confident wrong guess costs a tool built on showing its
+evidence more than a blank does. What stays is only what devices say about
+themselves:
+
+- **Dante and NDI flags**, from the services a device announces over mDNS
+  (`_netaudio-*._udp` for Dante, `_ndi._tcp` for NDI) and, for Dante, an
+  Audinate network interface (Audinate makes only Dante modules). The method
+  lists every piece of evidence.
+- **A SERVICES column** showing the service types each device announces.
+- **Asking for them.** The dns-sd listener sends one browse question per
+  scan, and repeats it a second later as RFC 6762 §5.2 asks: the DNS-SD
+  service-type enumeration plus the Dante and NDI types, from port 5353 so
+  answers are multicast. Without it these services appear only when
+  something else, such as Dante Controller, is browsing.
+
+The rest of the original Phase 5 is under "Deferred to later releases".
+
+*Built 2026-09-18:* `internal/probe/av` (flags `dante-device`, `ndi-device`;
+badges `dante`, `ndi`; triggered on service and vendor; `shoal probe av`),
+the SERVICES column (short names, Dante's types shown once as `dante`,
+Dante and NDI first), and the browse in the `dns-sd` listener
+(`mdns.DefaultBrowse`, `SendFrom5353`; `shoal probe dns-sd -ask`). The first
+live browse exposed, and these fixes follow from, a real network:
+
+- **mDNS relays.** A gateway running an mDNS repeater answered the
+  service-type enumeration for devices on another VLAN, and the listener
+  credited those types to the router.
+  A listed type is now credited only once its sender has named its own
+  address (an `A` record for itself, or an answer for its own reverse name,
+  which the `mdns` probe asks every device); earlier lists are held and
+  credited then, and when listening stops the log names senders whose
+  lists never were. On a venue network with Dante behind a repeater this is
+  what stops the router being badged `dante`.
+- **Memories get their own source.** `model.SourceHistory` is now
+  `"memory"`; the history probe's conclusions (new, new address, renamed)
+  are credited to `"history"`, made now. Crediting both to one name made a
+  new device read as "heard from directly via history".
+- **Renames wait for the scan to settle** and count only when no current
+  name matches the remembered one: a NAS answering to `nas.lan` over DNS
+  before `synology.local` over mDNS is not renamed.
+- **Enricher rows count devices, not lookups** (`EnricherStatus.Asked`,
+  `Answered`): av looks at a device once per service it announces, and
+  "21 asked" for 13 devices read as nonsense.
+- **FLAGS is flexible with a 16-character minimum**, enough for two whole
+  badges; beyond that the cell keeps whole badges and ends `+N`. RTT gives
+  way first at 120 columns.
 
 ### Phase 6 — Advanced modules (each optional, each its own package)
 - **LLDP/CDP** passive listener (ethertype 0x88CC) → switch name, port, VLAN.
 - **VLAN hints** from 802.1Q tags in captured frames (best-effort; many NICs strip tags — say so in the UI).
 - **AV/pro-network services** via the mDNS pipeline and listeners: Dante (`_netaudio-*._udp`), NDI (`_ndi._tcp`), AES67/SAP (239.255.255.255:9875), PTP hints (UDP 319/320). **TODO: verify** specifics when implementing.
 - **pcapng export** of all packets the probes sent/received, so a scan can be opened in Wireshark next to the TUI's interpretation.
+
+### Release 1 — what ships *(decided 2026-09-18)*
+
+The maintainer: "a lot of the functionality I want in the first version is there."
+Release 1 is Phases 0 to 4 and 3a, the Dante/NDI slice of Phase 5, and:
+
+- **README.md** saying plainly what shoal is, what it is not, and what it
+  does not replace: Nmap, Wireshark, LanScan, Fing, Angry IP Scanner,
+  arp-scan and Dante Controller, each with the difference stated.
+- **Release builds and install notes for each OS**, since each needs
+  different setup before the first scan: the `cap_net_raw` capability on
+  Linux, BPF device access on macOS (and Gatekeeper's quarantine flag on a
+  downloaded binary), Npcap on Windows once that port exists. A version
+  stamp so a bug report can say which build it came from.
+- The name stays **shoal**; "Shoal" in prose, `shoal` as the command.
+- **One-line install** (2026-09-18): `install.sh`, plain POSIX sh, fetched
+  with `curl -fsSL https://github.com/BT10011/shoal/releases/latest/download/install.sh | sh`.
+  It detects OS and processor, downloads `shoal-<os>-<arch>.tar.gz` (release
+  archive names carry no version so "latest" works; the folder inside does),
+  checks it against `SHA256SUMS` and installs nothing on a mismatch, installs
+  to `/usr/local/bin` (on every PATH; sudo once), grants `cap_net_raw` on
+  Linux, clears the quarantine flag on macOS, and when installed elsewhere
+  (`SHOAL_INSTALL_DIR`) adds the folder to the shell's startup file once
+  (zsh, bash, fish, else `.profile`). `SHOAL_VERSION`, `SHOAL_NO_SUDO`,
+  `SHOAL_BASE_URL` for a particular release, no sudo, or a mirror. Tested
+  end to end against a local copy of a release: install, a second run,
+  bash and zsh, a tampered archive, a refused sudo, a missing release. A
+  PowerShell equivalent comes with the Windows release.
+- **Publishing a release:** `git tag v1.0.0`, `make release`, then
+  `gh release create v1.0.0 dist/* --title "Shoal v1.0.0"`. The one-liner
+  only works once the repository is public, since curl cannot fetch release
+  files from a private one.
+- **Licence: MIT** (decided 2026-09-18), copyright as stated in `LICENSE`.
+  The shortest and most widely recognised permissive licence, and the one
+  TideUI and the Charm libraries use. Every dependency is MIT or BSD, so
+  there is no conflict. `THIRD_PARTY_NOTICES.md` carries their licence texts
+  and the Go standard library's, as those licences require of a distributed
+  binary; `scripts/third-party-notices.sh` (`make notices`) writes it from
+  `go list`, and `make release` regenerates it and packs it, with `LICENSE`,
+  into every archive.
+
+### Planned future updates
+
+1. **Windows release — the priority after release 1.** Waits until the maintainer is on
+   a Windows machine to build and test it there (no Wine on the Linux box).
+   Today `GOOS=windows go build ./...` fails only on
+   `internal/probe/mdns/listener.go` (Unix socket options), but a build is not
+   enough: four mechanisms are Unix-only. The survey found:
+
+  | Part | Windows design |
+  |---|---|
+  | Raw ARP (`arp`) | Npcap, via `wpcap.dll` loaded with `windows.LoadLibraryEx` from `%SystemRoot%\System32\Npcap` (fall back to the normal search path for WinPcap-compatible installs), so no cgo and no new dependency. Device name is `\Device\NPF_` + the adapter GUID (`IpAdapterAddresses.AdapterName`, matched by interface index). `pcap_open_live`, filter `arp` via `pcap_compile`/`pcap_setfilter`, `pcap_next_ex` with a ~100 ms timeout so reads can poll for cancellation, `pcap_sendpacket`, `pcap_setmintocopy(0)` if present. Separate handles for sending and receiving; `Close` takes a mutex so it never frees a handle mid-read. Without Npcap, fall back to `neigh`, with a mode saying "install Npcap for raw ARP". |
+  | Unprivileged fallback (`neigh`) | `GetIpNetTable` from `iphlpapi.dll` (IPv4, `MIB_IPNETROW` is 24 bytes: index, phys-addr length, 8-byte addr, IPv4 in network order, type; skip type 2 "invalid"). Parse the buffer in portable code so it is tested everywhere. Interface names come from `net.InterfaceByIndex`, which on Windows gives the friendly name `net.Interfaces` uses. The UDP nudge works unchanged. |
+  | ICMP (`icmp`) | No unprivileged ICMP socket on Windows, and raw needs admin. Use `IcmpSendEcho` (what `ping.exe` uses, no admin) behind a `net.PacketConn` adapter: each write runs `IcmpSendEcho` in a goroutine and a success is handed back to the reader as a synthesised echo reply, so the existing matching and timing code is unchanged and RTT keeps its microsecond resolution. New `Mode` for the socket kind. |
+  | mDNS (`mdns`, `dns-sd`) | Windows has no `SO_REUSEPORT` and cannot bind a multicast address: set `SO_REUSEADDR` only and bind `0.0.0.0:5353`. Move `shareablePort` into `sockopt_unix.go`/`sockopt_windows.go`. `IP_MULTICAST_LOOP` is receive-side on Windows, so the listener will hear shoal's own questions; harmless. Windows Defender Firewall prompts on first run and must be allowed for mDNS and NetBIOS answers to arrive. |
+  | Gateway (`netif`) | `GetAdaptersAddresses` with `GAA_FLAG_INCLUDE_GATEWAYS`: the up adapter with an IPv4 gateway and the lowest `Ipv4Metric`, named via `net.InterfaceByIndex`. New `route_windows.go`; exclude Windows from `route_other.go`. |
+  | Resolvers (`rdns`) | No `/etc/resolv.conf`: take `FirstDnsServerAddress` of the same adapters, IPv4 first (Windows lists placeholder `fec0::` servers that would time out). Make the "named no nameserver" wording platform-neutral. |
+
+  Also: platform-aware hints wherever the code says `make setcap` or sudo
+  (on Windows: install Npcap from npcap.com; its licence does not allow
+  bundling it); a `make build-windows` target producing `bin/shoal.exe`;
+  build tags on `conn_other.go` and `table_other.go` to exclude Windows. The
+  TUI itself (Bubble Tea) runs in Windows Terminal. nbns and the rest of the
+  engine need no change.
+
+2. **Phase 6 modules**, each optional and each its own package, as listed
+   above. LLDP/CDP first: on a venue floor, which switch port and VLAN the
+   laptop is on is often the first question.
+
+### Deferred to later releases
+
+Recorded 2026-09-18 so they are not lost; none is needed for release 1.
+
+- **The rest of Phase 5.** `ports`, a small curated, opt-in TCP connect list
+  (e.g. 22, 53, 80, 443, 445, 548, 554, 631, 5000, 5001, 8080, 9100, plus AV
+  control ports such as PJLink 4352), rate-limited, **not** a general port
+  scanner; and `classify`, explainable device-type rules combining vendor,
+  mDNS service types and ports, whose `Method` states the reasoning (e.g.
+  `vendor Synology + _smb._tcp + port 5000 → NAS`). Deferred on accuracy:
+  revisit starting from self-declared evidence, abstain rather than guess,
+  and offer a per-device check on demand rather than only a flag for all.
+- **Timing.** ARP round trips, to contrast a layer 2 answer with ICMP's
+  layer 3 one; the sweep keeps no per-address timings yet.
+- **IPv6.** Everything is IPv4 today, including the mDNS listener, so a
+  device known only by an IPv6 link-local address is invisible.
+- **Richer mDNS.** Reading TXT records, where `_device-info` carries the
+  hardware model; known-answer and duplicate-question suppression, worth
+  having if shoal ever queries at scale.
+- **Better vendor names.** Embed the IEEE MA-M, MA-S and IAB registries as
+  well as MA-L, so blocks the IEEE sub-assigns to smaller makers stop showing
+  as "IEEE Registration Authority".
+- **Configurable columns**, which §8 already marks as later.
+- Also still open from earlier phases: LAN-tagged integration tests (§10).
 
 ---
 
@@ -700,30 +845,11 @@ motivated it (the device that never speaks); revisit only if wanted.
 - ~~Primary dev/run OS (Linux vs macOS) → decides which raw-socket backend is written first.~~ **Resolved 2026-09-16:** The maintainer runs both macOS and Linux. Write the Darwin (BPF) ARP backend first, then Linux (`AF_PACKET`); both are first-class targets and must keep building.
 - ~~TideUI license and compatible Bubble Tea/Lipgloss versions.~~ **Resolved 2026-09-16:** MIT; TideUI v0.2.2 requires Bubble Tea v1.3.10 and Lipgloss v1.1.0 (see §4).
 - ~~How should a passive probe's observations reach a device the store keys by MAC?~~ **Resolved 2026-09-17:** the store reconciles them, and probes stay simple. An observation keyed by a bare IP is routed to whichever device has claimed that address (`resolveKey`); when a MAC-keyed device later claims an address that already exists as its own IP-keyed device, the store folds that device in, keeps an alias so in-flight observations still land, and publishes `EventDeviceMerged`. Ambiguity is never guessed at: if two devices claim one address, the IP-keyed facts stay separate and the `duplicate-ip` flag stands. Phase 4 should key history off the surviving MAC.
-- Final project name.
+- ~~Final project name.~~ **Decided 2026-09-18:** shoal stays the name for
+  now; nothing better has come up.
 - ~~Windows support: out of scope initially (would need Npcap).~~ **Decided
-  2026-09-18:** Windows users are a definite target. The work is deferred
-  until the maintainer is on a Windows machine to build and test it there (he does not
-  want Wine run on the Linux box). Today `GOOS=windows go build ./...` fails
-  only on `internal/probe/mdns/listener.go` (Unix socket options), but a
-  build is not enough: four mechanisms are Unix-only. The survey found:
-
-  | Part | Windows design |
-  |---|---|
-  | Raw ARP (`arp`) | Npcap, via `wpcap.dll` loaded with `windows.LoadLibraryEx` from `%SystemRoot%\System32\Npcap` (fall back to the normal search path for WinPcap-compatible installs), so no cgo and no new dependency. Device name is `\Device\NPF_` + the adapter GUID (`IpAdapterAddresses.AdapterName`, matched by interface index). `pcap_open_live`, filter `arp` via `pcap_compile`/`pcap_setfilter`, `pcap_next_ex` with a ~100 ms timeout so reads can poll for cancellation, `pcap_sendpacket`, `pcap_setmintocopy(0)` if present. Separate handles for sending and receiving; `Close` takes a mutex so it never frees a handle mid-read. Without Npcap, fall back to `neigh`, with a mode saying "install Npcap for raw ARP". |
-  | Unprivileged fallback (`neigh`) | `GetIpNetTable` from `iphlpapi.dll` (IPv4, `MIB_IPNETROW` is 24 bytes: index, phys-addr length, 8-byte addr, IPv4 in network order, type; skip type 2 "invalid"). Parse the buffer in portable code so it is tested everywhere. Interface names come from `net.InterfaceByIndex`, which on Windows gives the friendly name `net.Interfaces` uses. The UDP nudge works unchanged. |
-  | ICMP (`icmp`) | No unprivileged ICMP socket on Windows, and raw needs admin. Use `IcmpSendEcho` (what `ping.exe` uses, no admin) behind a `net.PacketConn` adapter: each write runs `IcmpSendEcho` in a goroutine and a success is handed back to the reader as a synthesised echo reply, so the existing matching and timing code is unchanged and RTT keeps its microsecond resolution. New `Mode` for the socket kind. |
-  | mDNS (`mdns`, `dns-sd`) | Windows has no `SO_REUSEPORT` and cannot bind a multicast address: set `SO_REUSEADDR` only and bind `0.0.0.0:5353`. Move `shareablePort` into `sockopt_unix.go`/`sockopt_windows.go`. `IP_MULTICAST_LOOP` is receive-side on Windows, so the listener will hear shoal's own questions; harmless. Windows Defender Firewall prompts on first run and must be allowed for mDNS and NetBIOS answers to arrive. |
-  | Gateway (`netif`) | `GetAdaptersAddresses` with `GAA_FLAG_INCLUDE_GATEWAYS`: the up adapter with an IPv4 gateway and the lowest `Ipv4Metric`, named via `net.InterfaceByIndex`. New `route_windows.go`; exclude Windows from `route_other.go`. |
-  | Resolvers (`rdns`) | No `/etc/resolv.conf`: take `FirstDnsServerAddress` of the same adapters, IPv4 first (Windows lists placeholder `fec0::` servers that would time out). Make the "named no nameserver" wording platform-neutral. |
-
-  Also: platform-aware hints wherever the code says `make setcap` or sudo
-  (on Windows: install Npcap from npcap.com; its licence does not allow
-  bundling it); a `make build-windows` target producing `bin/shoal.exe`;
-  build tags on `conn_other.go` and `table_other.go` to exclude Windows. The
-  TUI itself (Bubble Tea) runs in Windows Terminal. nbns and the rest of the
-  engine need no change.
-
+  2026-09-18:** Windows is a definite target and the first planned update
+  after release 1. See "Planned future updates" in §7.
 ---
 
 ## 12. Working agreement for Claude Code

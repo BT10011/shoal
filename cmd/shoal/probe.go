@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/BT10011/shoal/internal/dnswire"
@@ -15,6 +16,7 @@ import (
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
+	"github.com/BT10011/shoal/internal/probe/av"
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
@@ -34,8 +36,10 @@ Probes:
   neigh [iface]   Kernel neighbour cache, no privileges needed (see docs/protocols/neigh.md)
   rdns <ip>       Reverse DNS (PTR) lookup, naming the resolver that answered (see docs/protocols/rdns.md)
   mdns <ip>       Ask a device its name over multicast, from port 5353 (see docs/protocols/mdns.md)
-  dns-sd          Listen to the Bonjour and Avahi conversation and write down what
-                  passes; sends nothing (also: shoal probe mdns with no ip)
+  dns-sd [-ask]   Listen to the Bonjour and Avahi conversation and write down what
+                  passes; sends nothing unless -ask (also: shoal probe mdns with no ip)
+  av [-for 10s]   Ask which services are on offer and point out the Dante and NDI
+                  devices that answer (see docs/protocols/av.md)
   icmp <ip>       Echo requests, to measure the round trip (see docs/protocols/icmp.md)
   nbns <ip>       NetBIOS node status: the name table Windows and Samba hosts keep
                   (see docs/protocols/nbns.md)
@@ -67,6 +71,8 @@ func runProbe(args []string) error {
 		return runProbeMDNS(args[1:])
 	case "dns-sd":
 		return runProbeMDNS(args[1:]) // with no address it listens
+	case "av":
+		return runProbeAV(args[1:])
 	case "icmp":
 		return runProbeICMP(args[1:])
 	case "nbns":
@@ -179,19 +185,42 @@ func runProbeRDNS(args []string) error {
 }
 
 // runProbeMDNSListen watches the multicast group without sending anything.
-func runProbeMDNSListen(listenFor time.Duration) error {
+func runProbeMDNSListen(listenFor time.Duration, browse []string, enrichers []engine.Enricher) error {
 	iface, err := netif.Default()
 	if err != nil {
 		return err
 	}
 	fmt.Print(iface.Describe())
-	fmt.Printf("group      %s:%d (passive; shoal sends nothing)\n", mdns.Group, mdns.Port)
+	if len(browse) == 0 {
+		fmt.Printf("group      %s:%d (passive; shoal sends nothing)\n", mdns.Group, mdns.Port)
+	} else {
+		fmt.Printf("group      %s:%d, asking for %s\n", mdns.Group, mdns.Port, strings.Join(browse, ", "))
+	}
 	if listenFor > 0 {
 		fmt.Printf("listening  %s\n\n", listenFor)
 	} else {
 		fmt.Print("listening  until interrupted (^C)\n\n")
 	}
-	return runStandalone(iface, []engine.Discoverer{mdns.NewListener(mdns.ListenerOptions{})}, nil, os.Stdout, listenFor)
+	listener := mdns.NewListener(mdns.ListenerOptions{Browse: browse})
+	return runStandalone(iface, []engine.Discoverer{listener}, enrichers, os.Stdout, listenFor)
+}
+
+// runProbeAV asks the network which services are on offer and points out
+// the Dante and NDI devices that answer. Each device that speaks is also
+// asked its own name, which is how a device shows its list of services is
+// its own rather than relayed. Devices are named by address: without a
+// sweep there are no MACs, so vendors are not known here.
+func runProbeAV(args []string) error {
+	fs := flag.NewFlagSet("shoal probe av", flag.ContinueOnError)
+	listenFor := fs.Duration("for", 10*time.Second, "how long to listen after asking")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	iface, err := netif.Default()
+	if err != nil {
+		iface = netif.Interface{}
+	}
+	return runProbeMDNSListen(*listenFor, mdns.DefaultBrowse, []engine.Enricher{av.New(), mdns.New(mdns.Options{Iface: iface})})
 }
 
 // chooseResolvers takes the one the user named, or the system's, falling back
@@ -221,11 +250,16 @@ func runProbeMDNS(args []string) error {
 	fs := flag.NewFlagSet("shoal probe mdns", flag.ContinueOnError)
 	wait := fs.Duration("wait", 0, "how long to listen for answers (default 1s)")
 	listenFor := fs.Duration("for", 0, "listen mode: stop after this long (default: until interrupted)")
+	ask := fs.Bool("ask", false, "listen mode: also ask once which services are on offer")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return runProbeMDNSListen(*listenFor)
+		var browse []string
+		if *ask {
+			browse = mdns.DefaultBrowse
+		}
+		return runProbeMDNSListen(*listenFor, browse, nil)
 	}
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: shoal probe mdns [ip] [-wait 1s] [-for 30s]")

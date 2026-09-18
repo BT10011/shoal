@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,8 +15,10 @@ import (
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
 	"github.com/BT10011/shoal/internal/netif"
+	"github.com/BT10011/shoal/internal/probe/av"
 	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/history"
+	"github.com/BT10011/shoal/internal/probe/oui"
 	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/store"
 )
@@ -62,7 +65,7 @@ func sized(t *testing.T, w, h int) (*app, *store.Memory) {
 		Status: engine.Status{
 			Scan: 1, ScanStarted: t0,
 			Discoverers: []engine.DiscovererStatus{{Name: "arp", State: engine.StateRunning, Done: 20, Total: 254}},
-			Enrichers:   []engine.EnricherStatus{{Name: "rdns", Produces: model.FieldHostname, Running: 1, Queued: 2, Completed: 3, Answered: 2}},
+			Enrichers:   []engine.EnricherStatus{{Name: "rdns", Produces: model.FieldHostname, Running: 1, Queued: 2, Completed: 3, Asked: 4, Answered: 2}},
 		},
 		At: t0.Add(5 * time.Second),
 	})
@@ -565,8 +568,8 @@ func TestFlagsColumnShowsBadgesAndFiltersByFlag(t *testing.T) {
 	if r := row("192.168.1.1"); !strings.Contains(r, "self,rand") {
 		t.Errorf("host row should carry self and rand-mac badges: %q", r)
 	}
-	if strings.Contains(plain, "RTT") == false {
-		t.Errorf("RTT should still fit at 120 columns\n%s", plain)
+	if !strings.Contains(plain, "self,rand-mac ") {
+		t.Errorf("two badges should fit whole at 120 columns\n%s", plain)
 	}
 
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -592,6 +595,26 @@ func TestBadgeText(t *testing.T) {
 	}
 }
 
+func TestFitBadgesKeepsWholeBadges(t *testing.T) {
+	cases := []struct {
+		text  string
+		width int
+		want  string
+	}{
+		{"off-subnet,dante,new", 20, "off-subnet,dante,new"},
+		{"off-subnet,dante,new", 19, "off-subnet,dante +1"},
+		{"off-subnet,dante,new", 16, "off-subnet +2"},
+		{"link-local,ndi,new", 16, "link-local,ndi +1"[:0] + "link-local +2"},
+		{"dup-ip", 16, "dup-ip"},
+		{"", 16, ""},
+	}
+	for _, c := range cases {
+		if got := fitBadges(c.text, c.width); got != c.want {
+			t.Errorf("fitBadges(%q, %d) = %q, want %q", c.text, c.width, got, c.want)
+		}
+	}
+}
+
 func TestLayerTwoOnlyDeviceIsExplained(t *testing.T) {
 	a, _ := sized(t, 120, 40)
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}) // mac-c: MAC only
@@ -612,13 +635,13 @@ func TestEnricherRowsCountAskedAgainstAnswered(t *testing.T) {
 		e    engine.EnricherStatus
 		want string
 	}{
-		{engine.EnricherStatus{Name: "oui", Produces: model.FieldVendor, Completed: 23, Answered: 21}, "oui    23 asked · 21 named"},
-		{engine.EnricherStatus{Name: "rdns", Produces: model.FieldHostname, Completed: 23, Answered: 2}, "rdns   23 asked · 2 named"},
-		{engine.EnricherStatus{Name: "icmp", Produces: model.FieldLatency, Completed: 23, Answered: 21}, "icmp   23 asked · 21 answered"},
-		{engine.EnricherStatus{Name: "rogue", Produces: model.FieldFlag, Completed: 23, Answered: 1}, "rogue  23 asked · 1 flagged"},
-		{engine.EnricherStatus{Name: "nbns", Produces: model.FieldHostname, Running: 4, Queued: 9, Completed: 10, Failed: 1, Answered: 3}, "nbns   15 asked · 3 named · 4 running · 9 queued · 1 failed"},
+		{engine.EnricherStatus{Name: "oui", Produces: model.FieldVendor, Completed: 23, Asked: 23, Answered: 21}, "oui    23 asked · 21 named"},
+		{engine.EnricherStatus{Name: "rdns", Produces: model.FieldHostname, Completed: 23, Asked: 23, Answered: 2}, "rdns   23 asked · 2 named"},
+		{engine.EnricherStatus{Name: "icmp", Produces: model.FieldLatency, Completed: 23, Asked: 23, Answered: 21}, "icmp   23 asked · 21 answered"},
+		{engine.EnricherStatus{Name: "rogue", Produces: model.FieldFlag, Completed: 23, Asked: 23, Answered: 1}, "rogue  23 asked · 1 flagged"},
+		{engine.EnricherStatus{Name: "nbns", Produces: model.FieldHostname, Running: 4, Queued: 9, Completed: 10, Failed: 1, Asked: 15, Answered: 3}, "nbns   15 asked · 3 named · 4 running · 9 queued · 1 failed"},
 		{engine.EnricherStatus{Name: "x"}, "x      0 asked · 0 answered"},
-		{engine.EnricherStatus{Name: "mdns", Produces: model.FieldHostname, Completed: 23, Answered: 9, Refreshing: 2, Renewed: 14}, "mdns   23 asked · 9 named · 14 renewed"},
+		{engine.EnricherStatus{Name: "mdns", Produces: model.FieldHostname, Completed: 23, Asked: 23, Answered: 9, Refreshing: 2, Renewed: 14}, "mdns   23 asked · 9 named · 14 renewed"},
 	}
 	for _, c := range cases {
 		if got := strings.TrimRight(row(c.e), " "); got != c.want {
@@ -1060,6 +1083,41 @@ func TestThemePickerPreviewsLiveAndRestoresOnEsc(t *testing.T) {
 	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if a.renderer.Styles.Theme.Name != a.theme {
 		t.Fatal("esc after a confirmed change should restore the confirmed theme, not the original")
+	}
+}
+
+func TestKeptThemeIsRemembered(t *testing.T) {
+	a, _ := sized(t, 120, 40)
+	var saved []string
+	a.opts.SaveTheme = func(name string) error { saved = append(saved, name); return nil }
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil || len(saved) != 0 {
+		t.Fatal("reverting with Esc must not remember anything")
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	_, cmd = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("keeping a theme should save it")
+	}
+	a.Update(cmd())
+	if len(saved) != 1 || saved[0] != a.theme {
+		t.Fatalf("saved %v, want the kept theme %q", saved, a.theme)
+	}
+	if last := a.events[len(a.events)-1]; last.Probe != "config" || !strings.Contains(last.Message, "kept for next time") {
+		t.Errorf("the log should say it was kept: %+v", last)
+	}
+
+	a.opts.SaveTheme = func(string) error { return errors.New("read-only file system") }
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	_, cmd = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a.Update(cmd())
+	if last := a.events[len(a.events)-1]; last.Kind != engine.KindError || !strings.Contains(last.Message, "could not be kept for next time: read-only file system") {
+		t.Errorf("a failed save should be logged as an error: %+v", last)
 	}
 }
 
@@ -1509,6 +1567,83 @@ func TestWrapNeverOverflows(t *testing.T) {
 			if lipgloss.Width(l) > w {
 				t.Fatalf("width %d: %q is %d wide", w, l, lipgloss.Width(l))
 			}
+		}
+	}
+}
+
+func TestServicesText(t *testing.T) {
+	d := model.NewDevice("k", t0)
+	for _, v := range []string{"_http._tcp", "_netaudio-arc._udp", "_netaudio-cmc._udp", "_ipp._tcp", "_ndi._tcp", "_airplay._tcp"} {
+		d.Add(model.Observation{DeviceKey: "k", Field: model.FieldService, Value: v, Source: "mdns", Method: "m", Confidence: 0.9, At: t0})
+	}
+	if got := servicesText(d.Snapshot(), t0); got != "dante,ndi,airplay,http,ipp" {
+		t.Fatalf("services = %q: Dante once and first, NDI next, the rest in order", got)
+	}
+	if got := servicesText(model.NewDevice("e", t0).Snapshot(), t0); got != "" {
+		t.Fatalf("no services = %q", got)
+	}
+}
+
+// TestDemoFlagsDanteAndNDI runs the demo's probes and checks the stagebox
+// and the camera are badged, with services shown and filterable.
+func TestDemoFlagsDanteAndNDI(t *testing.T) {
+	st := store.NewMemory()
+	eng := engine.New(st, fake.Interface())
+	opts := fake.Options{Interval: 50 * time.Microsecond, Latency: 200 * time.Microsecond, Seed: 7}
+	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := oui.Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, en := range append([]engine.Enricher{av.New(), oui.New(reg)}, fake.NewEnrichers(opts)...) {
+		if err := eng.AddEnricher(en); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := eng.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Stop()
+	deadline := time.Now().Add(10 * time.Second)
+	for !eng.Status().Settled() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	a := newApp(Options{Store: st, Engine: eng, Demo: true, Theme: "nord"})
+	a.Update(tea.WindowSizeMsg{Width: 180, Height: 40})
+	a.Update(Batch{Devices: st.Devices(), Status: eng.Status(), At: time.Now()})
+	row := func(ip string) string {
+		for _, l := range strings.Split(ansi.Strip(a.View()), "\n") {
+			if left := ansi.Truncate(l, 108, ""); strings.Contains(left, " "+ip+" ") {
+				return left
+			}
+		}
+		return ""
+	}
+	if r := row("192.168.0.77"); strings.Count(r, "dante") < 2 {
+		t.Errorf("the stagebox should be badged dante and list dante among its services: %q", r)
+	}
+	if r := row("169.254.37.12"); !strings.Contains(r, "ndi") || !strings.Contains(r, "rtsp") {
+		t.Errorf("the camera should be badged ndi and show rtsp among its services: %q", r)
+	}
+	if !strings.Contains(ansi.Strip(a.View()), "SERVICES") {
+		t.Errorf("SERVICES should fit at 180 columns\n%s", ansi.Strip(a.View()))
+	}
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	for _, r := range "dante" {
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if len(a.devices) != 1 || a.devices[0].Key != "00:1d:c1:12:34:56" {
+		t.Fatalf("/dante should find the stagebox: %v", keys(a.devices))
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	details := strings.Join(strings.Fields(ansi.Strip(joinLines(a.renderDetails(120)))), " ")
+	for _, want := range []string{"dante-device", "a Dante audio-over-IP device", "announces _netaudio-arc._udp over mDNS", "made by Audinate"} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q\n%s", want, details)
 		}
 	}
 }

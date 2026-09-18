@@ -100,16 +100,17 @@ type EnricherStatus struct {
 	Running   int
 	Queued    int
 	Completed int // lookups finished without error
-	Failed    int
-	Answered  int // lookups that produced the Produces field
+	Failed    int // lookups that returned an error
+	// Asked and Answered count devices, not lookups: an enricher triggered
+	// by several fields may look at one device more than once, and the row
+	// should read against the devices on screen.
+	Asked    int // devices looked at this scan
+	Answered int // devices for which the Produces field came back
 	// Renewals are lookups the engine made to keep a value from expiring.
 	// They are counted apart, so Asked and Answered stay about the scan.
 	Refreshing int // renewals queued or running
 	Renewed    int // renewals that brought the value back
 }
-
-// Asked is every lookup this scan has started: finished or still waiting.
-func (s EnricherStatus) Asked() int { return s.Running + s.Completed + s.Failed }
 
 // Status is a snapshot of the whole engine.
 type Status struct {
@@ -674,6 +675,9 @@ type enricher struct {
 
 	runningRenewals int
 	renewed         int
+
+	askedKeys    map[string]bool // devices looked at this scan
+	answeredKeys map[string]bool // devices that answered this scan
 }
 
 func (en *enricher) snapshot() EnricherStatus {
@@ -685,7 +689,8 @@ func (en *enricher) snapshot() EnricherStatus {
 		Queued:     len(en.queue) - len(en.renewals),
 		Completed:  en.completed,
 		Failed:     en.failed,
-		Answered:   en.answered,
+		Asked:      len(en.askedKeys),
+		Answered:   len(en.answeredKeys),
 		Produces:   en.produces,
 		Refreshing: len(en.renewals) + en.runningRenewals,
 		Renewed:    en.renewed,
@@ -755,11 +760,20 @@ func (en *enricher) pop() (key string, renewal, ok bool) {
 		en.runningRenewals++
 	} else {
 		en.running++
+		if en.askedKeys == nil {
+			en.askedKeys = make(map[string]bool)
+		}
+		en.askedKeys[key] = true
 	}
 	return key, renewal, true
 }
 
 func (en *enricher) finish(err error, answered, renewal bool) {
+	en.finishKey("", err, answered, renewal)
+}
+
+// finishKey records the end of a lookup for a device.
+func (en *enricher) finishKey(key string, err error, answered, renewal bool) {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	if renewal {
@@ -777,6 +791,12 @@ func (en *enricher) finish(err error, answered, renewal bool) {
 	}
 	if answered {
 		en.answered++
+		if key != "" {
+			if en.answeredKeys == nil {
+				en.answeredKeys = make(map[string]bool)
+			}
+			en.answeredKeys[key] = true
+		}
 	}
 }
 
@@ -784,6 +804,7 @@ func (en *enricher) resetCounts() {
 	en.mu.Lock()
 	defer en.mu.Unlock()
 	en.completed, en.failed, en.answered, en.renewed = 0, 0, 0, 0
+	en.askedKeys, en.answeredKeys = nil, nil
 }
 
 func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
@@ -808,7 +829,7 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		}
 		snap, found := e.store.Get(key)
 		if !found {
-			en.finish(nil, false, renewal)
+			en.finishKey(key, nil, false, renewal)
 			continue
 		}
 		var answered atomic.Bool
@@ -822,7 +843,7 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		if err != nil && ctx.Err() == nil {
 			e.publish(ProbeEvent{Probe: name, Kind: KindError, Target: key, Message: err.Error()})
 		}
-		en.finish(err, answered.Load(), renewal)
+		en.finishKey(key, err, answered.Load(), renewal)
 		if ctx.Err() != nil {
 			return
 		}

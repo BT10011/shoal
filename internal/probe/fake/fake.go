@@ -88,8 +88,9 @@ func (o Options) withDefaults() Options {
 // Synology, Apple, HP, Google, Philips, Raspberry Pi, Sonos, Espressif), a
 // randomised-MAC phone, a hostname disagreement (the printer), two smart
 // plugs fighting over one IP, and two visitors from an AV rack: a Sony PTZ
-// camera that got no DHCP answer and fell back to a link-local address, and
-// a Dante audio box still carrying a static address from another venue.
+// camera with NDI that got no DHCP answer and fell back to a link-local
+// address, and a Dante stagebox still carrying a static address from
+// another venue.
 func DefaultDevices() []Device {
 	return []Device{
 		{IP: "192.168.1.1", MAC: "2c:c8:1b:4a:10:01", RDNS: "gateway.lan", RTT: 900 * time.Microsecond},
@@ -110,9 +111,11 @@ func DefaultDevices() []Device {
 			Services: []string{"_sonos._tcp", "_spotify-connect._tcp"}, RTT: 6 * time.Millisecond},
 		{IP: "192.168.1.230", MAC: "84:cc:a8:01:02:03", RDNS: "plug-a.lan", RTT: 12 * time.Millisecond},
 		{IP: "192.168.1.230", MAC: "84:cc:a8:04:05:06", RDNS: "plug-b.lan", RTT: 14 * time.Millisecond},
-		{IP: "169.254.37.12", MAC: "00:01:4a:7c:2e:01", MDNSName: "PTZ-CAM-1.local", Services: []string{"_rtsp._tcp"},
+		{IP: "169.254.37.12", MAC: "00:01:4a:7c:2e:01", MDNSName: "PTZ-CAM-1.local", Services: []string{"_ndi._tcp", "_rtsp._tcp"},
 			Silent: true, Overheard: true, AskingFor: "169.254.37.12"},
-		{IP: "192.168.0.77", MAC: "00:1d:c1:12:34:56", Silent: true, Overheard: true, AskingFor: "192.168.0.1"},
+		{IP: "192.168.0.77", MAC: "00:1d:c1:12:34:56", MDNSName: "Stagebox-FOH.local",
+			Services: []string{"_netaudio-arc._udp", "_netaudio-cmc._udp", "_netaudio-dbc._udp"},
+			Silent:   true, Overheard: true, AskingFor: "192.168.0.1"},
 	}
 }
 

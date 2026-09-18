@@ -29,6 +29,9 @@ UI is honest about being invented.
   flags both with `duplicate-ip`.
 - **Randomised MAC**: the phone at `.101` has a locally-administered address, so
   no vendor can be looked up, and it drops ICMP.
+- **Dante and NDI**: the stagebox announces three `_netaudio-*` types and has
+  an Audinate MAC, so `av` badges it `dante` with both pieces of evidence; the
+  camera announces `_ndi._tcp` alongside `_rtsp._tcp`, so it is badged `ndi`.
 - **Devices that do not belong** (Phase 3a): a Sony PTZ camera at
   `169.254.37.12` that got no DHCP answer and fell back to a link-local
   address, and an Audinate (Dante) box at `192.168.0.77` still carrying a
