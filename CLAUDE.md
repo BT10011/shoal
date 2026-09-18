@@ -21,6 +21,7 @@ A terminal-based, good-looking LAN discovery tool (Go, Bubble Tea, Lipgloss, Tid
 - Scope test: does the change help the user see or understand how a device was discovered or identified? If not, don't build it. Ask first.
 
 ## Rules
+- **No personal or real network data in the repository, ever.** Not in code, tests, fixtures, docs, the plan, or commit messages. That means no real IP addresses or subnets, no real MAC addresses, no real hostnames or device names, no real makes of equipment on the maintainer's network, no email addresses, and no "on the maintainer's network the router did X" stories. Use invented values: subnets from RFC 1918 or RFC 5737 space that are not the maintainer's (172.16.10.0/24, 192.0.2.0/24, 198.51.100.0/24), MACs from the documentation range 00:00:5e:00:53:00–ff, invented names (office-nas, stage-laptop). Live scans may be run to verify behaviour, but only the conclusion goes into the repo, phrased generically. On 2026-09-18 the whole history had to be rewritten and force-pushed because this was broken; there is no second time.
 - Stay inside the current phase. Do not implement features from later phases.
 - Work in small, reviewable steps. After each step, `go build ./...`, `go vet ./...` and `go test -race ./...` must pass.
 - `internal/model` has no I/O. Only `internal/store` mutates device state. The UI never touches engine internals; it talks to the engine via messages.
