@@ -3,7 +3,7 @@ module github.com/BT10011/shoal
 go 1.27.1
 
 require (
-	github.com/allisonhere/tideui v0.2.2
+	github.com/allisonhere/tideui v0.2.4
 	github.com/charmbracelet/bubbles v0.21.1
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
