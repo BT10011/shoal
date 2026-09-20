@@ -7,10 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/model"
@@ -281,6 +284,84 @@ func TestViewFitsTerminalExactly(t *testing.T) {
 			if w := lipgloss.Width(l); w != size[0] {
 				t.Errorf("%v: line %d is %d wide: %q", size, i, w, ansi.Strip(l))
 			}
+		}
+	}
+}
+
+func TestDisplaySafeComposesAccentsAndDropsFormat(t *testing.T) {
+	if got := displaySafe("cafe\u0301"); got != "café" {
+		t.Errorf("decomposed accent should compose: %q", got)
+	}
+	if got := displaySafe("a\tb\nc"); got != "a b c" {
+		t.Errorf("controls should become spaces: %q", got)
+	}
+	if got := displaySafe("a\u200db\ufe0f"); got != "ab" {
+		t.Errorf("format runes should be dropped: %q", got)
+	}
+}
+
+// TestUntrustedTextCannotBreakTheLayout is the regression guard for a device
+// whose name carries a rune the width libraries disagree about. x/ansi counts
+// a combining mark as zero width while go-runewidth and many terminals give
+// it a cell, so a cell padded to its column came out one wider than the row
+// believed, the terminal wrapped it, and the whole alt-screen shifted up a
+// row. A name is untrusted input, so it must not be able to do that.
+func TestUntrustedTextCannotBreakTheLayout(t *testing.T) {
+	hostile := []rune{'e', 0x0301, 0x0591, 0x05b0, 0x0600, 0x200d, 0xfe0f, 0x202e}
+	for _, w := range []int{8, 14, 40} {
+		line := fit(strings.Repeat(string(hostile), 40), w)
+		if got := ansi.StringWidth(line); got != w {
+			t.Errorf("fit width %d: x/ansi=%d: %q", w, got, line)
+		}
+		if got := runewidth.StringWidth(ansi.Strip(line)); got != w {
+			t.Errorf("fit width %d: go-runewidth=%d: %q", w, got, ansi.Strip(line))
+		}
+		if strings.ContainsFunc(ansi.Strip(line), unicode.IsControl) {
+			t.Errorf("fit width %d kept a control character: %q", w, ansi.Strip(line))
+		}
+	}
+
+	a, st := sized(t, 120, 40)
+	evil := "stage-" + strings.Repeat("\u0591", 30) + "\nbox\x1b[31m"
+	if err := st.Apply(obs("mac-c", model.FieldHostname, evil, "mdns", 0.9)); err != nil {
+		t.Fatal(err)
+	}
+	a.Update(Batch{Devices: st.Devices(), At: t0.Add(6 * time.Second)})
+	lines := strings.Split(a.View(), "\n")
+	if len(lines) != 40 {
+		t.Fatalf("frame has %d lines, want 40", len(lines))
+	}
+	for i, l := range lines {
+		plain := ansi.Strip(l)
+		if got := ansi.StringWidth(l); got != 120 {
+			t.Errorf("line %d: x/ansi=%d: %q", i, got, plain)
+		}
+		if got := runewidth.StringWidth(plain); got != 120 {
+			t.Errorf("line %d: go-runewidth=%d: %q", i, got, plain)
+		}
+		if strings.ContainsFunc(plain, unicode.IsControl) {
+			t.Errorf("line %d kept a control character: %q", i, plain)
+		}
+	}
+}
+
+// TestDetailRowsLeaveNoBackgroundHole guards the other half of the details
+// pane's fixed-width contract: the gap between a field's label and its value
+// is a styled space. A raw one sits after the label's reset with no background
+// of its own, so a transparent terminal shows the desktop through in the cell
+// immediately before the value.
+func TestDetailRowsLeaveNoBackgroundHole(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	a, st := sized(t, 120, 40)
+	if err := st.Apply(obs("mac-a", model.FieldLatency, "0.8ms", "icmp", 1)); err != nil {
+		t.Fatal(err)
+	}
+	a.Update(Batch{Devices: st.Devices(), At: t0.Add(5 * time.Second)})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	for i, line := range a.renderDetails(40) {
+		if strings.Contains(line, "\x1b[0m \x1b[") {
+			t.Errorf("row %d leaves an unstyled cell: %q", i, line)
 		}
 	}
 }

@@ -6,9 +6,11 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/BT10011/shoal/internal/model"
 )
@@ -67,12 +69,47 @@ func inner(w, h int) box {
 
 func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 
-// fit truncates s to w cells with an ellipsis and pads to exactly w.
+// displaySafe makes text safe to lay out on a fixed-width line. Everything
+// Shoal shows is either its own writing or a value a probe learned from a
+// device, and a device can put anything in its name. Combining marks,
+// variation selectors and other format characters are the dangerous ones:
+// width libraries and terminals disagree about whether they take a cell, so
+// a name carrying one makes the line one cell wider than the code that
+// padded it believed, and the terminal wraps it, shifting the whole screen
+// up by a row. NFC turns decomposed accents back into single precomposed
+// runes ("e" + accent becomes "é"), and the rest of the format machinery is
+// dropped rather than allowed to desynchronise the layout. Control
+// characters become spaces so a name cannot smuggle in a newline or an
+// escape sequence.
+func displaySafe(s string) string {
+	s = norm.NFC.String(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteRune(' ')
+		case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r),
+			unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r),
+			unicode.Is(unicode.Cn, r), unicode.Is(unicode.Mn, r),
+			unicode.Is(unicode.Me, r):
+			// Dropped: a format rune, a combining mark NFC could not
+			// compose, a private-use or unassigned rune, or a control.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// fit truncates s to w cells with an ellipsis and pads to exactly w. Text
+// from a probe is put through displaySafe first, so the width this promises
+// is the width the terminal will actually draw.
 func fit(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	s = ansi.Truncate(s, w, "…")
+	s = ansi.Truncate(displaySafe(s), w, "…")
 	if pad := w - lipgloss.Width(s); pad > 0 {
 		s += strings.Repeat(" ", pad)
 	}
