@@ -36,7 +36,7 @@ func (a *app) renderDetails(width int) []string {
 		title = h.Value + "  " + d.Key
 	}
 	fr := classify(d, a.status)
-	lines := []string{s.DetailTitle.Render(ansi.Truncate(title, max(1, width-2), "…"))}
+	lines := []string{s.DetailTitle.Render(ansi.Truncate(displaySafe(title), max(1, width-2), "…"))}
 	first, _ := firstSeen(d, a.now)
 	last, _, heard := d.LastContact()
 	meta := fmt.Sprintf("first seen %s", stamp(a.now, first))
@@ -103,7 +103,11 @@ func (a *app) renderDetails(width int) []string {
 				style = muted
 			}
 			seen[o.Value] = true
-			lines = append(lines, label.Render(fit(name, 10))+" "+style.Render(fit(value, max(1, width-11))))
+			// The gap between the label and the value is a styled space: a raw
+			// one would sit after the label's reset with no background of its
+			// own, letting a transparent terminal show through right before
+			// the value.
+			lines = append(lines, label.Render(fit(name, 10))+s.Item.Render(" ")+style.Render(fit(value, max(1, width-11))))
 			for i, l := range wrap(o.Method, width-4) {
 				prefix := "    "
 				if i == 0 {
