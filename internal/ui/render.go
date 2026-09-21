@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/BT10011/shoal/internal/model"
@@ -69,37 +71,119 @@ func inner(w, h int) box {
 
 func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 
+const (
+	flagFirst, flagLast = 0x1F1E6, 0x1F1FF // regional indicator symbols, A to Z
+	toneFirst, toneLast = 0x1F3FB, 0x1F3FF // emoji skin-tone modifiers
+)
+
 // displaySafe makes text safe to lay out on a fixed-width line. Everything
 // Shoal shows is either its own writing or a value a probe learned from a
-// device, and a device can put anything in its name. Combining marks,
-// variation selectors and other format characters are the dangerous ones:
-// width libraries and terminals disagree about whether they take a cell, so
-// a name carrying one makes the line one cell wider than the code that
-// padded it believed, and the terminal wraps it, shifting the whole screen
-// up by a row. NFC turns decomposed accents back into single precomposed
-// runes ("e" + accent becomes "é"), and the rest of the format machinery is
-// dropped rather than allowed to desynchronise the layout. Control
-// characters become spaces so a name cannot smuggle in a newline or an
-// escape sequence.
+// device, and a device can put anything in its name. The danger is a name
+// whose width the code and the terminal count differently: the row comes out
+// wider than it was padded to, the terminal wraps it, and the whole screen
+// scrolls up a line. Nothing can ask the terminal what it will do, so the
+// text is cut down to what two independent width models agree on: x/ansi,
+// which the layout is built on, and go-runewidth, standing in for the
+// terminal.
+//
+//   - NFC turns decomposed accents back into single runes.
+//   - Controls, format characters, private-use and unassigned runes and
+//     combining marks NFC could not compose are dropped, and so are emoji
+//     skin-tone modifiers: they attach to the rune before them, and a
+//     terminal that cannot join an emoji sequence draws one as a glyph of
+//     its own. Tabs and line breaks become spaces, so a name cannot break a
+//     line or carry an escape sequence.
+//   - A flag, two regional indicators that the models count differently, is
+//     spelled as its country code.
+//   - Any other rune the models disagree about becomes "?", a run of them
+//     one.
+//   - A last check on the whole string catches what only shows in a
+//     sequence, such as a spacing mark after a letter of another script, and
+//     repairWidths rebuilds the string.
+//
+// The tests check that every prefix of the result measures the same either
+// way, which is what lets ansi.Truncate cut it anywhere; the code checks
+// only the whole.
 func displaySafe(s string) string {
+	if plainASCII(s) {
+		return s // nearly every cell on screen: nothing to change or allocate
+	}
 	s = norm.NFC.String(s)
 	var b strings.Builder
 	b.Grow(len(s))
+	placeholder := false
 	for _, r := range s {
 		switch {
 		case r == '\t' || r == '\n' || r == '\r':
-			b.WriteRune(' ')
-		case unicode.Is(unicode.Cc, r), unicode.Is(unicode.Cf, r),
-			unicode.Is(unicode.Co, r), unicode.Is(unicode.Cs, r),
-			unicode.Is(unicode.Cn, r), unicode.Is(unicode.Mn, r),
-			unicode.Is(unicode.Me, r):
-			// Dropped: a format rune, a combining mark NFC could not
-			// compose, a private-use or unassigned rune, or a control.
+			b.WriteByte(' ')
+		case r >= flagFirst && r <= flagLast:
+			b.WriteRune('A' + r - flagFirst)
+		case r >= toneFirst && r <= toneLast, dropped(r):
+			continue
+		case widthDisputed(r):
+			if !placeholder {
+				b.WriteByte('?')
+			}
+			placeholder = true
+			continue
 		default:
 			b.WriteRune(r)
 		}
+		placeholder = false
 	}
-	return b.String()
+	out := b.String()
+	if widthsAgree(out) {
+		return out
+	}
+	return repairWidths(out)
+}
+
+// plainASCII reports whether s is only printable ASCII, which every width
+// model counts the same way.
+func plainASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// dropped reports whether displaySafe removes r outright: a control, format,
+// private-use, surrogate or unassigned rune, or a combining mark.
+func dropped(r rune) bool {
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs,
+		unicode.Cn, unicode.Mn, unicode.Me)
+}
+
+// widthsAgree reports whether both width models measure s the same.
+func widthsAgree(s string) bool {
+	return ansi.StringWidth(s) == runewidth.StringWidth(s)
+}
+
+// widthDisputed reports whether the width models disagree about r on its
+// own. It asks the libraries rather than keeping a table, so it follows
+// whichever versions are built in.
+func widthDisputed(r rune) bool {
+	return r >= utf8.RuneSelf && !widthsAgree(string(r))
+}
+
+// repairWidths is displaySafe's slow path, for the rare string whose two
+// measures still differ once every rune has been dealt with. It rebuilds the
+// string one rune at a time, keeping a rune only if what has been built
+// still measures the same and standing in "?" for one that would not. The
+// work grows with the square of the length, which is why only that rare
+// case pays it.
+func repairWidths(s string) string {
+	kept, placeholder := "", false
+	for _, r := range s {
+		if next := kept + string(r); widthsAgree(next) {
+			kept, placeholder = next, false
+		} else if !placeholder && widthsAgree(kept+"?") {
+			kept, placeholder = kept+"?", true
+		}
+	}
+	return kept
 }
 
 // fit truncates s to w cells with an ellipsis and pads to exactly w. Text
