@@ -10,26 +10,52 @@ out=${1:-THIRD_PARTY_NOTICES.md}
 goroot=$("$GO" env GOROOT)
 goversion=$("$GO" env GOVERSION)
 
+# The Go licence has to be in here: these notices accompany a distributed
+# binary, and shipping them without it is worse than not building at all.
+# It is not always inside GOROOT — Homebrew puts it one level up — so both
+# are searched, and a miss stops the build rather than passing quietly.
+# Before this check, `make release` once wrote notices carrying Go's PATENTS
+# file and no LICENSE, and said nothing.
+require_go_licence() {
+	local f
+	for f in "$goroot"/* "$goroot"/../*; do
+		case "$(basename "$f" 2>/dev/null)" in
+		[Ll][Ii][Cc][Ee][Nn][SsCc][Ee]*) [ -f "$f" ] && return 0 ;;
+		esac
+	done
+	echo "third-party-notices: no Go licence file in $goroot or its parent;" >&2
+	echo "  the notices would ship incomplete, so nothing was written." >&2
+	exit 1
+}
+require_go_licence
+
 licence_files() {
 	# Everything that is a licence, notice or patent grant; not AUTHORS
-	# lists or READMEs.
-	find "$1" -maxdepth 1 -type f \( -iname 'licen[cs]e*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'patents*' \) | sort
+	# lists or READMEs. Several directories may be given: Homebrew keeps the
+	# Go licence beside GOROOT rather than inside it.
+	find "$@" -maxdepth 1 -type f \( -iname 'licen[cs]e*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'patents*' \) 2>/dev/null | sort -u
 }
 
-section() { # title, version, directory
-	echo "## $1 $2"
+section() { # title, version, directory...
+	local title=$1 version=$2
+	shift 2
+	echo "## $title $version"
 	echo
-	local found=0
+	local found=0 seen=" "
 	while IFS= read -r f; do
 		[ -n "$f" ] || continue
+		local base
+		base=$(basename "$f")
+		case "$seen" in *" $base "*) continue ;; esac
+		seen="$seen$base "
 		found=1
-		echo "### $(basename "$f")"
+		echo "### $base"
 		echo
 		echo '```'
 		cat "$f"
 		echo '```'
 		echo
-	done < <(licence_files "$3")
+	done < <(licence_files "$@")
 	if [ "$found" = 0 ]; then
 		echo "No licence file found in the module; see its source."
 		echo
@@ -47,7 +73,7 @@ section() { # title, version, directory
 	echo "The embedded vendor list, data/oui.csv, is the IEEE Registration"
 	echo "Authority's public MA-L listing, from https://standards-oui.ieee.org/."
 	echo
-	section "The Go standard library" "$goversion" "$goroot"
+	section "The Go standard library" "$goversion" "$goroot" "$goroot/.."
 	"$GO" list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Version}} {{.Dir}}{{end}}{{end}}' ./cmd/shoal |
 		sort -u |
 		while read -r path version dir; do
