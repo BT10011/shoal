@@ -265,6 +265,28 @@ always sort last.
   t            theme picker: preview live, Enter keeps and remembers it
   ?            this manual                     q     quit
 
+# Keeping it up to date, and removing it
+
+Shoal updates itself. Quit and run:
+
+  shoal --update        fetch the latest release and replace this binary
+  shoal --update --check   say what the latest release is, change nothing
+
+It downloads the build for this machine, checks it against the checksums
+published with the release, and installs nothing if they do not match. If
+shoal lives somewhere only the administrator can write, such as
+/usr/local/bin, run it with sudo. On Linux, replacing the file drops the
+raw-network capability that lets shoal sweep with ARP; it is granted again
+where possible, and otherwise the exact command to run is printed.
+
+To remove shoal completely:
+
+  shoal --uninstall
+
+It lists everything it would delete — the program, the remembered theme,
+the history of every network scanned, and the PATH line the installer
+added to your shell — and removes nothing until you agree.
+
 # Going deeper
 
 Each probe has a written explanation in docs/protocols/ in the source
@@ -277,7 +299,17 @@ command line, printing what it sends, receives and concludes:
   shoal probe oui 00:11:32:aa:bb:cc
 
 For anything deeper than that, Wireshark shows the same packets in full
-and Nmap will tell you what shoal deliberately does not.`
+and Nmap will tell you what shoal deliberately does not.
+
+# Credits and licence
+
+Shoal is MIT-licensed, and so is everything compiled into it; the licence
+texts travel with each release in THIRD_PARTY_NOTICES.md.
+
+The panes, themes and the live theme picker are TideUI, by allisonhere,
+who also contributes to Shoal itself. Under TideUI sit Bubble Tea,
+Bubbles and Lip Gloss by Charm. Vendor names come from the IEEE's public
+registry of MAC address assignments.`
 
 // help is the scroll state of the manual.
 type help struct {

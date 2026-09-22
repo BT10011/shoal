@@ -201,4 +201,5 @@ if [ "$os" = freebsd ]; then
 	say "On FreeBSD run it as root; there is no reduced mode yet."
 fi
 say ""
-say "To uninstall: remove $dir/shoal (with sudo if it is under /usr/local)."
+say "  shoal --update   later, to move to the newest release"
+say "  shoal --uninstall  to remove Shoal, its settings and its history"

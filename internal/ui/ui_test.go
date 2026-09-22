@@ -1225,7 +1225,11 @@ func TestHelpIsAScrollableManual(t *testing.T) {
 		}
 	}
 	joined := ansi.Strip(strings.Join(lines, "\n"))
-	for _, want := range []string{"THE PANES", "PROBES: DISCOVERERS AND ENRICHERS", "THE COLUMNS", "READING THE DETAILS PANE", "FRESHNESS", "SCANS", "FILTER AND SORT", "KEYS", "GOING DEEPER", "docs/protocols/", "shoal probe arp", "Confidence"} {
+	for _, want := range []string{"THE PANES", "PROBES: DISCOVERERS AND ENRICHERS", "THE COLUMNS", "READING THE DETAILS PANE", "FRESHNESS", "SCANS", "FILTER AND SORT", "KEYS", "GOING DEEPER", "docs/protocols/", "shoal probe arp", "Confidence",
+		// Keeping shoal current, removing it, and who it is built on: a
+		// user reads the manual, not the README, once shoal is installed.
+		"KEEPING IT UP TO DATE, AND REMOVING IT", "shoal --update", "shoal --uninstall",
+		"CREDITS AND LICENCE", "TideUI", "allisonhere", "MIT"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("manual lacks %q", want)
 		}

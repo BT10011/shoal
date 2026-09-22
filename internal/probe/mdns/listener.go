@@ -130,7 +130,6 @@ func AskLocalResponder(ctx context.Context, questions []string, wait time.Durati
 	}
 }
 
-
 // BrowseQuery builds one mDNS message asking for PTR records of each name,
 // ID 0 as multicast questions carry.
 func BrowseQuery(names ...string) ([]byte, error) { return browseQuery(0, names...) }

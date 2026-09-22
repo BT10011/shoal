@@ -1,20 +1,21 @@
 GO ?= go
 BIN := bin/shoal
 
+# The GitHub repository a release is downloaded from: by the shipped
+# installer, and by `shoal --update`, which has it stamped in. Point it at a
+# public download-only repository to hand out betas while the source stays
+# private, e.g. make release RELEASE_REPO=BT10011/shoal-beta
+RELEASE_REPO ?= BT10011/shoal
+
 # The version stamped into every build: the nearest tag, else the commit,
 # marked dirty when the tree has uncommitted changes.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X main.version=$(VERSION)
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.releaseRepo=$(RELEASE_REPO)
 
 # Release targets: shoal is pure Go, so every one cross-compiles from any
 # machine with CGO disabled. Windows is a planned update (see the plan).
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64
 DIST := dist
-
-# The GitHub repository the shipped installer downloads from. Point it at a
-# public download-only repository to hand out betas while the source stays
-# private, e.g. make release RELEASE_REPO=BT10011/shoal-beta
-RELEASE_REPO ?= BT10011/shoal
 
 .PHONY: build test vet race check demo iface setcap notices release clean
 

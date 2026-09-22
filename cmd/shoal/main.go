@@ -37,6 +37,8 @@ Usage:
   shoal iface [name]      Show the interface, subnet and gateway shoal would scan
   shoal probe <name>      Run one probe standalone and print what it sends, receives and learns
   shoal version           Which build this is, for bug reports
+  shoal --update          Replace this binary with the latest release (--check just looks)
+  shoal --uninstall       Remove shoal, its settings and its history, after listing them
 
 Flags:
   --iface NAME            Interface to scan (default: the one carrying the default route)
@@ -74,6 +76,15 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		// --update and --uninstall look like flags but are commands: they
+		// change the machine rather than the scan, so they are taken before
+		// any of the TUI's flags are parsed.
+		switch {
+		case isFlag(args, "update"):
+			return runUpdate(without(args, "update"))
+		case isFlag(args, "uninstall"):
+			return runUninstall(without(args, "uninstall"))
+		}
 		return runTUI(args)
 	}
 	switch args[0] {
@@ -91,6 +102,29 @@ func run(args []string) error {
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// isFlag reports whether args names this flag, in either of the spellings
+// Go's flag package accepts.
+func isFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == "-"+name || a == "--"+name {
+			return true
+		}
+	}
+	return false
+}
+
+// without drops a flag from args, leaving whatever else was given for the
+// command's own flag set to read.
+func without(args []string, name string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != "-"+name && a != "--"+name {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func runTUI(args []string) error {
