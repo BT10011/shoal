@@ -650,3 +650,180 @@ func TestListenerListensWhenItCannotAsk(t *testing.T) {
 		t.Errorf("the refusal should be explained: %q", info)
 	}
 }
+
+// browseOpts asks the questions the TUI asks, with no settle wait, so a
+// test sees what a scan would credit.
+func browseOpts() ListenerOptions {
+	return ListenerOptions{Browse: DefaultBrowse, Settle: time.Nanosecond,
+		Send:     func(context.Context, netif.Interface, *net.UDPAddr, []byte) error { return nil },
+		AskLocal: func(context.Context, []string, time.Duration) ([][]byte, error) { return nil, nil }}
+}
+
+func TestListenerCreditsADanteDeviceThatAnswersTheBrowse(t *testing.T) {
+	// A Dante device answering the browse shoal sent for _netaudio-arc._udp.
+	// Embedded responders often answer with the PTR alone: no SRV naming
+	// the serving host, no address record. shoal asked this exact question,
+	// and an answer to it is the device saying "I offer this".
+	wire := announcement(t, ptrRecord(t, "_netaudio-arc._udp.local.", "stage-box._netaudio-arc._udp.local."))
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr(deviceIP)})
+
+	got := rec.values(model.FieldService)
+	if len(got) != 1 || got[0] != "_netaudio-arc._udp" {
+		t.Fatalf("services = %v, want [_netaudio-arc._udp] from the answer to our own browse", got)
+	}
+	o, _ := rec.first(model.FieldService)
+	if !strings.Contains(o.Method, "_netaudio-arc._udp") || !strings.Contains(o.Method, "browse") {
+		t.Errorf("Method = %q, want it to say the device answered the browse for that type", o.Method)
+	}
+}
+
+func TestListenerCreditsAnNDISourceThatAnswersTheBrowse(t *testing.T) {
+	// NDI builds its source name from the machine's hostname, which on a
+	// Mac ends ".LOCAL", so the instance is a single label with a dot in it.
+	wire := announcement(t, ptrRecord(t, "_ndi._tcp.local.",
+		"STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local."))
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr(deviceIP)})
+
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_ndi._tcp" {
+		t.Fatalf("services = %v, want [_ndi._tcp]", got)
+	}
+}
+
+func TestListenerStillWaitsForAnSRVForATypeNobodyAskedAbout(t *testing.T) {
+	// The rule that instance PTRs prove nothing stands for every type shoal
+	// did not ask for: a phone really does announce a laptop's instance.
+	wire := announcement(t, ptrRecord(t, "_companion-link._tcp.local.", "laptop._companion-link._tcp.local."))
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr(deviceIP)})
+
+	if got := rec.values(model.FieldService); len(got) != 0 {
+		t.Fatalf("services = %v, want none: nobody asked about that type", got)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), " "); !strings.Contains(info, "waiting for an SRV") {
+		t.Errorf("info = %q, want the instance noted but not credited", info)
+	}
+}
+
+func TestListenerCreditsNoBrowseAnswerToARelay(t *testing.T) {
+	// Answering a browse is no better evidence than listing a type: a
+	// repeater answers for the devices behind it, and must not be credited.
+	foreign := announcement(t, aRecord(t, "faraway.local.", "192.0.2.77"))
+	answer := announcement(t, ptrRecord(t, "_ndi._tcp.local.", "camera._ndi._tcp.local."))
+	rec := runListenerWith(t, browseOpts(),
+		packet{wire: foreign, from: udpAddr("192.168.1.1")},
+		packet{wire: answer, from: udpAddr("192.168.1.1")},
+	)
+	if got := rec.values(model.FieldService); len(got) != 0 {
+		t.Fatalf("services = %v, want none credited to a relay", got)
+	}
+}
+
+func TestListenerDoesNotMistakeAMultiHomedDeviceForARelay(t *testing.T) {
+	// A device with a second interface — a Dante secondary, a VPN, a
+	// management port — announces an address of its own on another network.
+	// That is not a repeater carrying somebody else's records, and marking
+	// it one used to erase every service it offered.
+	wire := announcement(t,
+		aRecord(t, "stage-box.local.", deviceIP),
+		aRecord(t, "stage-box.local.", "172.16.10.9"),
+		ptrRecord(t, MetaQuery+".", "_netaudio-arc._udp.local."),
+	)
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr(deviceIP)})
+
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_netaudio-arc._udp" {
+		t.Fatalf("services = %v, want the device's own list kept", got)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), " "); strings.Contains(info, "is relaying another network's mDNS") {
+		t.Errorf("a device naming its own second address is not a relay: %q", info)
+	}
+}
+
+func TestListenerLeavesItsOwnHostOnLoopbackAlone(t *testing.T) {
+	// The system responder announces on the loopback interface too. Those
+	// datagrams are this machine talking to itself: writing them down makes
+	// a device called 127.0.0.1 that no scan can explain. This machine is
+	// asked directly instead, and credited to the scanning address.
+	wire := announcement(t, aRecord(t, "self.local.", "127.0.0.1"))
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr("127.0.0.1")})
+
+	if got := rec.values(model.FieldIP); len(got) != 0 {
+		t.Fatalf("ip = %v, want nothing: loopback is not a device on the network", got)
+	}
+}
+
+func TestListenerDoesNotCallADanteFlowRecordARelay(t *testing.T) {
+	// Dante registers a record per multicast flow, named for the reversed
+	// flow address, whose address is the transmitter on the Dante network.
+	// That is a device saying where its audio comes from, not a repeater
+	// carrying another network's hosts, and reading it as one cost the
+	// device every service it offered.
+	// Owner: the reversed flow address 239.255.0.10. Value: the transmitter,
+	// on the Dante network rather than the one being scanned.
+	wire := announcement(t,
+		aRecord(t, "10.0.255.239.in-addr.local.", "172.16.10.9"),
+		ptrRecord(t, MetaQuery+".", "_netaudio-arc._udp.local."),
+	)
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr(deviceIP)})
+
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_netaudio-arc._udp" {
+		t.Fatalf("services = %v, want the Dante type kept", got)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), " "); strings.Contains(info, "is relaying another network's mDNS") {
+		t.Errorf("a flow record is not another host's address record: %q", info)
+	}
+}
+
+func TestListenerStillCatchesARepeaterCarryingAnotherHost(t *testing.T) {
+	// The case the rule exists for, and the shape a real reflector has: a
+	// router answering with a host on a VLAN the scan cannot reach.
+	wire := announcement(t,
+		aRecord(t, "office-printer.local.", "172.16.10.13"),
+		ptrRecord(t, MetaQuery+".", "_netaudio-arc._udp.local."),
+	)
+	rec := runListenerWith(t, browseOpts(), packet{wire: wire, from: udpAddr("192.168.1.1")})
+
+	if got := rec.values(model.FieldService); len(got) != 0 {
+		t.Fatalf("services = %v, want none credited to a repeater", got)
+	}
+	if info := strings.Join(rec.messages(engine.KindInfo), " "); !strings.Contains(info, "relaying another network's mDNS") {
+		t.Errorf("info = %q, want the repeater named", info)
+	}
+}
+
+func TestListenMulticastBindsTheGroupNotEveryAddress(t *testing.T) {
+	// Go substitutes the wildcard address for a multicast one, which puts
+	// the listener in the system responder's port-sharing group and lets it
+	// take unicast mDNS meant for that responder — including shoal's own
+	// question to it, so the machine shoal runs on reported no services.
+	group := &net.UDPAddr{IP: net.ParseIP(Group), Port: Port}
+	conn, err := bindGroup(group)
+	if err != nil {
+		t.Skipf("cannot bind %s here: %v", group, err)
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || !addr.IP.Equal(group.IP) {
+		t.Errorf("bound to %s, want %s: only multicast may arrive on this socket", conn.LocalAddr(), group)
+	}
+}
+
+func TestListenerAccusesNobodyOfRelayingWithNoSubnetKnown(t *testing.T) {
+	// Without an interface there is nothing to judge an address against.
+	// Calling every address foreign meant a run that could not name the
+	// interface credited no services at all.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wire := announcement(t,
+		aRecord(t, "neighbour.local.", "172.16.10.9"),
+		ptrRecord(t, MetaQuery+".", "_ndi._tcp.local."),
+	)
+	conn := &listenConn{queue: []packet{{wire: wire, from: udpAddr(deviceIP)}}, onDrain: cancel}
+	opts := browseOpts()
+	opts.Listen = func(context.Context, netif.Interface, *net.UDPAddr) (net.PacketConn, error) { return conn, nil }
+	var rec recorder
+	if err := NewListener(opts).Run(ctx, netif.Interface{Name: "en0"}, rec.emit, rec.report); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_ndi._tcp" {
+		t.Fatalf("services = %v, want [_ndi._tcp] credited with no subnet to judge against", got)
+	}
+}

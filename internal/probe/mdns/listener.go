@@ -201,6 +201,11 @@ type Listener struct {
 	// would put a whole VLAN's worth of equipment on the router.
 	relay map[string]string
 
+	// asked holds the service types the browse names, so an answer to a
+	// question shoal put itself can be told from an announcement nobody
+	// asked for. See service.
+	asked map[string]bool
+
 	// subnet is the scanning interface's network, which is what makes an
 	// address in a relayed record recognisably foreign.
 	subnet *net.IPNet
@@ -210,6 +215,9 @@ type heldService struct {
 	rec  Record
 	wire []byte
 	at   time.Time // when it was heard, so settle can be measured
+	// evidence is the sentence saying what the sender did to earn the
+	// service: listed it among its types, or answered a browse for it.
+	evidence string
 }
 
 // heldSRV is a service waiting for its serving host to be tied to the sender.
@@ -221,9 +229,15 @@ type heldSRV struct {
 
 // NewListener creates the probe.
 func NewListener(opts ListenerOptions) *Listener {
-	return &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool),
+	l := &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool),
 		held: make(map[string]map[string]heldService), relay: make(map[string]string),
-		srv: make(map[string][]heldSRV)}
+		srv: make(map[string][]heldSRV), asked: make(map[string]bool)}
+	for _, name := range l.opts.Browse {
+		if service, ok := ServiceType(name); ok {
+			l.asked[service] = true
+		}
+	}
+	return l
 }
 
 // speaksForItself reports whether a sender has named its own address, by
@@ -266,13 +280,18 @@ func (l *Listener) Name() string { return ListenerName }
 // and SO_REUSEPORT before binding. Those are what let several processes share
 // a multicast port, and they are why shoal can watch the conversation without
 // disturbing the responder that is having it. Binding the group address,
-// rather than any address, means only multicast arrives here: unicast
-// traffic for the port stays with the responder it was meant for.
+// rather than any address, is the other half of not disturbing it: only
+// multicast arrives here, and unicast traffic for the port stays with the
+// responder it was meant for. bindGroup says why that needs doing by hand.
 func ListenMulticast(ctx context.Context, iface netif.Interface, group *net.UDPAddr) (net.PacketConn, error) {
-	lc := net.ListenConfig{Control: shareablePort}
-	conn, err := lc.ListenPacket(ctx, "udp4", fmt.Sprintf("%s:%d", group.IP, group.Port))
+	conn, err := bindGroup(group)
 	if err != nil {
-		return nil, fmt.Errorf("cannot bind %s: %w", group, err)
+		// Better a listener that overhears too much than none at all.
+		lc := net.ListenConfig{Control: shareablePort}
+		conn, err = lc.ListenPacket(ctx, "udp4", fmt.Sprintf("%s:%d", group.IP, group.Port))
+		if err != nil {
+			return nil, fmt.Errorf("cannot bind %s: %w", group, err)
+		}
 	}
 	ni, err := interfaceFor(iface)
 	if err != nil {
@@ -439,6 +458,16 @@ func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine
 	if !ok {
 		return
 	}
+	// The system responder announces on the loopback interface as well as
+	// on the network, and a socket on the group hears both. Those datagrams
+	// are this machine talking to itself: written down, they become a
+	// device called 127.0.0.1 that no scan can account for, and that every
+	// other probe then goes and asks questions of. This machine is asked
+	// directly instead (see askLocal), and credited to the address it
+	// scans from.
+	if !asked && addr.IP.IsLoopback() {
+		return
+	}
 	key := addr.IP.String()
 	how := fmt.Sprintf("sent multicast DNS from this address to %s, overheard without asking", l.opts.Group)
 	heardIt := "announced"
@@ -468,12 +497,10 @@ func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine
 		Method: how,
 	})
 
-	// Before anything is credited: is this sender speaking for somebody else?
-	l.checkRelay(key, addr.IP, resp, report)
-
 	// Addresses first: what a device says about its own name decides which
-	// services can be credited to it below. Answering for its own reverse
-	// name, which shoal's mdns probe asks every device, counts as well.
+	// services can be credited to it below, and which of the addresses it
+	// carries are somebody else's. Answering for its own reverse name,
+	// which shoal's mdns probe asks every device, counts as well.
 	ownReverse, _ := dnswire.ReverseName(addr.IP)
 	for _, rec := range resp.Records {
 		if rec.Type == dnsmessage.TypePTR && ownReverse != "" && trimDot(rec.Name) == trimDot(ownReverse) {
@@ -493,6 +520,10 @@ func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine
 				rec.Name, rec.Addr, rec.Section, rec.TTL),
 		})
 	}
+
+	// Now that the sender's own names are known: is it speaking for
+	// somebody else? This runs before anything is credited.
+	l.checkRelay(key, addr.IP, resp, report)
 
 	l.releaseSRV(key, emit, report)
 
@@ -523,52 +554,80 @@ func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine
 
 // service emits what a PTR record proves about the sender.
 //
-// Only an answer to the meta-query does: it says "these are the types I
-// offer", in the sender's own voice. A type pointing at an instance —
-// `_airplay._tcp.local → Living Room._airplay._tcp.local` — says nothing
-// about who offers it, and devices really do announce each other's
-// instances, so that shape is logged and left to the SRV record, which names
-// the serving host and can be checked.
+// Two shapes speak in the sender's own voice. An answer to the meta-query
+// says "these are the types I offer". An answer to a browse shoal itself
+// sent — `_ndi._tcp.local → STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local`
+// — says "I have one of those", because a responder answers a question only
+// for its own records. Both are credited by the same rules below.
+//
+// The same shape for a type nobody asked about proves nothing: devices
+// really do announce each other's instances, so that is logged and left to
+// the SRV record, which names the serving host and can be checked.
+//
+// Crediting an answer to our own browse is what makes the Dante and NDI
+// types in DefaultBrowse worth asking for. Plenty of responders — embedded
+// AV gear especially — answer a browse with the PTR alone and leave out the
+// SRV and address records that a Mac or an avahi host throws in, and
+// waiting for those meant the answer to the question shoal had just asked
+// was thrown away.
 func (l *Listener) service(key string, rec Record, wire []byte, emit engine.Emit, report engine.Report) {
-	if rec.Name != MetaQuery {
+	name, evidence, ok := l.inItsOwnVoice(rec)
+	if !ok {
 		if service, ok := ServiceType(rec.Name); ok {
 			report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-				Message: fmt.Sprintf("%s announced the instance %s of %s; waiting for an SRV record to say which host serves it", key, rec.PTR, service)})
+				Message: fmt.Sprintf("%s announced the instance %s of %s, a type nobody asked about; waiting for an SRV record to say which host serves it", key, rec.PTR, service)})
 		}
-		return
-	}
-	name := trimSuffix(rec.PTR)
-	if name == "" {
 		return
 	}
 	if reason, relaying := l.relay[key]; relaying {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-			Message: fmt.Sprintf("%s lists %s among the service types on offer, but it is relaying another network's mDNS (%s), so the list is not its own", key, name, reason)})
+			Message: fmt.Sprintf("%s offers %s, but it is relaying another network's mDNS (%s), so the service is not its own", key, name, reason)})
 		return
 	}
 	if !l.speaksForItself(key) {
-		l.hold(key, name, rec, wire, report)
+		l.hold(key, name, evidence, rec, wire, report)
 		return
 	}
 	emit(model.Observation{
 		Source:    Source,
 		DeviceKey: key, Field: model.FieldService, Value: name,
 		Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
-		Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers (mDNS TTL %s)", MetaQuery, name, rec.TTL),
+		Method: fmt.Sprintf("%s (mDNS TTL %s)", evidence, rec.TTL),
 	})
 }
 
-// hold keeps a listed service type until its sender names its own address.
-func (l *Listener) hold(key, name string, rec Record, wire []byte, report engine.Report) {
+// inItsOwnVoice reports whether a PTR record is the sender speaking about
+// what it offers, and if so which service type and by what evidence.
+func (l *Listener) inItsOwnVoice(rec Record) (name, evidence string, ok bool) {
+	if rec.Name == MetaQuery {
+		name = trimSuffix(rec.PTR)
+		if name == "" {
+			return "", "", false
+		}
+		return name, fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers", MetaQuery, name), true
+	}
+	service, ok := ServiceType(rec.Name)
+	// The record must be owned by the service type itself, which is what an
+	// answer to a browse looks like; a PTR owned by an instance is somebody
+	// describing one particular instance, not a device answering for a type.
+	if !ok || !l.asked[service] || trimSuffix(rec.Name) != service {
+		return "", "", false
+	}
+	return service, fmt.Sprintf("mDNS PTR under %s: the device answered shoal's browse for %s with %s, an instance of its own",
+		rec.Name, service, rec.PTR), true
+}
+
+// hold keeps a service type until its sender names its own address.
+func (l *Listener) hold(key, name, evidence string, rec Record, wire []byte, report engine.Report) {
 	if l.held[key] == nil {
 		l.held[key] = make(map[string]heldService)
 	}
 	if _, already := l.held[key][name]; already {
 		return
 	}
-	l.held[key][name] = heldService{rec: rec, wire: wire, at: time.Now()}
+	l.held[key][name] = heldService{rec: rec, wire: wire, at: time.Now(), evidence: evidence}
 	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-		Message: fmt.Sprintf("%s lists %s among the service types on offer without naming its own address; holding it %s in case this sender turns out to be relaying another network's mDNS", key, name, l.opts.Settle)})
+		Message: fmt.Sprintf("%s offers %s but has not named its own address; holding it %s in case this sender turns out to be relaying another network's mDNS", key, name, l.opts.Settle)})
 }
 
 // checkRelay looks for the one thing that gives a relay away: an address
@@ -577,12 +636,21 @@ func (l *Listener) hold(key, name string, rec Record, wire []byte, report engine
 // reflector carries whole other subnets. Only A records are read, because
 // an IPv6 address cannot be compared against the IPv4 address the message
 // arrived from.
+//
+// A name the sender has already claimed is not somebody else's, whatever
+// network the address is on. Devices are multi-homed: a Dante interface has
+// a redundant second port on its own network, laptops carry VPN addresses,
+// and a responder that lists every address its host answers to was being
+// read as a repeater and losing every service it offered.
 func (l *Listener) checkRelay(key string, src net.IP, resp Response, report engine.Report) {
 	if _, already := l.relay[key]; already {
 		return
 	}
 	for _, rec := range resp.Records {
-		if rec.Type != dnsmessage.TypeA || !l.foreign(rec.Addr, src) {
+		if rec.Type != dnsmessage.TypeA || !hostRecord(rec.Name) || l.owns(key, rec.Name) {
+			continue
+		}
+		if !l.foreign(rec.Addr, src) {
 			continue
 		}
 		reason := fmt.Sprintf("it carried %s %s = %s, an address on another network", rec.Section, rec.Name, rec.Addr)
@@ -650,13 +718,40 @@ func (l *Listener) releaseSRV(key string, emit engine.Emit, report engine.Report
 	l.srv[key] = kept
 }
 
+// hostRecord reports whether a name is the kind mDNS gives a host: a single
+// label under .local (RFC 6762 §3). Only an address record for one of those
+// is another machine's, and so evidence that the sender speaks for it.
+//
+// Plenty of address records are owned by something that is not a host, and
+// reading them as one was calling working AV gear a repeater. Dante
+// registers a record per multicast flow, named for the reversed flow
+// address, whose address is the transmitter — on the Dante network, which is
+// not the one being scanned. A device announcing where its audio comes from
+// is not forwarding another network's mDNS, and it was losing every service
+// it offered for saying so.
+//
+// A host whose own name contains a dot is read as several labels and so is
+// not counted; that direction is the safe one, since it means a relay goes
+// unnoticed rather than a device losing what it offers.
+func hostRecord(name string) bool {
+	rest, ok := strings.CutSuffix(strings.ToLower(trimDot(name)), ".local")
+	if !ok || rest == "" {
+		return false
+	}
+	return !strings.Contains(rest, ".")
+}
+
 // foreign reports whether ip belongs to something other than the sender and
 // to a network other than the one being scanned.
+// With no subnet known there is nothing to judge an address against, so
+// nothing is called foreign: the cost of guessing wrong here is a device
+// losing every service it offers, which is worse than a relay going
+// unnoticed in a run that could not even name the interface.
 func (l *Listener) foreign(ip, src net.IP) bool {
 	if ip == nil || ip.Equal(src) || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
 		return false
 	}
-	return l.subnet == nil || !l.subnet.Contains(ip)
+	return l.subnet != nil && !l.subnet.Contains(ip)
 }
 
 // release credits what a sender listed before it named its own address.
@@ -716,7 +811,7 @@ func (l *Listener) creditHeld(key string, now time.Time, why string, emit engine
 		emit(model.Observation{
 			DeviceKey: key, Field: model.FieldService, Value: name, Source: Source,
 			Confidence: Confidence, Raw: h.wire, TTL: max(h.rec.TTL, minTTL),
-			Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers, %s (mDNS TTL %s)", MetaQuery, name, why, h.rec.TTL),
+			Method: fmt.Sprintf("%s, %s (mDNS TTL %s)", h.evidence, why, h.rec.TTL),
 		})
 	}
 	if len(held) == 0 {

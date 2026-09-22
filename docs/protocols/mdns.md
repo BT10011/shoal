@@ -167,6 +167,21 @@ a name the sender has published an address record for. The listener remembers
 those names for the length of the run, so an address in one packet ties up a
 service in the next.
 
+**With one exception: a type shoal asked for itself.** The browse names the
+Dante and NDI types outright (`DefaultBrowse`), and an answer to one of those
+questions is not an overheard announcement — it is a responder answering for
+its own records, which is the only thing a responder is allowed to answer
+for. Treating those answers like relayed gossip meant shoal asked a question
+and threw the reply away: plenty of responders, embedded AV gear most of
+all, answer a browse with the `PTR` alone and leave out the `SRV` and address
+records that a Mac or an Avahi host throws in for free. That is the whole
+point of asking for `_netaudio-cmc._udp` and `_ndi._tcp` by name, and it was
+being lost. A `PTR` owned by a type in the browse list is now credited by the
+same rules as a service-type listing below — relay check, settle window and
+all — and the method says the device answered a browse rather than listed
+itself. A type nobody asked about still waits for its `SRV`, so the
+`_companion-link` case above is unchanged.
+
 **Either order works.** Responders split long answers across messages, and
 nothing requires the address to come first. An `SRV` whose target the sender
 has not claimed *yet* is held rather than discarded, and credited the moment
@@ -201,8 +216,9 @@ So the list is now taken at its word, per RFC 6763 §9 — an answer under
 `_services._dns-sd._udp.local` is the responder describing **itself** — and
 the relay is caught by what actually distinguishes it:
 
-> A sender is a relay once it carries an address record for an address that
-> is neither its own nor on the network being scanned.
+> A sender is a relay once it carries an address record **for another host's
+> name** at an address that is neither its own nor on the network being
+> scanned.
 
 That is something a device speaking only for itself never does, and a
 repeater does constantly: the same gateway was later seen carrying an `A`
@@ -214,6 +230,26 @@ Only `A` records are read for this, because an IPv6 address cannot be
 compared against the IPv4 address the message arrived from, and addresses
 that are loopback, unspecified or link-local are ignored — a self-assigned
 `169.254.x.x` is the `rogue` probe's business, not evidence of relaying.
+
+Two kinds of record look foreign and are not, and reading either as relaying
+cost working AV gear every service it offered:
+
+- **A name the sender has already claimed.** Devices are multi-homed. A Dante
+  interface has a redundant second port on its own network, a laptop carries
+  a VPN address, a DSP has a management port. A responder listing every
+  address its host answers to is describing itself, so an address record for
+  a name the sender has claimed is never relay evidence, whatever network the
+  address is on.
+- **A record whose owner is not a host name.** In mDNS a host is a single
+  label under `.local` (RFC 6762 §3). Dante registers a record per multicast
+  flow, named for the reversed flow address
+  (`10.0.255.239.in-addr.local`, for a flow on 239.255.0.10), whose address is the *transmitter* — on
+  the Dante network, which is not the one being scanned. A device saying
+  where its audio comes from is not forwarding another network's mDNS. Only
+  single-label `.local` names count, which means a host whose own name
+  contains a dot goes unnoticed as a relay; that is the safe direction to
+  err, since the cost is a missed relay rather than a device losing what it
+  offers.
 
 A list is held for a short **settle** window (`DefaultSettle`, two seconds)
 before it is credited, so that a relay has a chance to give itself away
@@ -280,7 +316,25 @@ this was heard like everything else.
 One wrinkle worth knowing: asked over loopback, the responder gives its
 address records as `127.0.0.1`, which is not the interface address, so an
 `SRV` learned this way is held rather than credited. The service-type list
-covers it, which is why both are asked for.
+and the browse answers cover it, which is why all of them are asked for.
+
+**The question has to reach the responder, and for a while it did not.** Go
+quietly substitutes the wildcard address for a multicast one when a socket is
+bound (`net.listenDatagram`, so that one listener can join several groups),
+so asking to bind `224.0.0.251:5353` gets a socket on `0.0.0.0:5353`. With
+`SO_REUSEPORT` set — which sharing the port with the system responder
+requires — that puts shoal in the same port-sharing group as
+avahi-daemon or mDNSResponder, and the kernel then hands **unicast**
+datagrams for port 5353 to whichever of them it picks. shoal was taking mDNS
+traffic addressed to the system responder, including its own question to the
+responder on this host: the question went out, shoal's own listener read it,
+the responder never saw it, and the machine shoal runs on reported no
+services at all. The socket is therefore bound by hand (`bindGroup`), so only
+multicast arrives on it and unicast stays with the responder it was addressed
+to. The same wildcard socket was also picking up the responder's
+announcements on the loopback interface and writing them down as a device
+called `127.0.0.1`; loopback senders are now left alone, since this machine
+is asked directly instead.
 
 ## Running it
 
@@ -308,5 +362,7 @@ terminal will stir up traffic to watch.
   scan and again only as a name nears expiry, which is gentler than a
   continuous querier; worth adding if renewal ever runs at scale.
 - **No Windows.** Sharing port 5353 uses `SO_REUSEPORT`, which Windows lacks,
-  and the rest of shoal needs raw sockets it does not offer without Npcap.
-  Linux, macOS and the BSDs build and work.
+  and Windows cannot bind a multicast address either, so the listener would
+  have to fall back to the wildcard socket described above. The rest of shoal
+  needs raw sockets Windows does not offer without Npcap. Linux, macOS and
+  the BSDs build and work.
