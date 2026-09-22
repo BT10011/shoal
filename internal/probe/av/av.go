@@ -26,6 +26,23 @@ const (
 // audio routing, _netaudio-cmc._udp for control and monitoring, and more.
 const DantePrefix = "_netaudio-"
 
+// dantePrefixes are the beginnings of every service type Dante registers.
+// Besides the _netaudio- family, a device announces _dante-safe._udp when
+// it has fallen back to safe mode and _dante-upgr._udp while it is being
+// upgraded — states a device is very much still a Dante device in, and the
+// ones an engineer is most likely to be hunting for.
+var dantePrefixes = []string{DantePrefix, "_dante-"}
+
+// isDante reports whether a service type is one Dante registers.
+func isDante(service string) bool {
+	for _, p := range dantePrefixes {
+		if strings.HasPrefix(service, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // NDIService is the type NDI devices announce so they can be found.
 const NDIService = "_ndi._tcp"
 
@@ -49,7 +66,7 @@ func (e *Enricher) Enrich(_ context.Context, d model.DeviceSnapshot, emit engine
 	var dante, ndi []string
 	for _, o := range d.Live(model.FieldService, now) {
 		switch {
-		case strings.HasPrefix(o.Value, DantePrefix):
+		case isDante(o.Value):
 			dante = append(dante, fmt.Sprintf("announces %s over mDNS (learned by %s)", o.Value, o.Source))
 		case o.Value == NDIService:
 			ndi = append(ndi, fmt.Sprintf("announces %s over mDNS (learned by %s)", o.Value, o.Source))

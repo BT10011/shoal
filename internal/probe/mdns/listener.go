@@ -36,23 +36,107 @@ type ListenerOptions struct {
 	Browse []string
 	// Send puts a question on the wire: SendFrom5353.
 	Send func(ctx context.Context, iface netif.Interface, group *net.UDPAddr, query []byte) error
+	// Settle overrides how long a listed service type waits to be credited;
+	// zero means DefaultSettle. Tests set it to skip the wait.
+	Settle time.Duration
+	// AskLocal asks this machine's own responder what it offers; nil means
+	// AskLocalResponder. See askLocal for why it has to be asked at all.
+	AskLocal func(ctx context.Context, questions []string, wait time.Duration) ([][]byte, error)
+	// LocalWait bounds how long that answer is waited for; zero means
+	// DefaultLocalWait.
+	LocalWait time.Duration
 }
 
 // DefaultBrowse is the question shoal asks the network at the start of each
 // scan: every service type on offer (RFC 6763 §9), and Dante's and NDI's
 // own types, since not every embedded responder answers the enumeration.
 // Everything that answers is credited by the same rules as an announcement.
-var DefaultBrowse = []string{MetaQuery, "_netaudio-arc._udp.local", "_ndi._tcp.local"}
+//
+// Two Dante types are asked for, not one. `_netaudio-arc._udp` is audio
+// routing control, and `_netaudio-cmc._udp` is the control and monitoring
+// channel that every Dante device runs — a device answering only the
+// latter would be missed by a browse that asked only for routing.
+var DefaultBrowse = []string{
+	MetaQuery,
+	"_netaudio-cmc._udp.local",
+	"_netaudio-arc._udp.local",
+	"_ndi._tcp.local",
+}
 
 // browseAgain is when the question is repeated: RFC 6762 §5.2 asks that
 // the first two queries of a browse be at least a second apart, since a
 // responder may miss the first.
 const browseAgain = time.Second
 
+// LocalResponder is where this machine's own mDNS responder is asked
+// directly. See askLocal.
+const LocalResponder = "127.0.0.1:5353"
+
+// DefaultLocalWait bounds how long shoal waits for that answer. It comes
+// back off loopback, so this is generous.
+const DefaultLocalWait = 1500 * time.Millisecond
+
+// DefaultSettle is how long a listed service type waits before it is credited to
+// the sender that listed it. A device that names its own address is
+// credited at once; this is the pause for everything else, and it is there
+// to give a relay time to give itself away, since a relay is recognised by
+// the foreign addresses it carries rather than by any one message.
+const DefaultSettle = 2 * time.Second
+
+// AskLocalResponder asks this machine's own mDNS responder, by unicast, for
+// PTR records of each name, and returns the messages it sends back.
+//
+// This exists because a responder does not answer multicast queries that
+// came from its own host: mDNSResponder and Avahi both ignore their own
+// machine's questions, so shoal listening on the group learns the services
+// of every device except the one it is running on. That was found with NDI
+// Scan Converter advertising happily on a laptop while shoal, on the same
+// laptop, never saw it. A unicast question to 127.0.0.1:5353 is answered at
+// once, so this is the one device shoal asks directly instead of
+// overhearing. Nothing extra reaches the network: it goes over loopback.
+//
+// The query carries a random ID and answers that do not echo it are
+// dropped, the same rule the rdns probe follows.
+func AskLocalResponder(ctx context.Context, questions []string, wait time.Duration) ([][]byte, error) {
+	id := randomID()
+	query, err := browseQuery(id, questions...)
+	if err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "udp4", LocalResponder)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach this machine's own responder on %s: %w", LocalResponder, err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(query); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(wait)
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return nil, err
+	}
+	var out [][]byte
+	buf := make([]byte, 9000)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return out, nil // the deadline: however much it said by then
+		}
+		wire := append([]byte(nil), buf[:n]...)
+		if resp, err := ParseResponse(wire); err == nil && resp.ID == id {
+			out = append(out, wire)
+		}
+	}
+}
+
+
 // BrowseQuery builds one mDNS message asking for PTR records of each name,
 // ID 0 as multicast questions carry.
-func BrowseQuery(names ...string) ([]byte, error) {
-	msg := dnsmessage.Message{}
+func BrowseQuery(names ...string) ([]byte, error) { return browseQuery(0, names...) }
+
+func browseQuery(id uint16, names ...string) ([]byte, error) {
+	msg := dnsmessage.Message{Header: dnsmessage.Header{ID: id}}
 	for _, n := range names {
 		name, err := dnsmessage.NewName(strings.TrimSuffix(n, ".") + ".")
 		if err != nil {
@@ -73,6 +157,15 @@ func (o ListenerOptions) withDefaults() ListenerOptions {
 	if o.Send == nil {
 		o.Send = SendFrom5353
 	}
+	if o.Settle == 0 {
+		o.Settle = DefaultSettle
+	}
+	if o.AskLocal == nil {
+		o.AskLocal = AskLocalResponder
+	}
+	if o.LocalWait == 0 {
+		o.LocalWait = DefaultLocalWait
+	}
 	return o
 }
 
@@ -89,22 +182,48 @@ type Listener struct {
 	// laptop's instance — and crediting the sender would be wrong.
 	own map[string]map[string]bool
 
-	// held keeps the service types a sender listed before it had named its
-	// own address, to be credited once it does. A router running an mDNS
-	// repeater or reflector answers "which services are here?" for devices
-	// on other networks, and its answers never name the router's own
-	// address, so what it relays is never credited to it.
+	// held keeps the service types a sender has listed until they are
+	// credited: at once if the sender names its own address, otherwise
+	// after settle, and never if the sender is found to be a relay.
 	held map[string]map[string]heldService
+
+	// srv keeps the services a sender has announced but not yet tied to
+	// itself, because the SRV naming the serving host arrived before the
+	// address record that proves the host is the sender. mDNS responders
+	// split long answers across messages, and either order is legal, so a
+	// service announced the wrong way round used to be lost.
+	srv map[string][]heldSRV
+
+	// relay records the senders found to be speaking for somebody else,
+	// against the reason they gave themselves away. A router running an
+	// mDNS repeater or reflector answers "which services are here?" for
+	// devices on other networks, and crediting it with their services
+	// would put a whole VLAN's worth of equipment on the router.
+	relay map[string]string
+
+	// subnet is the scanning interface's network, which is what makes an
+	// address in a relayed record recognisably foreign.
+	subnet *net.IPNet
 }
 
 type heldService struct {
 	rec  Record
 	wire []byte
+	at   time.Time // when it was heard, so settle can be measured
+}
+
+// heldSRV is a service waiting for its serving host to be tied to the sender.
+type heldSRV struct {
+	service string
+	rec     Record
+	wire    []byte
 }
 
 // NewListener creates the probe.
 func NewListener(opts ListenerOptions) *Listener {
-	return &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool), held: make(map[string]map[string]heldService)}
+	return &Listener{opts: opts.withDefaults(), own: make(map[string]map[string]bool),
+		held: make(map[string]map[string]heldService), relay: make(map[string]string),
+		srv: make(map[string][]heldSRV)}
 }
 
 // speaksForItself reports whether a sender has named its own address, by
@@ -209,6 +328,7 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 		return err
 	}
 	defer conn.Close()
+	l.subnet = iface.Subnet
 
 	var query []byte
 	if len(l.opts.Browse) > 0 {
@@ -221,6 +341,12 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 		report(engine.ProbeEvent{Kind: engine.KindInfo,
 			Message: fmt.Sprintf("listening on %s via %s, sharing the port with the system responder; nothing is sent", l.opts.Group, iface.Name)})
 	}
+	// This machine's own responder, asked directly because it will not
+	// answer its own multicast. The answers come back on a channel so that
+	// only this goroutine ever touches the listener's state.
+	local := l.startLocalAsk(ctx, iface, report)
+	localFrom := &net.UDPAddr{IP: iface.IP, Port: Port}
+
 	asked := 0
 	nextAsk := time.Now()
 
@@ -228,6 +354,7 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 	buf := make([]byte, 9000)
 	for {
 		if err := ctx.Err(); err != nil {
+			l.creditSettled(time.Time{}, emit, report) // whatever is left and not a relay
 			l.reportUncredited(report)
 			report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("stopped listening after %d messages", heard)})
 			return nil
@@ -247,25 +374,78 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 		if err := conn.SetReadDeadline(time.Now().Add(readSlice)); err != nil {
 			return err
 		}
+		l.creditSettled(time.Now(), emit, report)
+		select {
+		case wire, ok := <-local:
+			if !ok {
+				local = nil // drained; a nil channel never fires again
+				break
+			}
+			heard++
+			l.overheard(wire, localFrom, true, emit, report)
+		default:
+		}
 		n, from, err := conn.ReadFrom(buf)
 		if err != nil {
 			continue // a deadline, so the loop can check for cancellation
 		}
 		heard++
 		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: heard, Message: "listening"})
-		l.overheard(append([]byte(nil), buf[:n]...), from, emit, report)
+		l.overheard(append([]byte(nil), buf[:n]...), from, false, emit, report)
 	}
+}
+
+// startLocalAsk asks this machine's own responder in the background and
+// hands the answers back on a channel. Nothing but reporting happens in the
+// goroutine, so the listener's own bookkeeping stays single-threaded.
+func (l *Listener) startLocalAsk(ctx context.Context, iface netif.Interface, report engine.Report) <-chan []byte {
+	out := make(chan []byte, 16)
+	if len(l.opts.Browse) == 0 || iface.IP == nil {
+		close(out)
+		return out
+	}
+	go func() {
+		defer close(out)
+		report(engine.ProbeEvent{Kind: engine.KindSent, Target: LocalResponder,
+			Message: fmt.Sprintf("PTR? %s → %s (unicast to this machine's own responder, which ignores multicast questions from its own host, so its services would otherwise never be seen)",
+				strings.Join(l.opts.Browse, ", "), LocalResponder)})
+		msgs, err := l.opts.AskLocal(ctx, l.opts.Browse, l.opts.LocalWait)
+		if err != nil {
+			report(engine.ProbeEvent{Kind: engine.KindInfo, Target: LocalResponder,
+				Message: fmt.Sprintf("could not ask this machine's own responder (%v); the services of the machine shoal is running on will be missing unless something else asks for them", err)})
+			return
+		}
+		if len(msgs) == 0 {
+			report(engine.ProbeEvent{Kind: engine.KindInfo, Target: LocalResponder,
+				Message: "this machine's own responder said nothing; either nothing is registered here or no responder is running"})
+			return
+		}
+		for _, m := range msgs {
+			select {
+			case out <- m:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }
 
 // overheard turns one message into facts about whoever sent it. Everything is
 // attributed to the sender's address: a responder speaks only for itself, and
 // the store links that address to a MAC once ARP has found one.
-func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, report engine.Report) {
+func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine.Emit, report engine.Report) {
 	addr, ok := from.(*net.UDPAddr)
 	if !ok {
 		return
 	}
 	key := addr.IP.String()
+	how := fmt.Sprintf("sent multicast DNS from this address to %s, overheard without asking", l.opts.Group)
+	heardIt := "announced"
+	if asked {
+		how = fmt.Sprintf("answered a direct question to this machine's own responder on %s; a responder ignores multicast questions from its own host, so this one device is asked rather than overheard", LocalResponder)
+		heardIt = "answered"
+	}
 
 	resp, err := ParseResponse(wire)
 	if err != nil {
@@ -279,14 +459,17 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 			Message: fmt.Sprintf("%s asked about %s", key, resp.Question)})
 	} else {
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("%s announced: %s", key, resp.Summary())})
+			Message: fmt.Sprintf("%s %s: %s", key, heardIt, resp.Summary())})
 	}
 
 	emit(model.Observation{
 		Source:    Source,
 		DeviceKey: key, Field: model.FieldIP, Value: key, Confidence: 0.9,
-		Method: fmt.Sprintf("sent multicast DNS from this address to %s, overheard without asking", l.opts.Group),
+		Method: how,
 	})
+
+	// Before anything is credited: is this sender speaking for somebody else?
+	l.checkRelay(key, addr.IP, resp, report)
 
 	// Addresses first: what a device says about its own name decides which
 	// services can be credited to it below. Answering for its own reverse
@@ -311,6 +494,8 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 		})
 	}
 
+	l.releaseSRV(key, emit, report)
+
 	if l.speaksForItself(key) {
 		l.release(key, emit, report)
 	}
@@ -328,18 +513,10 @@ func (l *Listener) overheard(wire []byte, from net.Addr, emit engine.Emit, repor
 			// when that host is one the sender has claimed is the service
 			// the sender's own.
 			if !l.owns(key, rec.SRV.Target) {
-				report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-					Message: fmt.Sprintf("%s announced %s served by %s, which it has not claimed as its own name; not crediting it with the service",
-						key, rec.Name, rec.SRV.Target)})
+				l.holdSRV(key, service, rec, wire, report)
 				continue
 			}
-			emit(model.Observation{
-				Source:    Source,
-				DeviceKey: key, Field: model.FieldService, Value: service,
-				Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
-				Method: fmt.Sprintf("mDNS SRV record %s = %s:%d, and %s announced %s as its own name (mDNS TTL %s)",
-					rec.Name, rec.SRV.Target, rec.SRV.Port, key, rec.SRV.Target, rec.TTL),
-			})
+			emit(l.srvObservation(key, service, rec, wire, "announced %s as its own name"))
 		}
 	}
 }
@@ -364,6 +541,11 @@ func (l *Listener) service(key string, rec Record, wire []byte, emit engine.Emit
 	if name == "" {
 		return
 	}
+	if reason, relaying := l.relay[key]; relaying {
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+			Message: fmt.Sprintf("%s lists %s among the service types on offer, but it is relaying another network's mDNS (%s), so the list is not its own", key, name, reason)})
+		return
+	}
 	if !l.speaksForItself(key) {
 		l.hold(key, name, rec, wire, report)
 		return
@@ -384,30 +566,104 @@ func (l *Listener) hold(key, name string, rec Record, wire []byte, report engine
 	if _, already := l.held[key][name]; already {
 		return
 	}
-	l.held[key][name] = heldService{rec: rec, wire: wire}
+	l.held[key][name] = heldService{rec: rec, wire: wire, at: time.Now()}
 	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-		Message: fmt.Sprintf("%s lists %s among the service types on offer, but has not named its own address; holding it until it does, since a router relaying another network's mDNS lists types it does not offer itself", key, name)})
+		Message: fmt.Sprintf("%s lists %s among the service types on offer without naming its own address; holding it %s in case this sender turns out to be relaying another network's mDNS", key, name, l.opts.Settle)})
+}
+
+// checkRelay looks for the one thing that gives a relay away: an address
+// record for somebody else's address, on a network that is not this one. A
+// device speaks for itself and carries only its own address; a repeater or
+// reflector carries whole other subnets. Only A records are read, because
+// an IPv6 address cannot be compared against the IPv4 address the message
+// arrived from.
+func (l *Listener) checkRelay(key string, src net.IP, resp Response, report engine.Report) {
+	if _, already := l.relay[key]; already {
+		return
+	}
+	for _, rec := range resp.Records {
+		if rec.Type != dnsmessage.TypeA || !l.foreign(rec.Addr, src) {
+			continue
+		}
+		reason := fmt.Sprintf("it carried %s %s = %s, an address on another network", rec.Section, rec.Name, rec.Addr)
+		l.relay[key] = reason
+		held := l.held[key]
+		delete(l.held, key)
+		delete(l.srv, key)
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+			Message: fmt.Sprintf("%s is relaying another network's mDNS: %s. Nothing it lists is credited to it, since a repeater or reflector answers for devices it only forwards for; %d service types it had listed are dropped", key, reason, len(held))})
+		return
+	}
+}
+
+// srvObservation builds the service fact an SRV record proves, with why the
+// serving host counts as the sender's in the method.
+func (l *Listener) srvObservation(key, service string, rec Record, wire []byte, why string) model.Observation {
+	return model.Observation{
+		Source:    Source,
+		DeviceKey: key, Field: model.FieldService, Value: service,
+		Confidence: Confidence, Raw: wire, TTL: max(rec.TTL, minTTL),
+		Method: fmt.Sprintf("mDNS SRV record %s = %s:%d, and %s "+why+" (mDNS TTL %s)",
+			rec.Name, rec.SRV.Target, rec.SRV.Port, key, rec.SRV.Target, rec.TTL),
+	}
+}
+
+// holdSRV keeps a service whose serving host the sender has not claimed yet.
+// The address record may simply be in the next message: responders split
+// long answers, and nothing says the address must come first.
+func (l *Listener) holdSRV(key, service string, rec Record, wire []byte, report engine.Report) {
+	if _, relaying := l.relay[key]; relaying {
+		return
+	}
+	for _, h := range l.srv[key] {
+		if h.service == service && h.rec.SRV.Target == rec.SRV.Target {
+			return
+		}
+	}
+	l.srv[key] = append(l.srv[key], heldSRV{service: service, rec: rec, wire: wire})
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+		Message: fmt.Sprintf("%s announced %s served by %s, a name it has not claimed as its own; holding the service until it announces an address for that name",
+			key, rec.Name, rec.SRV.Target)})
+}
+
+// releaseSRV credits the held services whose serving host the sender has
+// since claimed as its own.
+func (l *Listener) releaseSRV(key string, emit engine.Emit, report engine.Report) {
+	held := l.srv[key]
+	if len(held) == 0 {
+		return
+	}
+	kept := held[:0:0]
+	for _, h := range held {
+		if !l.owns(key, h.rec.SRV.Target) {
+			kept = append(kept, h)
+			continue
+		}
+		emit(l.srvObservation(key, h.service, h.rec, h.wire, "has since announced %s as its own name"))
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+			Message: fmt.Sprintf("%s has now claimed %s, so the %s it announced earlier is its own", key, h.rec.SRV.Target, h.service)})
+	}
+	if len(kept) == 0 {
+		delete(l.srv, key)
+		return
+	}
+	l.srv[key] = kept
+}
+
+// foreign reports whether ip belongs to something other than the sender and
+// to a network other than the one being scanned.
+func (l *Listener) foreign(ip, src net.IP) bool {
+	if ip == nil || ip.Equal(src) || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+		return false
+	}
+	return l.subnet == nil || !l.subnet.Contains(ip)
 }
 
 // release credits what a sender listed before it named its own address.
 func (l *Listener) release(key string, emit engine.Emit, report engine.Report) {
-	held := l.held[key]
-	if len(held) == 0 {
+	names := l.creditHeld(key, time.Time{}, "credited once it had named its own address", emit)
+	if len(names) == 0 {
 		return
-	}
-	delete(l.held, key)
-	names := make([]string, 0, len(held))
-	for name := range held {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		h := held[name]
-		emit(model.Observation{
-			DeviceKey: key, Field: model.FieldService, Value: name, Source: Source,
-			Confidence: Confidence, Raw: h.wire, TTL: max(h.rec.TTL, minTTL),
-			Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers, credited once it had named its own address (mDNS TTL %s)", MetaQuery, name, h.rec.TTL),
-		})
 	}
 	what := fmt.Sprintf("the %d service types it listed earlier are its own", len(names))
 	if len(names) == 1 {
@@ -417,22 +673,69 @@ func (l *Listener) release(key string, emit engine.Emit, report engine.Report) {
 		Message: fmt.Sprintf("%s has named its own address, so %s: %s", key, what, strings.Join(names, ", "))})
 }
 
-// reportUncredited says, when listening stops, which senders listed
-// services but never spoke for themselves: most likely relays.
-func (l *Listener) reportUncredited(report engine.Report) {
+// creditSettled credits the lists that have waited out settle without their
+// sender turning out to be a relay. A zero now credits everything left,
+// which is what happens when listening stops.
+func (l *Listener) creditSettled(now time.Time, emit engine.Emit, report engine.Report) {
 	keys := make([]string, 0, len(l.held))
 	for key := range l.held {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		names := make([]string, 0, len(l.held[key]))
-		for name := range l.held[key] {
+		names := l.creditHeld(key, now, fmt.Sprintf("credited after %s with no sign that this sender was relaying another network", l.opts.Settle), emit)
+		if len(names) == 0 {
+			continue
+		}
+		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
+			Message: fmt.Sprintf("%s listed %s and did not carry any other network's addresses, so the list is its own", key, strings.Join(names, ", "))})
+	}
+}
+
+// creditHeld emits the service types key is holding, oldest first by name.
+// Entries younger than settle are kept unless now is zero. A relay is never
+// credited. It returns the names it emitted.
+func (l *Listener) creditHeld(key string, now time.Time, why string, emit engine.Emit) []string {
+	if _, relaying := l.relay[key]; relaying {
+		return nil
+	}
+	held := l.held[key]
+	if len(held) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(held))
+	for name, h := range held {
+		if now.IsZero() || now.Sub(h.at) >= l.opts.Settle {
 			names = append(names, name)
 		}
-		sort.Strings(names)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		h := held[name]
+		delete(held, name)
+		emit(model.Observation{
+			DeviceKey: key, Field: model.FieldService, Value: name, Source: Source,
+			Confidence: Confidence, Raw: h.wire, TTL: max(h.rec.TTL, minTTL),
+			Method: fmt.Sprintf("mDNS PTR under %s: the device lists %s among the service types it offers, %s (mDNS TTL %s)", MetaQuery, name, why, h.rec.TTL),
+		})
+	}
+	if len(held) == 0 {
+		delete(l.held, key)
+	}
+	return names
+}
+
+// reportUncredited says, when listening stops, which senders were found to
+// be relaying, so a missing service is explained rather than absent.
+func (l *Listener) reportUncredited(report engine.Report) {
+	keys := make([]string, 0, len(l.relay))
+	for key := range l.relay {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
-			Message: fmt.Sprintf("not credited: %s listed %s but never named its own address while shoal listened. A router relaying another network's mDNS (a repeater or reflector) behaves like this, and its list belongs to the devices behind it", key, strings.Join(names, ", "))})
+			Message: fmt.Sprintf("not credited: %s was relaying another network's mDNS (%s), so the service types it listed belong to the devices behind it, not to it", key, l.relay[key])})
 	}
 }
 

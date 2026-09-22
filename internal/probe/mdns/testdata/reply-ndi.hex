@@ -1,0 +1,44 @@
+# An NDI source answering a browse for _ndi._tcp.local, in the shape that
+# used to be thrown away whole.
+#
+# The point of this fixture is the instance label:
+#
+#   STAGE-MBP.LOCAL (Scan Converter)
+#
+# One label, 32 bytes, holding a dot, spaces and parentheses. RFC 6763 §4.1.1
+# allows all of it: the service instance name is a single label of arbitrary
+# UTF-8, and the dot is text, not a separator. NDI builds the name from the
+# machine's hostname, which on a Mac ends ".LOCAL", so every NDI source on a
+# Mac looks like this.
+#
+# golang.org/x/net/dns/dnsmessage rejects any label containing a dot
+# (golang/go#56246), and its Unpack is all or nothing, so handing it this
+# message failed the lot - the A record below included. shoal decodes names
+# itself for exactly this reason; see ParseResponse.
+#
+#   answer     _ndi._tcp.local                             PTR ttl 120  STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local
+#   additional STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local SRV ttl 120  stage-mbp.local:5961
+#   additional STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local TXT ttl 120  groups=public
+#   additional stage-mbp.local                              A   ttl 120  192.168.1.42
+#
+# Names are written out in full rather than compressed, which is legal and
+# keeps the fixture readable. Class 0x8001 is IN with the mDNS cache-flush
+# bit set. Every value here is invented.
+000084000000000100000003045f6e64
+69045f746370056c6f63616c00000c80
+010000007800322053544147452d4d42
+502e4c4f43414c20285363616e20436f
+6e76657274657229045f6e6469045f74
+6370056c6f63616c002053544147452d
+4d42502e4c4f43414c20285363616e20
+436f6e76657274657229045f6e646904
+5f746370056c6f63616c000021800100
+00007800170000000017490973746167
+652d6d6270056c6f63616c0020535441
+47452d4d42502e4c4f43414c20285363
+616e20436f6e76657274657229045f6e
+6469045f746370056c6f63616c000010
+800100000078000e0d67726f7570733d
+7075626c69630973746167652d6d6270
+056c6f63616c00000180010000007800
+04c0a8012a

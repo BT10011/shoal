@@ -49,17 +49,29 @@ func (c *listenConn) SetWriteDeadline(time.Time) error          { return nil }
 // of them. The listener stops as soon as the datagrams run out.
 func runListener(t *testing.T, packets ...packet) *recorder {
 	t.Helper()
+	return runListenerWith(t, ListenerOptions{}, packets...)
+}
+
+// testSubnet is the network the fake interface is on, so that an address
+// from anywhere else is recognisably another network's.
+const testSubnet = "192.168.1.0/24"
+
+func runListenerWith(t *testing.T, opts ListenerOptions, packets ...packet) *recorder {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	conn := &listenConn{queue: packets, onDrain: cancel}
 
-	l := NewListener(ListenerOptions{
-		Listen: func(context.Context, netif.Interface, *net.UDPAddr) (net.PacketConn, error) {
-			return conn, nil
-		},
-	})
+	opts.Listen = func(context.Context, netif.Interface, *net.UDPAddr) (net.PacketConn, error) {
+		return conn, nil
+	}
+	l := NewListener(opts)
+	_, subnet, err := net.ParseCIDR(testSubnet)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var rec recorder
-	if err := l.Run(ctx, netif.Interface{Name: "en0"}, rec.emit, rec.report); err != nil {
+	if err := l.Run(ctx, netif.Interface{Name: "en0", Subnet: subnet}, rec.emit, rec.report); err != nil {
 		t.Fatalf("Run = %v, want nil", err)
 	}
 	if !conn.closed {
@@ -179,35 +191,136 @@ func TestListenerHoldsAListUntilTheSenderNamesItself(t *testing.T) {
 		t.Errorf("Method = %q", o.Method)
 	}
 	info := strings.Join(rec.messages(engine.KindInfo), "\n")
-	for _, want := range []string{"holding it until it does", "has named its own address, so the 7 service types it listed earlier are its own"} {
+	for _, want := range []string{"holding it 2s in case", "has named its own address, so the 7 service types it listed earlier are its own"} {
 		if !strings.Contains(info, want) {
 			t.Errorf("log missing %q\n%s", want, info)
 		}
 	}
 }
 
+func TestListenerReadsAServiceInstanceNameContainingADot(t *testing.T) {
+	// The NDI case. A DNS-SD instance name is one label of arbitrary text,
+	// and NDI builds it from a Mac's hostname, so it ends up holding a dot.
+	// x/net's parser rejects that and fails the whole message, which is why
+	// shoal decodes names itself.
+	rec := runListener(t, packet{wire: loadHex(t, "reply-ndi.hex"), from: udpAddr(deviceIP)})
+
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_ndi._tcp" {
+		t.Fatalf("services = %v, want [_ndi._tcp]", got)
+	}
+	if errs := rec.messages(engine.KindError); len(errs) != 0 {
+		t.Errorf("the message should decode cleanly: %v", errs)
+	}
+	// The address record shares the message, and used to be lost with it.
+	if h, ok := rec.first(model.FieldHostname); !ok || h.Value != "stage-mbp.local" {
+		t.Errorf("hostname = %+v, want the A record in the same message", h)
+	}
+	o, _ := rec.first(model.FieldService)
+	if !strings.Contains(o.Method, "STAGE-MBP.LOCAL (Scan Converter)") {
+		t.Errorf("Method = %q, want the instance name shown as the device spells it", o.Method)
+	}
+}
+
+func TestParseResponseKeepsADotInsideALabel(t *testing.T) {
+	resp, err := ParseResponse(loadHex(t, "reply-ndi.hex"))
+	if err != nil {
+		t.Fatalf("ParseResponse = %v, want the message to decode", err)
+	}
+	if len(resp.Records) != 4 {
+		t.Fatalf("records = %d, want all four", len(resp.Records))
+	}
+	want := "STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local"
+	if got := resp.Records[0].PTR; got != want {
+		t.Errorf("PTR = %q, want %q", got, want)
+	}
+	if got, ok := ServiceType(want); !ok || got != "_ndi._tcp" {
+		t.Errorf("ServiceType(%q) = %q (%v), want _ndi._tcp", want, got, ok)
+	}
+	if got := resp.Records[1].SRV; got.Target != "stage-mbp.local" || got.Port != 5961 {
+		t.Errorf("SRV = %+v, want stage-mbp.local:5961", got)
+	}
+	if got := resp.Records[3].Addr.String(); got != deviceIP {
+		t.Errorf("A = %s, want %s: the record that used to be lost with the message", got, deviceIP)
+	}
+}
+
+func TestParseResponseRefusesAMessageItCannotTrust(t *testing.T) {
+	good := loadHex(t, "reply-ndi.hex")
+	for name, wire := range map[string][]byte{
+		"truncated mid-record": good[:len(good)-5],
+		"header only":          good[:12],
+		"empty":                nil,
+		"pointer past the end": {0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0xc0, 0xff},
+		"pointer to itself":    {0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0xc0, 0x0c},
+	} {
+		if _, err := ParseResponse(wire); err == nil {
+			t.Errorf("%s: ParseResponse = nil error, want a refusal", name)
+		}
+	}
+}
+
+func TestListenerCreditsAListEvenWhenTheSenderNeverNamesItself(t *testing.T) {
+	// The common case, and the one that used to be lost: a responder
+	// answering "which services are here?" sends PTR records and nothing
+	// else. There is no address record to wait for, so waiting for one
+	// meant almost no service was ever credited.
+	rec := runListenerWith(t, ListenerOptions{Settle: time.Nanosecond},
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr(deviceIP)},
+	)
+	if got := rec.values(model.FieldService); len(got) != 7 {
+		t.Fatalf("services = %v, want the 7 types the device listed", got)
+	}
+	o, _ := rec.first(model.FieldService)
+	if !strings.Contains(o.Method, MetaQuery) {
+		t.Errorf("Method = %q, want it to name the meta-query", o.Method)
+	}
+	if !strings.Contains(o.Method, "no sign that this sender was relaying") {
+		t.Errorf("Method = %q, want it to say why the list was taken as the sender's own", o.Method)
+	}
+}
+
 func TestListenerCreditsNothingToARelay(t *testing.T) {
-	// A router repeating another VLAN's answers: it lists types but never
-	// names its own address.
+	// A router repeating another VLAN's answers. It gives itself away by
+	// carrying an address record for a host on another network, which no
+	// device that speaks only for itself ever does.
+	foreign := announcement(t, aRecord(t, "faraway.local.", "192.0.2.77"))
 	rec := runListener(t,
 		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr("192.168.1.1")},
+		packet{wire: foreign, from: udpAddr("192.168.1.1")},
 		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr("192.168.1.1")},
 	)
 	if got := rec.values(model.FieldService); len(got) != 0 {
 		t.Fatalf("a relay must not be credited with what it relays: %v", got)
 	}
-	info := rec.messages(engine.KindInfo)
-	holding := 0
-	for _, m := range info {
-		if strings.Contains(m, "holding it until it does") {
-			holding++
+	if _, ok := rec.first(model.FieldHostname); ok {
+		t.Error("a relayed address record names somebody else, so it is no hostname for the sender")
+	}
+	info := strings.Join(rec.messages(engine.KindInfo), "\n")
+	for _, want := range []string{
+		"is relaying another network's mDNS",
+		"192.0.2.77, an address on another network",
+		"7 service types it had listed are dropped",
+		"not credited: 192.168.1.1 was relaying",
+	} {
+		if !strings.Contains(info, want) {
+			t.Errorf("log missing %q\n%s", want, info)
 		}
 	}
-	if holding != 7 {
-		t.Errorf("each type should be held and logged once, not per repeat: %d", holding)
-	}
-	if last := info[len(info)-2]; !strings.Contains(last, "not credited: 192.168.1.1 listed") || !strings.Contains(last, "A router relaying another network's mDNS") {
-		t.Errorf("when listening stops the relay should be named: %q", last)
+}
+
+func TestListenerTreatsASecondAddressOnThisSubnetAsItsOwnBusiness(t *testing.T) {
+	// Only an address on another network marks a relay: a device that also
+	// answers for a neighbour on this subnet is not forwarding a VLAN.
+	wire := announcement(t,
+		aRecord(t, "laptop.local.", deviceIP),
+		aRecord(t, "neighbour.local.", "192.168.1.58"),
+	)
+	rec := runListener(t,
+		packet{wire: wire, from: udpAddr(deviceIP)},
+		packet{wire: loadHex(t, "announce-services.hex"), from: udpAddr(deviceIP)},
+	)
+	if got := rec.values(model.FieldService); len(got) != 7 {
+		t.Fatalf("services = %v, want the list credited", got)
 	}
 }
 
@@ -393,8 +506,47 @@ func TestListenerRefusesASRVForAHostTheSenderHasNotClaimed(t *testing.T) {
 		t.Errorf("services = %v, want none: the sender is not the serving host", got)
 	}
 	info := strings.Join(rec.messages(engine.KindInfo), " ")
-	if !strings.Contains(info, "not crediting") {
+	if !strings.Contains(info, "holding the service until it announces an address for that name") {
 		t.Errorf("info events = %q, want the refusal explained", info)
+	}
+}
+
+func TestListenerCreditsAServiceWhoseAddressArrivesAfterTheSRV(t *testing.T) {
+	// Responders split long answers across messages, and nothing says the
+	// address record comes first. A Dante or NDI device announcing its
+	// service before its address used to lose the service outright.
+	srvFirst := announcement(t,
+		ptrRecord(t, "_netaudio-cmc._udp.local.", "mixer._netaudio-cmc._udp.local."),
+		srvRecord(t, "mixer._netaudio-cmc._udp.local.", "mixer.local.", 8800),
+	)
+	addrLater := announcement(t, aRecord(t, "mixer.local.", deviceIP))
+
+	rec := runListener(t,
+		packet{wire: srvFirst, from: udpAddr(deviceIP)},
+		packet{wire: addrLater, from: udpAddr(deviceIP)},
+	)
+	if got := rec.values(model.FieldService); len(got) != 1 || got[0] != "_netaudio-cmc._udp" {
+		t.Fatalf("services = %v, want [_netaudio-cmc._udp] once the address arrived", got)
+	}
+	o, _ := rec.first(model.FieldService)
+	if !strings.Contains(o.Method, "has since announced mixer.local as its own name") {
+		t.Errorf("Method = %q, want it to say the address settled it later", o.Method)
+	}
+}
+
+func TestListenerNeverCreditsAHeldSRVToARelay(t *testing.T) {
+	// The order must not become a way round the relay rule: a sender that
+	// turns out to be forwarding another network keeps nothing.
+	srvFirst := announcement(t,
+		srvRecord(t, "mixer._netaudio-cmc._udp.local.", "mixer.local.", 8800),
+	)
+	foreign := announcement(t, aRecord(t, "mixer.local.", "192.0.2.77"))
+	rec := runListener(t,
+		packet{wire: srvFirst, from: udpAddr("192.168.1.1")},
+		packet{wire: foreign, from: udpAddr("192.168.1.1")},
+	)
+	if got := rec.values(model.FieldService); len(got) != 0 {
+		t.Fatalf("services = %v, want none from a relay", got)
 	}
 }
 
@@ -454,7 +606,7 @@ func TestListenerBrowsesTwiceASecondApart(t *testing.T) {
 	if err := msg.Unpack(sent[0]); err != nil {
 		t.Fatal(err)
 	}
-	if msg.Header.ID != 0 || len(msg.Questions) != 3 {
+	if msg.Header.ID != 0 || len(msg.Questions) != 4 {
 		t.Fatalf("header %+v, %d questions", msg.Header, len(msg.Questions))
 	}
 	var names []string
@@ -464,7 +616,7 @@ func TestListenerBrowsesTwiceASecondApart(t *testing.T) {
 		}
 		names = append(names, q.Name.String())
 	}
-	if got := strings.Join(names, " "); got != "_services._dns-sd._udp.local. _netaudio-arc._udp.local. _ndi._tcp.local." {
+	if got := strings.Join(names, " "); got != "_services._dns-sd._udp.local. _netaudio-cmc._udp.local. _netaudio-arc._udp.local. _ndi._tcp.local." {
 		t.Errorf("questions = %s", got)
 	}
 	if s := rec.messages(engine.KindSent); len(s) != 2 || !strings.Contains(s[0], "browse 1 of 2") || !strings.Contains(s[1], "browse 2 of 2") {

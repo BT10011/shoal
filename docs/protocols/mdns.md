@@ -119,7 +119,7 @@ queries in the open. The listener is a **discoverer** that writes down what
 passes. In a scan it also asks one question, at the start of each scan and
 again a second later as RFC 6762 §5.2 asks: every service type on offer
 (`_services._dns-sd._udp.local`, RFC 6763 §9), plus Dante's
-`_netaudio-arc._udp` and NDI's `_ndi._tcp`, since not every embedded
+`_netaudio-cmc._udp`, `_netaudio-arc._udp` and NDI's `_ndi._tcp`, since not every embedded
 responder answers the enumeration. It is sent from port 5353, so every
 answer is multicast and the listener hears it like any announcement.
 Without it, services appear only when something else, such as Dante
@@ -143,8 +143,9 @@ What each overheard message is worth:
 |---|---|
 | any message at all | `ip` — something at that address is speaking mDNS |
 | `A` record whose address **is the sender's** | `hostname`, confidence 0.9 |
-| `PTR` under `_services._dns-sd._udp.local` | `service` — the sender listing the types it offers, once the sender has named its own address (see below) |
+| `PTR` under `_services._dns-sd._udp.local` | `service` — the sender listing the types it offers, unless the sender is relaying (see below) |
 | `SRV` whose target is a name **the sender has claimed** | `service`, with the host and port in the method |
+| `SRV` whose target the sender has **not claimed yet** | held, and credited if the sender announces an address for that name later |
 | `PTR` from a type to an instance | nothing — see below |
 | a query | `ip` only; a question reveals no facts |
 
@@ -166,27 +167,120 @@ a name the sender has published an address record for. The listener remembers
 those names for the length of the run, so an address in one packet ties up a
 service in the next.
 
-The list of service types is the same problem one level up. A router
-running an **mDNS repeater or reflector** (MikroTik's repeater, Avahi's
-reflector, Ubiquiti's mDNS option) answers "which services are here?" on
-behalf of devices on other VLANs, from its own address. The first live run
-of the browse showed exactly that: a gateway listing, as its own,
-the service types of devices on another VLAN. Crediting
-that to the router would have been wrong, and on a venue network where Dante
-sits on its own VLAN it would have badged the router as a Dante device.
+**Either order works.** Responders split long answers across messages, and
+nothing requires the address to come first. An `SRV` whose target the sender
+has not claimed *yet* is held rather than discarded, and credited the moment
+the sender announces an address for that name — which is how a Dante or NDI
+device that announces its service before its address is found at all. The
+hold is not a way round the rule: the address still has to come from that
+sender and still has to be the sender's own, and a sender later found to be
+relaying loses everything it was holding.
 
-So a listed type is credited only once the sender has **named its own
-address**: an `A` record for its own address, or an answer for its own
-reverse name, which the `mdns` probe asks every device during a scan. A list
-heard before that is held, and credited, with a note saying so, when the
-device names itself. A relay's answers only ever carry other devices'
-addresses, so what it relays is never credited to it, and when listening
-stops the log names every sender whose list was never credited. That
-wording is careful: a genuine device whose responder never names itself
-looks the same, and the log says so rather than accusing it.
+The list of service types is the same problem one level up, but it does
+**not** have the same answer. A router running an **mDNS repeater or
+reflector** (MikroTik's repeater, Avahi's reflector, Ubiquiti's mDNS option)
+answers "which services are here?" on behalf of devices on other VLANs, from
+its own address. The first live run of the browse showed exactly that: a
+gateway listing, as its own, the service types of devices on another VLAN.
+Crediting that to the router would have been wrong, and on a venue network
+where Dante sits on its own VLAN it would have badged the router as a Dante
+device.
+
+The first rule written for this was that a listed type is credited only once
+the sender has **named its own address**. That rule was wrong, and a live
+run measured how wrong: a responder answering the meta-query sends `PTR`
+records and **nothing else** — there is no address record in the reply,
+because there is no `SRV` target needing one. Over one twelve-second listen,
+five devices listed eighteen service types between them and every single one
+was held and never credited. Only two services got through in that time, and
+only because those particular messages happened to be announcements carrying
+`SRV` and `A` in the additional section. The rule was not being cautious; it
+was discarding nearly everything.
+
+So the list is now taken at its word, per RFC 6763 §9 — an answer under
+`_services._dns-sd._udp.local` is the responder describing **itself** — and
+the relay is caught by what actually distinguishes it:
+
+> A sender is a relay once it carries an address record for an address that
+> is neither its own nor on the network being scanned.
+
+That is something a device speaking only for itself never does, and a
+repeater does constantly: the same gateway was later seen carrying an `A`
+record for a host on another subnet entirely. Once a sender is marked,
+nothing it has listed is credited, anything it had already listed is dropped,
+and the log names it when listening stops.
+
+Only `A` records are read for this, because an IPv6 address cannot be
+compared against the IPv4 address the message arrived from, and addresses
+that are loopback, unspecified or link-local are ignored — a self-assigned
+`169.254.x.x` is the `rogue` probe's business, not evidence of relaying.
+
+A list is held for a short **settle** window (`DefaultSettle`, two seconds)
+before it is credited, so that a relay has a chance to give itself away
+first; a sender that names its own address is credited at once and does not
+wait. The honest limit: a relay that lists services and then stays silent
+about any foreign address for longer than the settle window is credited with
+that list. It is a trade, made deliberately — the old rule avoided that case
+by losing almost every real service — and the method on every observation
+says which way it was credited, so the detail pane shows the difference.
 
 The event log says what it declined and why, so a missing service is
 explained rather than silently absent.
+
+### Reading the names
+
+shoal decodes mDNS messages itself instead of handing them to
+`golang.org/x/net/dns/dnsmessage`, and the reason is one line in that
+library:
+
+```go
+// Reject names containing dots.
+// See issue golang/go#56246
+```
+
+A DNS-SD **service instance name is a single label of arbitrary UTF-8**
+(RFC 6763 §4.1.1). A dot inside it is ordinary text, not a separator, and
+NDI builds its source names from the machine's hostname — which on a Mac
+ends `.LOCAL` — so a real NDI source announces itself as
+
+```
+STAGE-MBP.LOCAL (Scan Converter)._ndi._tcp.local
+```
+
+That name is legal, common, and rejected by that parser. Worse, `Unpack` is
+all or nothing: one such name failed the **whole message**, so shoal threw
+away every packet an NDI source sent, including the address records that
+happened to share it. An NDI machine could sit on the network announcing
+itself perfectly and never appear in the table. This was found with NDI Scan
+Converter running on the same laptop as shoal, and `testdata/reply-ndi.hex`
+is the shape that used to be lost.
+
+The decoder in `message.go` follows compression pointers (bounded, so a
+crafted message cannot loop), decodes `A`, `AAAA`, `PTR`, `SRV` and `TXT`,
+and steps over any other type by its rdata length rather than failing. A dot
+inside a label is kept rather than escaped as `\.`, which keeps the name
+readable on screen and leaves `ServiceType` working; the cost is a
+theoretical ambiguity between two names differing only in where a label
+ends, which nothing here depends on.
+
+### The machine shoal is running on
+
+A responder does not answer multicast questions from its own host —
+mDNSResponder and Avahi both ignore them. So a listener on the group hears
+every device except the one it is running on, which is how a laptop running
+NDI showed nothing while shoal sat on that same laptop.
+
+shoal therefore asks this one device directly: a unicast question to
+`127.0.0.1:5353`, carrying the same browse names, answered at once. Nothing
+extra reaches the network, since it goes over loopback. The answers are
+credited to the scanning interface's own address, and the method says the
+question was asked rather than overheard, so the detail pane never pretends
+this was heard like everything else.
+
+One wrinkle worth knowing: asked over loopback, the responder gives its
+address records as `127.0.0.1`, which is not the interface address, so an
+`SRV` learned this way is held rather than credited. The service-type list
+covers it, which is why both are asked for.
 
 ## Running it
 

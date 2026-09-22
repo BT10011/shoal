@@ -13,7 +13,7 @@ device only on evidence the device itself published:
 
 | Flag | Badge | Evidence |
 |---|---|---|
-| `dante-device` | `dante` | it announces a Dante service type over mDNS: `_netaudio-arc._udp` (audio routing), `_netaudio-cmc._udp` (control and monitoring), and their siblings, all beginning `_netaudio-` |
+| `dante-device` | `dante` | it announces a Dante service type over mDNS: `_netaudio-arc._udp` (audio routing), `_netaudio-cmc._udp` (control and monitoring) and their siblings, all beginning `_netaudio-`; also `_dante-safe._udp` and `_dante-upgr._udp`, which a device announces in safe mode or mid-upgrade and is still a Dante device in |
 | `dante-device` | `dante` | its network interface is made by **Audinate**, from the embedded IEEE registry. This is the one vendor rule, and it is not a guess: Audinate makes only Dante modules, so an Audinate interface is a Dante interface |
 | `ndi-device` | `ndi` | it announces `_ndi._tcp`, the type NDI devices are found by |
 

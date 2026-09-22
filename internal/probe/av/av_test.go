@@ -44,6 +44,21 @@ func run(t *testing.T, d model.DeviceSnapshot) *capture {
 	return c
 }
 
+func TestDanteInSafeModeOrMidUpgradeIsStillDante(t *testing.T) {
+	// A device in safe mode, or being upgraded, stops announcing the
+	// _netaudio- family and announces these instead. It is still a Dante
+	// device, and it is the one an engineer is most likely hunting for.
+	for _, svc := range []string{"_dante-safe._udp", "_dante-upgr._udp"} {
+		c := run(t, device(service(svc)))
+		if len(c.obs) != 1 || c.obs[0].Value != FlagDante {
+			t.Fatalf("%s: observations = %+v, want a Dante flag", svc, c.obs)
+		}
+		if !strings.Contains(c.obs[0].Method, svc) {
+			t.Errorf("%s: method should name the evidence: %q", svc, c.obs[0].Method)
+		}
+	}
+}
+
 func TestDanteFromItsServicesAndItsModule(t *testing.T) {
 	c := run(t, device(service("_netaudio-arc._udp"), service("_netaudio-cmc._udp"), service("_http._tcp"), vendor("Audinate Pty L")))
 	if len(c.obs) != 1 || c.obs[0].Value != FlagDante || c.obs[0].Field != model.FieldFlag || c.obs[0].Confidence != 1 {
