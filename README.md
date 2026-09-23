@@ -187,8 +187,7 @@ everything.
 
 This is **release 1**. Planned next: the Windows release, then optional
 modules such as LLDP, which would say which switch port and VLAN you are
-plugged into. [`PROJECT_PLAN.md`](PROJECT_PLAN.md) has the detail, the
-reasoning, and what is deliberately deferred.
+plugged into.
 
 ## Credits
 

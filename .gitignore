@@ -5,3 +5,7 @@
 *.out
 coverage.*
 .DS_Store
+
+# Working notes, kept out of the public repository
+/PROJECT_PLAN.md
+/CLAUDE.md
