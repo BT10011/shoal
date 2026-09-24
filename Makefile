@@ -48,7 +48,7 @@ setcap: build
 # The licence texts of everything compiled in, which the MIT and BSD
 # licences of shoal's dependencies ask to travel with the binary.
 notices:
-	GO=$(GO) ./scripts/third-party-notices.sh THIRD_PARTY_NOTICES.md
+	GO=$(GO) PLATFORMS="$(PLATFORMS)" ./scripts/third-party-notices.sh THIRD_PARTY_NOTICES.md
 
 # One archive per platform, each holding the binary, the README, the
 # licence and the third-party notices, plus a SHA256SUMS file to check a

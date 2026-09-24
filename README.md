@@ -185,9 +185,15 @@ everything.
 
 ## Status
 
-This is **release 1**. Planned next: the Windows release, then optional
-modules such as LLDP, which would say which switch port and VLAN you are
-plugged into.
+This is **release 1** (v1.0.0). Planned for release 2:
+
+- **Windows**, with the same features as macOS and Linux.
+- **Wireshark export**: save every packet Shoal's probes sent and received
+  as a pcapng file, to open in Wireshark next to Shoal's explanation of
+  each one.
+
+After that, optional modules such as LLDP, which would say which switch
+port and VLAN you are plugged into.
 
 ## Credits
 

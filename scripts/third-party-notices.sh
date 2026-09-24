@@ -7,6 +7,8 @@ set -euo pipefail
 
 GO=${GO:-go}
 out=${1:-THIRD_PARTY_NOTICES.md}
+# The release platforms; `make notices` passes the Makefile's list.
+PLATFORMS=${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64}
 goroot=$("$GO" env GOROOT)
 goversion=$("$GO" env GOVERSION)
 
@@ -74,7 +76,13 @@ section() { # title, version, directory...
 	echo "Authority's public MA-L listing, from https://standards-oui.ieee.org/."
 	echo
 	section "The Go standard library" "$goversion" "$goroot" "$goroot/.."
-	"$GO" list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Version}} {{.Dir}}{{end}}{{end}}' ./cmd/shoal |
+	# Every platform a release builds, not just this one: modules differ by
+	# platform (the SQLite driver pulls one in on macOS and FreeBSD only), and
+	# one notices file goes into every archive. Listed on Linux alone, the
+	# macOS archives once went out a licence short.
+	for p in $PLATFORMS; do
+		CGO_ENABLED=0 GOOS=${p%/*} GOARCH=${p#*/} "$GO" list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}} {{.Version}} {{.Dir}}{{end}}{{end}}' ./cmd/shoal
+	done |
 		sort -u |
 		while read -r path version dir; do
 			section "$path" "$version" "$dir"
