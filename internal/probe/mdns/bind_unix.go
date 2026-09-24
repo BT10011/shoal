@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,7 +34,14 @@ func bindGroup(group *net.UDPAddr) (net.PacketConn, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("%s is not an IPv4 group address", group.IP)
 	}
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.IPPROTO_UDP)
+	// Close-on-exec is set separately, under the fork lock, because macOS
+	// has no SOCK_CLOEXEC; it is what the standard library does there too.
+	syscall.ForkLock.RLock()
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, unix.IPPROTO_UDP)
+	if err == nil {
+		unix.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return nil, fmt.Errorf("cannot open a UDP socket: %w", err)
 	}
