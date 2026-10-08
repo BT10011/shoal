@@ -6,6 +6,8 @@
 coverage.*
 .DS_Store
 
-# Working notes, kept out of the public repository
-/PROJECT_PLAN.md
-/CLAUDE.md
+# Working notes and Claude files, kept out of the repository
+PROJECT_PLAN.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/
