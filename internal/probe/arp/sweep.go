@@ -31,8 +31,13 @@ type Options struct {
 	Open     func(netif.Interface) (Conn, error) // OpenConn
 	Rate     int                                 // requests per second: 100
 	Settle   time.Duration                       // wait for replies after each pass: 1s
-	MaxHosts int                                 // refuse larger subnets: 1022 (/22)
+	MaxHosts int                                 // refuse larger subnets: 1022 (/22), never above LargestSweep
 	NoRetry  bool                                // skip the second pass for silent hosts
+	// Range, when set, is the part of the subnet to sweep instead of all
+	// of it: the /24 around this machine on a network too large to sweep
+	// whole. The rest of the subnet is still this network, so the listener
+	// keeps every frame from it.
+	Range *net.IPNet
 	// Also lists extra IPv4 ranges to ask on this segment (--also): a
 	// venue's usual subnet, say, where gear carrying a stale static address
 	// sits silent. They are asked with RFC 5227 probes (sender 0.0.0.0).
@@ -44,6 +49,14 @@ const (
 	defaultSettle   = time.Second
 	defaultMaxHosts = 1022
 )
+
+// DefaultMaxHosts is the largest subnet swept without being asked: a /22.
+const DefaultMaxHosts = defaultMaxHosts
+
+// LargestSweep is the most addresses shoal will ever sweep, whatever
+// MaxHosts says: a /16. Beyond it a sweep takes too long and every device
+// on the segment carries too many broadcasts for the answer to be worth it.
+const LargestSweep = 65534
 
 func (o Options) withDefaults() Options {
 	if o.Open == nil {
@@ -58,6 +71,7 @@ func (o Options) withDefaults() Options {
 	if o.MaxHosts <= 0 {
 		o.MaxHosts = defaultMaxHosts
 	}
+	o.MaxHosts = min(o.MaxHosts, LargestSweep)
 	return o
 }
 
@@ -88,11 +102,18 @@ func (s *Sweep) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 	if len(iface.MAC) != 6 || iface.IP.To4() == nil || iface.Subnet == nil {
 		return fmt.Errorf("interface %q has no Ethernet MAC, IPv4 address or subnet", iface.Name)
 	}
-	if n := iface.Hosts(); n > s.opts.MaxHosts {
-		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; raise it with -max-hosts if you are authorised to scan this network", iface.Subnet, n, s.opts.MaxHosts)
+	scope := s.scope(iface)
+	if !iface.Subnet.Contains(scope.IP) {
+		return fmt.Errorf("range %s is not part of %s, the subnet of %s", scope, iface.Subnet, iface.Name)
 	}
-	targets := hostIPs(iface.Subnet, iface.IP)
-	extra, err := s.extraTargets(iface)
+	if n := hostCount(scope); n > s.opts.MaxHosts {
+		if s.opts.MaxHosts == LargestSweep {
+			return fmt.Errorf("%s has %d hosts, more than %d (a /16), the most shoal will sweep; the ARP listener and mDNS still run", scope, n, LargestSweep)
+		}
+		return fmt.Errorf("subnet %s has %d hosts, more than the limit of %d; raise it with -max-hosts if you are authorised to scan this network", scope, n, s.opts.MaxHosts)
+	}
+	targets := hostIPs(scope, iface.IP)
+	extra, err := s.extraTargets(iface, scope)
 	if err != nil {
 		return err
 	}
@@ -108,12 +129,20 @@ func (s *Sweep) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 	emit(model.Observation{DeviceKey: iface.MAC.String(), Field: model.FieldIP, Value: iface.IP.String(), Source: "netif", Method: self, Confidence: 1})
 	emit(model.Observation{DeviceKey: iface.MAC.String(), Field: model.FieldFlag, Value: FlagSelf, Source: "netif", Method: self, Confidence: 1})
 
-	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweeping %s on %s: %d addresses at %d/s, then retry silent ones", iface.Subnet, iface.Name, len(targets), s.opts.Rate)})
+	what := scope.String()
+	if s.opts.Range != nil {
+		what = fmt.Sprintf("%s, the part of %s around this machine", scope, iface.Subnet)
+	}
+	then := "then retry silent ones"
+	if s.opts.NoRetry {
+		then = "with no retry pass, so a device that misses its one request is found only if it speaks"
+	}
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweeping %s on %s: %d addresses at %d/s, %s", what, iface.Name, len(targets), s.opts.Rate, then)})
 	if len(extra) > 0 {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("also asking %d addresses in %s on this segment, as --also requested. Those requests are RFC 5227 probes, sender 0.0.0.0: they claim no address on that network and leave no entry in anyone's ARP cache, and a device holding the address must answer", len(extra), joinNets(s.opts.Also))})
 	}
 
-	l := &listener{iface: iface, emit: emit, report: report, seen: make(map[string]bool), wanted: s.wanted(iface)}
+	l := &listener{iface: iface, emit: emit, report: report, seen: make(map[string]bool), wanted: s.wanted(scope)}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -192,7 +221,7 @@ func (s *Sweep) pass(ctx context.Context, conn Conn, iface netif.Interface, targ
 // extraTargets lists the addresses of the --also ranges that the subnet
 // sweep does not already cover, each once, refusing a range too large to
 // ask politely.
-func (s *Sweep) extraTargets(iface netif.Interface) ([]net.IP, error) {
+func (s *Sweep) extraTargets(iface netif.Interface, scope *net.IPNet) ([]net.IP, error) {
 	seen := make(map[string]bool)
 	var out []net.IP
 	for _, r := range s.opts.Also {
@@ -204,7 +233,7 @@ func (s *Sweep) extraTargets(iface netif.Interface) ([]net.IP, error) {
 			return nil, fmt.Errorf("--also %s has %d addresses, more than the limit of %d; raise it with -max-hosts if you are authorised to scan that range", r, size, s.opts.MaxHosts)
 		}
 		for _, ip := range hostIPs(r, iface.IP) {
-			if iface.Subnet.Contains(ip) || seen[ip.String()] {
+			if scope.Contains(ip) || seen[ip.String()] {
 				continue
 			}
 			seen[ip.String()] = true
@@ -226,8 +255,22 @@ func (s *Sweep) rangeOf(ip net.IP) *net.IPNet {
 
 // wanted reports whether an address is one the sweep asks about, so a
 // reply from it counts as an answer and the retry pass can skip it.
-func (s *Sweep) wanted(iface netif.Interface) func(net.IP) bool {
-	return func(ip net.IP) bool { return iface.Subnet.Contains(ip) || s.rangeOf(ip) != nil }
+func (s *Sweep) wanted(scope *net.IPNet) func(net.IP) bool {
+	return func(ip net.IP) bool { return scope.Contains(ip) || s.rangeOf(ip) != nil }
+}
+
+// scope is what the sweep asks: the Range given, else the whole subnet.
+func (s *Sweep) scope(iface netif.Interface) *net.IPNet {
+	if s.opts.Range != nil {
+		return s.opts.Range
+	}
+	return iface.Subnet
+}
+
+// hostCount is the number of host addresses in a range, as Interface.Hosts
+// counts them.
+func hostCount(n *net.IPNet) int {
+	return netif.Interface{Subnet: n}.Hosts()
 }
 
 func joinNets(nets []*net.IPNet) string {

@@ -100,3 +100,42 @@ func TestDefaultSmoke(t *testing.T) {
 		t.Fatal("ByName of unknown interface should fail")
 	}
 }
+
+func TestExpandOffersEveryAddressAndGivesTheGatewayToItsSubnet(t *testing.T) {
+	ni := net.Interface{Name: "eth0", Index: 2, MTU: 1500, HardwareAddr: net.HardwareAddr{0, 0, 0x5e, 0, 0x53, 1}}
+	addrs := []net.Addr{
+		&net.IPNet{IP: net.IPv4(172, 16, 10, 5), Mask: net.CIDRMask(24, 32)},
+		&net.IPNet{IP: net.ParseIP("2001:db8::5"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(198, 51, 100, 5), Mask: net.CIDRMask(24, 32)},
+	}
+	gw := net.IPv4(198, 51, 100, 1)
+
+	got := expand(ni, addrs, gw, "eth0", nil)
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2 (IPv6 skipped): %+v", len(got), got)
+	}
+	if got[0].Gateway != nil || !strings.Contains(got[0].GatewaySource, "not in 172.16.10.0/24") {
+		t.Errorf("first address should not get the gateway, and say why: %+v", got[0])
+	}
+	if !got[1].Gateway.Equal(gw) || got[1].Subnet.String() != "198.51.100.0/24" {
+		t.Errorf("second address should get the gateway: %+v", got[1])
+	}
+
+	other := expand(ni, addrs[:1], gw, "wlan0", nil)
+	if other[0].Gateway != nil || !strings.Contains(other[0].GatewaySource, "via wlan0") {
+		t.Errorf("an interface the default route does not use gets no gateway: %+v", other[0])
+	}
+}
+
+func TestSame(t *testing.T) {
+	a := Interface{Name: "eth0", IP: net.IPv4(172, 16, 10, 5).To4(), Subnet: &net.IPNet{IP: net.IPv4(172, 16, 10, 0).To4(), Mask: net.CIDRMask(24, 32)}}
+	b := a
+	b.IP = net.IPv4(172, 16, 10, 5)
+	if !a.Same(b) {
+		t.Error("the same address in two forms should be the same network")
+	}
+	b.Name = "eth1"
+	if a.Same(b) {
+		t.Error("another interface is not the same")
+	}
+}

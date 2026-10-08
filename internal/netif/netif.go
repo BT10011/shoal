@@ -137,6 +137,74 @@ func ByName(name string) (Interface, error) {
 	return i, nil
 }
 
+// Candidates lists every network shoal could scan from this machine: one
+// entry per IPv4 address on every up, non-loopback interface, so an
+// interface holding two addresses offers both networks. An entry gets the
+// default gateway only when the default route leaves through its interface
+// and the gateway is inside its subnet; GatewaySource says why otherwise.
+func Candidates() ([]Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	gw, gwName, rerr := defaultRoute()
+	var out []Interface
+	for _, ni := range ifaces {
+		if ni.Flags&net.FlagUp == 0 || ni.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ni.Addrs()
+		if err != nil {
+			continue
+		}
+		out = append(out, expand(ni, addrs, gw, gwName, rerr)...)
+	}
+	return out, nil
+}
+
+// expand turns one interface and its addresses into candidates, attaching
+// the gateway to the address whose subnet holds it.
+func expand(ni net.Interface, addrs []net.Addr, gw net.IP, gwName string, routeErr error) []Interface {
+	var out []Interface
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil {
+			continue
+		}
+		i := Interface{
+			Name:   ni.Name,
+			Index:  ni.Index,
+			MTU:    ni.MTU,
+			MAC:    ni.HardwareAddr,
+			IP:     ip4,
+			Subnet: &net.IPNet{IP: ip4.Mask(ipnet.Mask), Mask: ipnet.Mask},
+		}
+		switch {
+		case routeErr != nil:
+			i.GatewaySource = fmt.Sprintf("no default route found (%v)", routeErr)
+		case gwName != ni.Name:
+			i.GatewaySource = fmt.Sprintf("default route is via %s, not %s", gwName, ni.Name)
+		case !i.Subnet.Contains(gw):
+			i.GatewaySource = fmt.Sprintf("default route leaves through %s, but its gateway %s is not in %s", ni.Name, gw, i.Subnet)
+		default:
+			i.Gateway = gw
+			i.GatewaySource = gatewaySource
+		}
+		out = append(out, i)
+	}
+	return out
+}
+
+// Same reports whether two descriptions are the same network on the same
+// interface: one name, one address, one subnet.
+func (i Interface) Same(o Interface) bool {
+	return i.Name == o.Name && i.IP.Equal(o.IP) && i.Subnet.String() == o.Subnet.String()
+}
+
 func fromNet(ni net.Interface) (Interface, bool) {
 	if ni.Flags&net.FlagUp == 0 || ni.Flags&net.FlagLoopback != 0 {
 		return Interface{}, false

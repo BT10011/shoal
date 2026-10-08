@@ -557,3 +557,49 @@ func TestSweepAlsoRefusesWhatItShouldNotAsk(t *testing.T) {
 		t.Fatal("nothing should be sent or emitted when a range is refused")
 	}
 }
+
+func TestSweepRangeAsksOnlyThePartAroundThisMachine(t *testing.T) {
+	conn := newFakeConn(map[string]net.HardwareAddr{
+		"10.0.0.3": {0, 0, 0x5e, 0, 0x53, 3},
+	})
+	opts := fastOptions(conn)
+	opts.Range = cidr(t, "10.0.0.0/29")
+	opts.NoRetry = true
+	c := &capture{}
+	// A /16 is above the default limit, but only the range is swept.
+	if err := New(opts).Run(context.Background(), testIface(t, "10.0.0.0/16"), c.emit, c.report); err != nil {
+		t.Fatal(err)
+	}
+	for _, ip := range conn.requests() {
+		if !opts.Range.Contains(net.ParseIP(ip)) {
+			t.Errorf("asked %s, outside the range", ip)
+		}
+	}
+	if n := len(conn.requests()); n > 6 {
+		t.Errorf("sent %d requests, want at most 6 (one pass, no retry)", n)
+	}
+	var said string
+	for _, ev := range c.events {
+		if strings.HasPrefix(ev.Message, "sweeping") {
+			said = ev.Message
+		}
+	}
+	if !strings.Contains(said, "the part of 10.0.0.0/16 around this machine") || !strings.Contains(said, "no retry pass") {
+		t.Errorf("sweep did not say what it was asking: %q", said)
+	}
+
+	opts.Range = cidr(t, "10.1.0.0/24")
+	if err := New(opts).Run(context.Background(), testIface(t, "10.0.0.0/16"), c.emit, c.report); err == nil {
+		t.Error("a range outside the subnet should be refused")
+	}
+}
+
+func TestSweepNeverAsksMoreThanASlash16(t *testing.T) {
+	opts := fastOptions(newFakeConn(nil))
+	opts.MaxHosts = 1 << 20
+	c := &capture{}
+	err := New(opts).Run(context.Background(), testIface(t, "10.0.0.0/15"), c.emit, c.report)
+	if err == nil || !strings.Contains(err.Error(), "the most shoal will sweep") {
+		t.Fatalf("err = %v, want the /16 cap", err)
+	}
+}

@@ -38,7 +38,12 @@ A frame is 14 bytes of Ethernet header plus 28 bytes of ARP:
 
 ## What shoal does
 
-1. Refuses subnets larger than `/22` (1022 hosts) unless the limit is raised.
+1. Refuses subnets larger than `/22` (1022 hosts) unless the limit is raised,
+   and never sweeps more than a `/16` (65,534 hosts) whatever the limit. In
+   the TUI a larger subnet is not refused outright: shoal explains the cost
+   and asks whether to sweep all of it (500/s, no retry pass), only the `/24`
+   around this machine (`Options.Range`), or nothing, leaving the listener
+   to write down whoever speaks.
 2. Emits this machine's own MAC and IP (source `netif`, flag `this-host`) so
    the scanner appears in the table without being probed.
 3. Sends one **who-has** per host address, paced at 100/s by default, and
