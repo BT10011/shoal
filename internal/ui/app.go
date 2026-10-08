@@ -6,6 +6,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/allisonhere/tideui"
@@ -28,6 +29,16 @@ type Options struct {
 	// SaveTheme remembers a theme kept in the picker for next time. The UI
 	// does no file I/O itself; nil means nothing is remembered.
 	SaveTheme func(name string) error
+
+	// Interfaces lists the networks the user can switch to with i. Nil
+	// turns the picker off, as in the demo.
+	Interfaces func() ([]netif.Interface, error)
+	// Open builds the probes for an interface. Asked with SweepAsk about a
+	// subnet too large to sweep without asking, it returns a LargeSweep
+	// instead of a Session and the UI asks the user. It may block, so the
+	// UI calls it off its own goroutine. When Engine is nil, the UI opens
+	// Iface with it at start-up.
+	Open func(iface netif.Interface, choice SweepChoice) (Session, *LargeSweep, error)
 }
 
 const (
@@ -49,16 +60,21 @@ func Run(ctx context.Context, o Options) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	p := tea.NewProgram(newApp(o), tea.WithAltScreen(), tea.WithContext(ctx))
-	b := newBridge(o.Store, o.Engine, p.Send, batchEvery)
-	go b.run(ctx)
-
-	if err := o.Engine.Start(ctx); err != nil {
-		return err
+	a := newApp(o)
+	p := tea.NewProgram(a, tea.WithAltScreen(), tea.WithContext(ctx))
+	a.ctx, a.send = ctx, p.Send
+	if o.Engine != nil {
+		if err := a.start(Session{Store: o.Store, Engine: o.Engine, Iface: o.Iface, Mode: o.Mode}); err != nil {
+			return err
+		}
 	}
 	_, err := p.Run()
 	cancel()
-	o.Engine.Stop()
+	// A switch may still be stopping one engine or building the next.
+	a.pending.Wait()
+	if a.opts.Engine != nil {
+		a.opts.Engine.Stop()
+	}
 	return err
 }
 
@@ -96,6 +112,16 @@ type app struct {
 	picker  tideui.ThemePicker
 	help    help
 	log     logView
+
+	// The running session, and switching between them (i).
+	ctx        context.Context // the program's lifetime, set by Run
+	send       func(tea.Msg)
+	gen        int // the session whose batches are shown; older ones are dropped
+	stopBridge context.CancelFunc
+	switching  bool           // a session is being stopped or opened
+	pending    sync.WaitGroup // switches still running off the UI goroutine
+	ifaces     ifacePicker
+	large      *largeModal // a subnet too large to sweep without asking
 }
 
 // logView is the reader's place in the event log. While follow is set the
@@ -121,6 +147,9 @@ func newApp(o Options) *app {
 }
 
 func (a *app) Init() tea.Cmd {
+	if a.opts.Engine == nil && a.opts.Open != nil {
+		return tea.Batch(a.tick(), a.switchTo(a.opts.Iface, SweepAsk))
+	}
 	return a.tick()
 }
 
@@ -148,6 +177,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.applyBatch(msg)
 	case themeSavedMsg:
 		a.themeSaved(msg)
+	case openedMsg:
+		a.opened(msg)
+	case ifacesMsg:
+		a.openIfaces(msg)
 	case tea.KeyMsg:
 		return a.handleKey(msg)
 	default:
@@ -159,6 +192,9 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) applyBatch(b Batch) {
+	if b.Gen != a.gen {
+		return // from a session that has since been switched away from
+	}
 	a.now = b.At
 	a.status = b.Status
 	for _, ev := range b.Events {
@@ -354,6 +390,12 @@ func (a *app) View() string {
 		Status: &tideui.StatusBar{Left: left, Right: a.statusRight(left)},
 	}
 	switch {
+	case a.large != nil:
+		m := a.largeModalOverlay()
+		layout.Modal = &m
+	case a.ifaces.open:
+		m := a.ifaceModal()
+		layout.Modal = &m
 	case a.help.open:
 		m := a.helpModal()
 		layout.Modal = &m
@@ -431,7 +473,14 @@ func (a *app) statusLeft() string {
 // scanLabel sums up the current scan in a couple of words.
 func (a *app) scanLabel() string {
 	st := a.status
-	if st.Scan == 0 {
+	switch {
+	case a.switching:
+		return "starting"
+	case a.large != nil:
+		return "waiting"
+	case a.opts.Engine == nil && a.opts.Open != nil:
+		return "not scanning"
+	case st.Scan == 0:
 		return "starting"
 	}
 	label := fmt.Sprintf("scan %d", st.Scan)
@@ -481,7 +530,7 @@ func (a *app) statusRight(left string) string {
 	s := a.renderer.Styles
 	bindings := tableBindings
 	switch {
-	case a.help.open, a.picker.Opened():
+	case a.help.open, a.picker.Opened(), a.ifaces.open, a.large != nil:
 		return "" // the modal carries its own hints
 	case a.filter.editing:
 		bindings = filterBindings
@@ -489,6 +538,9 @@ func (a *app) statusRight(left string) string {
 		bindings = detailBindings
 	case a.focus == paneHood:
 		bindings = hoodBindings
+	}
+	if a.opts.Interfaces == nil {
+		bindings = withoutKey(bindings, "i")
 	}
 	return keyBar(s, bindings, keyBarWidth(a.width, left))
 }

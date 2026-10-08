@@ -43,8 +43,11 @@ Usage:
 Flags:
   --iface NAME            Interface to scan (default: the one carrying the default route)
   --unprivileged          Skip raw ARP; read the kernel neighbour table instead
-  --rate N                Probe packets per second (default 100)
-  --max-hosts N           Largest subnet to sweep, in addresses (default 1022, a /22)
+  --rate N                Probe packets per second (default 100; 500 for a whole large subnet)
+  --max-hosts N           Largest subnet to sweep without asking, in addresses (default 1022,
+                          a /22). On a larger network, up to a /16, shoal says what a full
+                          sweep costs and asks first: all of it, the /24 around this
+                          machine, or listen only
   --also CIDR             Also ask every address in CIDR with ARP, on this segment only,
                           e.g. a venue's usual 192.168.1.0/24, to find gear carrying a stale
                           static address that never speaks. Repeatable. Needs raw access
@@ -54,6 +57,9 @@ Flags:
   --theme NAME            Colour theme for this run, e.g. nord, dracula, gruvbox-dark, vt100.
                           A theme kept in the picker (t, Enter) is remembered instead
   --demo                  Scripted fake data
+
+In the TUI, i lists every interface and address this machine has and
+scans the one chosen, with these same flags.
 
 Only scan networks you own or are authorised to test.
 
@@ -152,58 +158,136 @@ func runTUI(args []string) error {
 	if err != nil {
 		return err
 	}
-	st := store.NewMemory()
-	eng := engine.New(st, iface)
-	discoverer, mode := chooseDiscoverer(iface, *unprivileged, *rate, *maxHosts, also)
-	if _, ok := discoverer.(*arp.Sweep); !ok && len(also) > 0 {
-		// Asked for, and impossible: say so rather than quietly scan less.
-		return fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", mode)
-	}
-	if err := eng.AddDiscoverer(discoverer); err != nil {
-		return err
-	}
-	// With raw access, keep listening for ARP after the sweep: a device on
-	// the wrong subnet only gives itself away when it happens to speak.
-	if sweep, ok := discoverer.(*arp.Sweep); ok {
-		if err := eng.AddDiscoverer(arp.NewListener(arp.ListenOptions{StandAside: sweep.Sweeping})); err != nil {
-			return err
+	c := &scanConfig{unprivileged: *unprivileged, rate: *rate, maxHosts: *maxHosts, also: also}
+	// Remember each network for next time. A history file that cannot be
+	// opened never stops a scan: the mode line says what happened.
+	if !*noHistory {
+		h, err := openHistory(*historyPath)
+		if err != nil {
+			c.historyNote = " · no history (" + err.Error() + ")"
+		} else {
+			defer h.Close()
+			c.history = h
 		}
 	}
-	// Judge every address against the subnet, so a box carrying an old
-	// static or link-local address is pointed out.
-	if err := eng.AddEnricher(rogue.New(iface.Subnet)); err != nil {
-		return err
-	}
-	ouiEnricher, err := realOUI()
+	// The first interface is opened here, so a flag that cannot work on it
+	// (--also without raw access) stops shoal before the screen clears.
+	// A subnet too large to sweep without asking is left to the UI, which
+	// asks before anything is sent.
+	opts := ui.Options{Iface: iface, Theme: themeName, SaveTheme: saveTheme, Interfaces: netif.Candidates, Open: c.open}
+	s, large, err := c.open(iface, ui.SweepAsk)
 	if err != nil {
 		return err
 	}
-	if err := eng.AddEnricher(ouiEnricher); err != nil {
-		return err
+	if large == nil {
+		opts.Store, opts.Engine, opts.Mode = s.Store, s.Engine, s.Mode
 	}
-	// Neither name probe needs privileges, so both run whichever discoverer
-	// was chosen above. They answer for different halves of a network: DNS
-	// knows what the router was told, mDNS knows what each device calls
-	// itself.
-	if err := eng.AddEnricher(rdns.New(rdns.Options{Resolvers: rdns.SystemResolvers(iface.Gateway)})); err != nil {
-		return err
+	return ui.Run(context.Background(), opts)
+}
+
+// largeRate is how fast a sweep of a whole large subnet goes when --rate
+// is not given: five times the usual rate, with no retry pass, so a /16
+// takes about two minutes rather than twenty.
+const largeRate = 500
+
+// scanConfig is what the command line asked for, applied to whichever
+// interface is being scanned: the one shoal started on, or one chosen
+// later with i.
+type scanConfig struct {
+	unprivileged bool
+	rate         int
+	maxHosts     int
+	also         []*net.IPNet
+	history      *store.History // nil when nothing is remembered
+	historyNote  string         // why not, for the mode line
+}
+
+// open builds every probe for one interface. Asked with SweepAsk about a
+// subnet larger than shoal sweeps without asking, it returns what the UI
+// needs to warn the user instead, and builds nothing.
+func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Session, *ui.LargeSweep, error) {
+	raw, why := c.rawAccess(iface)
+	if raw && choice == ui.SweepAsk {
+		if large := c.large(iface); large != nil {
+			return ui.Session{}, large, nil
+		}
 	}
-	if err := eng.AddEnricher(mdns.New(mdns.Options{Iface: iface})); err != nil {
-		return err
+	if !raw && len(c.also) > 0 {
+		// Asked for, and impossible: say so rather than quietly scan less.
+		return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", why)
 	}
-	// NetBIOS names the Windows and Samba hosts the other two miss.
-	if err := eng.AddEnricher(nbns.New(nbns.Options{})); err != nil {
-		return err
+
+	st := store.NewMemory()
+	eng := engine.New(st, iface)
+	var mode string
+	var discoverers []engine.Discoverer
+	switch {
+	case !raw:
+		mode = "neigh · " + why
+		discoverers = append(discoverers, neigh.New(neigh.Options{Rate: c.rate, MaxHosts: c.maxHosts}))
+	case choice == ui.SweepNone:
+		// The user declined to sweep a large subnet: listen only, so the
+		// devices that speak still turn up.
+		mode = "arp listen only · sweep declined"
+		discoverers = append(discoverers, arp.NewListener(arp.ListenOptions{}))
+	default:
+		o := arp.Options{Rate: c.rate, MaxHosts: c.maxHosts, Also: c.also}
+		mode = "arp sweep + listen"
+		switch choice {
+		case ui.SweepAll:
+			o.MaxHosts, o.NoRetry = arp.LargestSweep, true
+			if o.Rate <= 0 {
+				o.Rate = largeRate
+			}
+			mode = fmt.Sprintf("arp sweep of all %s at %d/s, no retry + listen", iface.Subnet, o.Rate)
+		case ui.SweepLocal:
+			o.Range = around(iface)
+			mode = fmt.Sprintf("arp sweep of %s only + listen", o.Range)
+		}
+		for _, r := range c.also {
+			mode += " · also " + r.String()
+		}
+		sweep := arp.New(o)
+		// With raw access, keep listening for ARP after the sweep: a device
+		// on the wrong subnet only gives itself away when it happens to speak.
+		discoverers = append(discoverers, sweep, arp.NewListener(arp.ListenOptions{StandAside: sweep.Sweeping}))
+	}
+	for _, d := range discoverers {
+		if err := eng.AddDiscoverer(d); err != nil {
+			return ui.Session{}, nil, err
+		}
+	}
+
+	ouiEnricher, err := realOUI()
+	if err != nil {
+		return ui.Session{}, nil, err
+	}
+	enrichers := []engine.Enricher{
+		// Judge every address against the subnet, so a box carrying an old
+		// static or link-local address is pointed out.
+		rogue.New(iface.Subnet),
+		ouiEnricher,
+		// Neither name probe needs privileges, so both run whichever
+		// discoverer was chosen above. They answer for different halves of
+		// a network: DNS knows what the router was told, mDNS knows what
+		// each device calls itself.
+		rdns.New(rdns.Options{Resolvers: rdns.SystemResolvers(iface.Gateway)}),
+		mdns.New(mdns.Options{Iface: iface}),
+		// NetBIOS names the Windows and Samba hosts the other two miss.
+		nbns.New(nbns.Options{}),
+		// Dante and NDI devices, from what they announce about themselves.
+		av.New(),
+	}
+	for _, en := range enrichers {
+		if err := eng.AddEnricher(en); err != nil {
+			return ui.Session{}, nil, err
+		}
 	}
 	// The listener writes down the announcements crossing the network, and
 	// keeps running after the sweep finishes. It asks once per scan which
 	// services are on offer, so Dante and NDI gear shows on a quiet network.
 	if err := eng.AddDiscoverer(mdns.NewListener(mdns.ListenerOptions{Browse: mdns.DefaultBrowse})); err != nil {
-		return err
-	}
-	// Dante and NDI devices, from what they announce about themselves.
-	if err := eng.AddEnricher(av.New()); err != nil {
-		return err
+		return ui.Session{}, nil, err
 	}
 	// ICMP is the one enricher that can be refused outright, so ask once
 	// here rather than failing per device, and say so in the status bar.
@@ -211,24 +295,58 @@ func runTUI(args []string) error {
 		mode += " · no ICMP"
 	} else {
 		if err := eng.AddEnricher(icmp.New(icmp.Options{})); err != nil {
-			return err
+			return ui.Session{}, nil, err
 		}
 		mode += " · icmp " + icmpMode.Short()
 	}
-	// Remember this network for next time. A history file that cannot be
-	// opened never stops a scan: the mode line says what happened.
-	if !*noHistory {
-		h, err := openHistory(*historyPath)
-		if err != nil {
-			mode += " · no history (" + err.Error() + ")"
-		} else {
-			defer h.Close()
-			if err := eng.AddDiscoverer(history.New(history.Options{History: h, Store: st, Status: eng.Status})); err != nil {
-				return err
-			}
+	mode += c.historyNote
+	if c.history != nil {
+		if err := eng.AddDiscoverer(history.New(history.Options{History: c.history, Store: st, Status: eng.Status})); err != nil {
+			return ui.Session{}, nil, err
 		}
 	}
-	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Iface: iface, Mode: mode, Theme: themeName, SaveTheme: saveTheme})
+	return ui.Session{Store: st, Engine: eng, Iface: iface, Mode: mode}, nil, nil
+}
+
+// rawAccess reports whether the ARP sweep can run on iface, and if not, a
+// few words on why for the mode line.
+func (c *scanConfig) rawAccess(iface netif.Interface) (bool, string) {
+	if c.unprivileged {
+		return false, "unprivileged"
+	}
+	switch err := arp.CheckAccess(iface); {
+	case err == nil:
+		return true, ""
+	case errors.Is(err, arp.ErrPermission):
+		return false, "no raw packet access"
+	default:
+		return false, err.Error()
+	}
+}
+
+// large describes iface's subnet when it is more than shoal sweeps without
+// asking (--max-hosts, a /22 by default), or more than it sweeps at all.
+func (c *scanConfig) large(iface netif.Interface) *ui.LargeSweep {
+	limit := c.maxHosts
+	if limit <= 0 {
+		limit = arp.DefaultMaxHosts
+	}
+	hosts := iface.Hosts()
+	if hosts <= min(limit, arp.LargestSweep) {
+		return nil
+	}
+	l := &ui.LargeSweep{Iface: iface, Hosts: hosts, Limit: limit, Largest: arp.LargestSweep, Rate: c.rate, Local: around(iface)}
+	if l.Rate <= 0 {
+		l.Rate = largeRate
+	}
+	return l
+}
+
+// around is the /24 holding this machine's address: the part of a large
+// subnet swept when the user would rather not sweep all of it.
+func around(iface netif.Interface) *net.IPNet {
+	mask := net.CIDRMask(24, 32)
+	return &net.IPNet{IP: iface.IP.Mask(mask), Mask: mask}
 }
 
 // themeSettings picks the theme to start with: --theme when given, else
@@ -264,28 +382,6 @@ func openHistory(path string) (*store.History, error) {
 		path = p
 	}
 	return store.OpenHistory(path)
-}
-
-// chooseDiscoverer prefers a real ARP sweep and falls back to the kernel
-// neighbour table when raw packet access is refused. The chosen probe
-// explains itself in the event log, so the caller only needs the label.
-func chooseDiscoverer(iface netif.Interface, unprivileged bool, rate, maxHosts int, also []*net.IPNet) (engine.Discoverer, string) {
-	fallback := neigh.New(neigh.Options{Rate: rate, MaxHosts: maxHosts})
-	if unprivileged {
-		return fallback, "neigh · unprivileged"
-	}
-	switch err := arp.CheckAccess(iface); {
-	case err == nil:
-		mode := "arp sweep + listen"
-		for _, r := range also {
-			mode += " · also " + r.String()
-		}
-		return arp.New(arp.Options{Rate: rate, MaxHosts: maxHosts, Also: also}), mode
-	case errors.Is(err, arp.ErrPermission):
-		return fallback, "neigh · no raw packet access"
-	default:
-		return fallback, "neigh · " + err.Error()
-	}
 }
 
 // alsoFlag parses one --also value into the list. A bare address is taken

@@ -237,6 +237,30 @@ beside the old ones with fresh timestamps, so the freshness column shows
 what has gone quiet. The status bar shows which scan is running, and
 whether it has been stopped.
 
+# Other interfaces and large networks
+
+Shoal starts on the interface carrying the default route, or the one
+named with --iface. Press i to list every interface this machine has
+that is up with an IPv4 address, one row per address, so an interface on
+two networks offers both. The line beneath the list says which subnet the
+highlighted entry would scan and whether its gateway is known. Enter stops
+the current scan and starts afresh on the one chosen, with the same flags
+shoal was started with. Devices from the other network are not carried
+over, since they are not the same devices; the log says when it switched.
+
+Shoal sweeps up to a /22 (1,022 addresses) without asking; --max-hosts
+moves that limit. On a larger network, up to a /16 (65,534 addresses), it
+stops before sending anything and says what a full sweep costs: the time
+it takes, a broadcast that every device on the segment has to handle for
+every address, a full ARP table on this machine, and a sweep that switches
+and intrusion detection may treat as an attack. Then you choose: all of
+it, at 500 requests a second (or --rate) with no retry pass; only the /24
+around this machine, as a normal sweep; or no sweep at all, in which case
+the ARP and mDNS listeners still write down every device that speaks. Esc
+chooses listening. Above a /16 a full sweep is refused, and the /24 or
+listening are offered instead. This needs raw packet access; the
+neighbour-table fallback stops at --max-hosts as before.
+
 # Filter and sort
 
 Press / and type to narrow the table as you type. The pattern is matched
@@ -263,6 +287,7 @@ always sort last.
   c            stop the scan so the screen holds still
   r            rescan
   t            theme picker: preview live, Enter keeps and remembers it
+  i            interfaces: scan another network this machine is on
   ?            this manual                     q     quit
 
 # Keeping it up to date, and removing it

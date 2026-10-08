@@ -1098,11 +1098,12 @@ func TestKeyBarDropsWholeEntriesRatherThanWrapping(t *testing.T) {
 			}
 		}
 	}
-	a, _ := sized(t, 140, 40)
+	a, _ := sized(t, 150, 40)
+	a.opts.Interfaces = func() ([]netif.Interface, error) { return nil, nil } // as in a real run
 	bar := ansi.Strip(a.View())
 	for _, b := range tableBindings {
 		if !strings.Contains(bar, b.key+" "+b.label) {
-			t.Errorf("140 columns should fit every binding, missing %q", b.key+" "+b.label)
+			t.Errorf("150 columns should fit every binding, missing %q", b.key+" "+b.label)
 		}
 	}
 	a, _ = sized(t, 120, 40)

@@ -20,6 +20,7 @@ type Batch struct {
 	Events  []engine.ProbeEvent
 	Status  engine.Status
 	At      time.Time
+	Gen     int // which session it came from; see app.start
 }
 
 // maxPending bounds how many probe events accumulate between ticks if the
@@ -31,6 +32,7 @@ type bridge struct {
 	engine *engine.Engine
 	send   func(tea.Msg)
 	every  time.Duration
+	gen    int
 
 	mu         sync.Mutex
 	dirty      bool
@@ -89,7 +91,7 @@ func (b *bridge) flush() (Batch, bool) {
 	}
 	b.lastStatus = status
 
-	batch := Batch{Events: events, Status: status, At: time.Now()}
+	batch := Batch{Events: events, Status: status, At: time.Now(), Gen: b.gen}
 	if dirty {
 		batch.Devices = b.store.Devices()
 	}

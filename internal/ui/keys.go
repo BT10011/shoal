@@ -15,6 +15,10 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 	switch {
+	case a.large != nil:
+		return a, a.handleLargeKey(msg)
+	case a.ifaces.open:
+		return a, a.handleIfaceKey(msg)
 	case a.help.open:
 		a.handleHelpKey(msg)
 		return a, nil
@@ -31,6 +35,10 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.help.toggle()
 	case "t":
 		a.openTheme()
+	case "i":
+		if a.opts.Interfaces != nil && a.opts.Open != nil && !a.switching {
+			return a, a.listInterfaces()
+		}
 	case "/":
 		return a, a.filter.edit()
 	case "esc":
@@ -125,8 +133,20 @@ var tableBindings = []binding{
 	{"c", "c", "stop", 7},
 	{"r", "r", "rescan", 6},
 	{"t", "t", "theme", 1},
+	{"i", "i", "iface", 2},
 	{"?", "?", "help", 9},
 	{"q", "q", "quit", 8},
+}
+
+// withoutKey drops one binding, for a key that does nothing in this run.
+func withoutKey(bindings []binding, key string) []binding {
+	var out []binding
+	for _, b := range bindings {
+		if b.key != key {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 var detailBindings = []binding{

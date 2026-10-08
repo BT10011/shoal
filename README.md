@@ -126,7 +126,16 @@ Also: `--unprivileged`, `--rate N`, `--max-hosts N`, `--theme NAME`,
 
 In the TUI: `Enter` shows how every value for the selected device was
 learned, `x` adds the raw packets, `/` filters (`/dante`, `/off-subnet`),
-`s` sorts, `Tab` moves between panes, `t` picks a theme and `q` quits.
+`s` sorts, `Tab` moves between panes, `i` switches to another interface or
+address this machine has, `t` picks a theme and `q` quits.
+
+**Large networks.** Shoal sweeps up to a `/22` without asking. On anything
+larger, up to a `/16`, it stops before sending anything, explains what a
+full sweep costs (time, a broadcast every device on the segment must
+handle, a full ARP table, and the chance that a switch or IDS treats it as
+an attack), and lets you choose: the whole subnet at 500 requests a second
+with no retry pass (about two minutes for a `/16`; `--rate` changes it),
+only the `/24` around this machine, or listening only.
 Press **`?`** for the full manual, which explains every pane, column and
 key without leaving the terminal.
 
