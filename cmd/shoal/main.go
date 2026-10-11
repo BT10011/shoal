@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BT10011/shoal/internal/capture"
 	"github.com/BT10011/shoal/internal/config"
 	"github.com/BT10011/shoal/internal/engine"
 	"github.com/BT10011/shoal/internal/netif"
@@ -56,10 +57,16 @@ Flags:
   --no-history            Remember nothing and write nothing
   --theme NAME            Colour theme for this run, e.g. nord, dracula, gruvbox-dark, vt100.
                           A theme kept in the picker (t, Enter) is remembered instead
+  --pcap FILE             Record every packet shoal sends and hears to FILE (pcapng), from
+                          start to quit, to follow the scan in Wireshark. Off unless asked;
+                          in the TUI, w starts and stops a recording instead
   --demo                  Scripted fake data
 
 In the TUI, i lists every interface and address this machine has and
 scans the one chosen, with these same flags.
+
+A capture holds every address and name shoal saw on the network: keep it
+to yourself unless you have checked what is in it.
 
 Only scan networks you own or are authorised to test.
 
@@ -144,6 +151,7 @@ func runTUI(args []string) error {
 	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
 	historyPath := fs.String("history", "", "where to remember networks between runs")
 	noHistory := fs.Bool("no-history", false, "remember nothing")
+	pcapPath := fs.String("pcap", "", "record every packet to this pcapng file")
 	var also []*net.IPNet
 	fs.Func("also", "also ask every address in this IPv4 range with ARP (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
@@ -158,7 +166,10 @@ func runTUI(args []string) error {
 	if err != nil {
 		return err
 	}
-	c := &scanConfig{unprivileged: *unprivileged, rate: *rate, maxHosts: *maxHosts, also: also}
+	// Nothing is captured unless asked for, with --pcap or w; the tap only
+	// writes while a recording is running.
+	tap := capture.New(version)
+	c := &scanConfig{unprivileged: *unprivileged, rate: *rate, maxHosts: *maxHosts, also: also, tap: tap}
 	// Remember each network for next time. A history file that cannot be
 	// opened never stops a scan: the mode line says what happened.
 	if !*noHistory {
@@ -174,7 +185,7 @@ func runTUI(args []string) error {
 	// (--also without raw access) stops shoal before the screen clears.
 	// A subnet too large to sweep without asking is left to the UI, which
 	// asks before anything is sent.
-	opts := ui.Options{Iface: iface, Theme: themeName, SaveTheme: saveTheme, Interfaces: netif.Candidates, Open: c.open}
+	opts := ui.Options{Iface: iface, Theme: themeName, SaveTheme: saveTheme, Interfaces: netif.Candidates, Open: c.open, Capture: tap}
 	s, large, err := c.open(iface, ui.SweepAsk)
 	if err != nil {
 		return err
@@ -182,7 +193,21 @@ func runTUI(args []string) error {
 	if large == nil {
 		opts.Store, opts.Engine, opts.Mode = s.Store, s.Engine, s.Mode
 	}
-	return ui.Run(context.Background(), opts)
+	if *pcapPath != "" {
+		if _, err := tap.StartFile(*pcapPath, iface); err != nil {
+			return fmt.Errorf("--pcap: %w", err)
+		}
+	}
+	err = ui.Run(context.Background(), opts)
+	// A recording still running when shoal quits is closed here, and said
+	// so once the screen is back.
+	if path, n, cerr := tap.Stop(); path != "" {
+		fmt.Printf("saved %d packets to %s; open it in Wireshark, where each packet's comment is shoal's reading of it\n", n, path)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "shoal: the capture may be incomplete: %v\n", cerr)
+		}
+	}
+	return err
 }
 
 // largeRate is how fast a sweep of a whole large subnet goes when --rate
@@ -200,6 +225,7 @@ type scanConfig struct {
 	also         []*net.IPNet
 	history      *store.History // nil when nothing is remembered
 	historyNote  string         // why not, for the mode line
+	tap          *capture.Tap   // records packets while the user asks; nil for none
 }
 
 // open builds every probe for one interface. Asked with SweepAsk about a
@@ -219,6 +245,9 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 
 	st := store.NewMemory()
 	eng := engine.New(st, iface)
+	if c.tap != nil {
+		eng.Subscribe(c.tap.Observe)
+	}
 	var mode string
 	var discoverers []engine.Discoverer
 	switch {

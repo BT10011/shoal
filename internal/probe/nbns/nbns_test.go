@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -285,6 +286,19 @@ func TestEnrichEmitsNameAndAdapterAddress(t *testing.T) {
 	}
 	if got := rec.messages(engine.KindReceived); len(got) != 1 || !strings.Contains(got[0], "file server") {
 		t.Errorf("received events = %v, want one listing the name table", got)
+	}
+	for _, ev := range rec.events {
+		p := ev.Packet
+		switch ev.Kind {
+		case engine.KindSent:
+			if p == nil || p.Layer != engine.LayerUDP || !equal(p.Data, conn.sent[0]) || netip.AddrPortFrom(p.Dst.Addr().Unmap(), p.Dst.Port()).String() != deviceIP+":137" {
+				t.Errorf("the request should travel with its event, to %s:137: %+v", deviceIP, p)
+			}
+		case engine.KindReceived:
+			if p == nil || !equal(p.Data, reply) || p.Src.Addr().Unmap().String() != deviceIP {
+				t.Errorf("the reply should travel with its event, from %s: %+v", deviceIP, p)
+			}
+		}
 	}
 }
 

@@ -131,6 +131,14 @@ func TestListenerLearnsAHostnameFromAnAnnouncement(t *testing.T) {
 	if got := rec.messages(engine.KindReceived); len(got) != 1 || !strings.Contains(got[0], "announced") {
 		t.Errorf("received events = %v, want one describing the announcement", got)
 	}
+	for _, ev := range rec.events {
+		if ev.Kind != engine.KindReceived {
+			continue
+		}
+		if p := ev.Packet; p == nil || !p.Overheard || p.Src.Addr().Unmap().String() != deviceIP || p.Dst.String() != "224.0.0.251:5353" {
+			t.Errorf("an overheard announcement should travel with its event, marked overheard: %+v", p)
+		}
+	}
 }
 
 func TestListenerIgnoresAnAddressAnnouncedForAnotherHost(t *testing.T) {

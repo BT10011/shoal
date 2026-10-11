@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -270,6 +271,20 @@ func TestEnrichAsksFromPort5353AndMatchesByName(t *testing.T) {
 	}
 	if got := rec.messages(engine.KindReceived); len(got) != 1 || !strings.Contains(got[0], "laptop.local") {
 		t.Errorf("received events = %v, want one naming the answer", got)
+	}
+	group := netip.MustParseAddrPort("224.0.0.251:5353")
+	for _, ev := range rec.events {
+		p := ev.Packet
+		switch ev.Kind {
+		case engine.KindSent:
+			if p == nil || !equal(p.Data, conn.sent[0]) || p.Src.Port() != Port || p.Dst != group {
+				t.Errorf("the question should travel with its event, from port 5353 to the group: %+v", p)
+			}
+		case engine.KindReceived:
+			if p == nil || !equal(p.Data, reply) || p.Src.Addr().Unmap().String() != deviceIP || p.Dst != group || p.Overheard {
+				t.Errorf("the answer should travel with its event, multicast from %s to the group: %+v", deviceIP, p)
+			}
+		}
 	}
 }
 

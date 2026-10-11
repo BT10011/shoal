@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -176,6 +177,15 @@ func (a oneShotAsker) Send(query []byte, group *net.UDPAddr) error {
 	return err
 }
 
+// askedFrom is the address a question leaves from: port 5353 on this
+// machine, or the one-shot socket's ephemeral port.
+func askedFrom(a Asker) netip.AddrPort {
+	if l, ok := a.(interface{ LocalAddr() net.Addr }); ok && a.OneShot() {
+		return engine.SocketAddr(l.LocalAddr())
+	}
+	return netip.AddrPortFrom(netip.IPv4Unspecified(), Port)
+}
+
 func randomID() uint16 {
 	var b [2]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -248,8 +258,15 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 	if asker.OneShot() {
 		how = fmt.Sprintf("id 0x%04x, one-shot from an ephemeral port: the answer comes back unicast", id)
 	}
+	from := askedFrom(asker)
+	// A question from 5353 is answered to the group; a one-shot one, to us.
+	answerTo := engine.SocketAddr(e.opts.Group)
+	if asker.OneShot() {
+		answerTo = from
+	}
 	report(engine.ProbeEvent{Kind: engine.KindSent, Target: d.Key,
-		Message: fmt.Sprintf("PTR? %s → %s (%d bytes, %s)", name, e.opts.Group, len(query), how)})
+		Message: fmt.Sprintf("PTR? %s → %s (%d bytes, %s)", name, e.opts.Group, len(query), how),
+		Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: query, Src: from, Dst: engine.SocketAddr(e.opts.Group)}})
 
 	deadline := time.Now().Add(e.opts.Wait)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
@@ -274,7 +291,7 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 			return nil
 		}
 		wire := append([]byte(nil), buf[:n]...)
-		if e.handle(d.Key, ip, name, id, asker.OneShot(), wire, from, answered, emit, report) {
+		if e.handle(d.Key, ip, name, id, asker.OneShot(), wire, from, answerTo, answered, emit, report) {
 			answered = true
 		}
 		if time.Now().After(deadline) {
@@ -290,7 +307,7 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 // left alone. Later answers are logged but not emitted: the first answer
 // wins, and a second one is worth seeing rather than silently overwriting
 // the first.
-func (e *Enricher) handle(key string, ip net.IP, name string, id uint16, oneShot bool, wire []byte, from net.Addr, answered bool, emit engine.Emit, report engine.Report) bool {
+func (e *Enricher) handle(key string, ip net.IP, name string, id uint16, oneShot bool, wire []byte, from net.Addr, to netip.AddrPort, answered bool, emit engine.Emit, report engine.Report) bool {
 	resp, err := ParseResponse(wire)
 	if err != nil {
 		if oneShot { // on the group socket, other people's malformed traffic is not our business
@@ -313,7 +330,8 @@ func (e *Enricher) handle(key string, ip net.IP, name string, id uint16, oneShot
 		return false
 	}
 	report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-		Message: fmt.Sprintf("%s: %s", from, resp.Summary())})
+		Message: fmt.Sprintf("%s: %s", from, resp.Summary()),
+		Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: wire, Src: engine.SocketAddr(from), Dst: to}})
 	if answered {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
 			Message: fmt.Sprintf("%s also claims %s is %s", from, ip, records[0].PTR)})

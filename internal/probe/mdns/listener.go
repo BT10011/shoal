@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"syscall"
@@ -386,7 +387,9 @@ func (l *Listener) Run(ctx context.Context, iface netif.Interface, emit engine.E
 					Message: fmt.Sprintf("could not ask which services are on offer (%v); listening only, so services appear when something else browses", err)})
 			} else {
 				report(engine.ProbeEvent{Kind: engine.KindSent, Target: l.opts.Group.String(),
-					Message: fmt.Sprintf("PTR? %s → %s (%d bytes, browse %d of 2, from port %d: every responder offering these answers by multicast)", strings.Join(l.opts.Browse, ", "), l.opts.Group, len(query), asked, Port)})
+					Message: fmt.Sprintf("PTR? %s → %s (%d bytes, browse %d of 2, from port %d: every responder offering these answers by multicast)", strings.Join(l.opts.Browse, ", "), l.opts.Group, len(query), asked, Port),
+					Packet: &engine.Packet{Layer: engine.LayerUDP, Data: query,
+						Src: netip.AddrPortFrom(netip.IPv4Unspecified(), Port), Dst: engine.SocketAddr(l.opts.Group)}})
 			}
 		}
 		if err := conn.SetReadDeadline(time.Now().Add(readSlice)); err != nil {
@@ -481,13 +484,19 @@ func (l *Listener) overheard(wire []byte, from net.Addr, asked bool, emit engine
 			Message: fmt.Sprintf("%d bytes from %s could not be decoded: %v", len(wire), key, err)})
 		return
 	}
+	// What was heard on the network goes to a capture; the answers of this
+	// machine's own responder came over loopback, not the scanned interface.
+	var packet *engine.Packet
+	if !asked {
+		packet = &engine.Packet{Layer: engine.LayerUDP, Data: wire, Src: engine.SocketAddr(addr), Dst: engine.SocketAddr(l.opts.Group), Overheard: true}
+	}
 	if len(resp.Records) == 0 {
 		// A query, not an announcement. It still proves somebody is there.
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("%s asked about %s", key, resp.Question)})
+			Message: fmt.Sprintf("%s asked about %s", key, resp.Question), Packet: packet})
 	} else {
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("%s %s: %s", key, heardIt, resp.Summary())})
+			Message: fmt.Sprintf("%s %s: %s", key, heardIt, resp.Summary()), Packet: packet})
 	}
 
 	emit(model.Observation{

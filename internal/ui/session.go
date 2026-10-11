@@ -54,6 +54,7 @@ type openedMsg struct {
 	session Session
 	large   *LargeSweep
 	err     error
+	capture *captureMsg // a recording of the old network, ended by the switch
 }
 
 // ifacesMsg carries the list of interfaces for the picker.
@@ -97,14 +98,17 @@ func (a *app) switchTo(iface netif.Interface, choice SweepChoice) tea.Cmd {
 	a.status = engine.Status{}
 	a.switching = true
 	a.pending.Add(1)
-	open := a.opts.Open
+	open, capture := a.opts.Open, a.opts.Capture
 	return func() tea.Msg {
 		defer a.pending.Done()
 		if old != nil {
 			old.Stop()
 		}
+		// One file is one network: the old engine has stopped, so its last
+		// packets are in, and the recording ends with it.
+		rec := stopCaptureFor(capture, "switched to "+iface.Name)
 		s, large, err := open(iface, choice)
-		return openedMsg{iface: iface, session: s, large: large, err: err}
+		return openedMsg{iface: iface, session: s, large: large, err: err, capture: rec}
 	}
 }
 
@@ -112,6 +116,9 @@ func (a *app) switchTo(iface netif.Interface, choice SweepChoice) tea.Cmd {
 // to ask about, or an error to log.
 func (a *app) opened(msg openedMsg) {
 	a.switching = false
+	if msg.capture != nil {
+		a.captured(*msg.capture)
+	}
 	switch {
 	case msg.err != nil:
 		a.opts.Mode = "not scanning"

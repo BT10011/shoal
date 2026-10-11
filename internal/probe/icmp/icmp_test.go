@@ -1,10 +1,12 @@
 package icmp
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -167,8 +169,17 @@ type recorder struct {
 	events []engine.ProbeEvent
 }
 
-func (r *recorder) emit(o model.Observation)   { r.obs = append(r.obs, o) }
-func (r *recorder) report(e engine.ProbeEvent) { r.events = append(r.events, e) }
+func (r *recorder) emit(o model.Observation) { r.obs = append(r.obs, o) }
+
+// report keeps a copy of each packet, which is only valid during the call.
+func (r *recorder) report(e engine.ProbeEvent) {
+	if e.Packet != nil {
+		p := *e.Packet
+		p.Data = append([]byte(nil), p.Data...)
+		e.Packet = &p
+	}
+	r.events = append(r.events, e)
+}
 
 func (r *recorder) messages(k engine.EventKind) []string {
 	var out []string
@@ -234,6 +245,22 @@ func TestEnrichMeasuresRoundTrips(t *testing.T) {
 	}
 	if got := rec.messages(engine.KindReceived); len(got) != 3 {
 		t.Errorf("received events = %v, want three", got)
+	}
+	device := netip.MustParseAddr(deviceIP)
+	var sent int
+	for _, ev := range rec.events {
+		p := ev.Packet
+		switch ev.Kind {
+		case engine.KindSent:
+			if p == nil || p.Layer != engine.LayerICMP || !bytes.Equal(p.Data, conn.sent[sent]) || p.Dst.Addr().Unmap() != device {
+				t.Errorf("echo request %d should travel with its event, to %s: %+v", sent+1, device, p)
+			}
+			sent++
+		case engine.KindReceived:
+			if p == nil || p.Layer != engine.LayerICMP || len(p.Data) == 0 || p.Data[0] != 0 || p.Src.Addr().Unmap() != device {
+				t.Errorf("echo reply should travel with its event, from %s: %+v", device, p)
+			}
+		}
 	}
 }
 

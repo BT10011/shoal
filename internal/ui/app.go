@@ -39,6 +39,10 @@ type Options struct {
 	// UI calls it off its own goroutine. When Engine is nil, the UI opens
 	// Iface with it at start-up.
 	Open func(iface netif.Interface, choice SweepChoice) (Session, *LargeSweep, error)
+
+	// Capture records packets to a file for Wireshark when the user presses
+	// w. Nil turns it off, as in the demo.
+	Capture Capture
 }
 
 const (
@@ -179,6 +183,8 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.themeSaved(msg)
 	case openedMsg:
 		a.opened(msg)
+	case captureMsg:
+		a.captured(msg)
 	case ifacesMsg:
 		a.openIfaces(msg)
 	case tea.KeyMsg:
@@ -461,6 +467,9 @@ func (a *app) statusLeft() string {
 	case a.opts.Iface.Subnet != nil:
 		parts = append(parts, text.Render(a.opts.Iface.Name+" "+a.opts.Iface.Subnet.String()))
 	}
+	if rec := a.recordingLabel(); rec != "" {
+		parts = append(parts, s.StatusNotice.Render(rec))
+	}
 	if a.filter.active() {
 		parts = append(parts, text.Render(fmt.Sprintf("/%s  %d of %d", a.filter.pattern, len(a.devices), len(a.all))))
 	} else {
@@ -541,6 +550,13 @@ func (a *app) statusRight(left string) string {
 	}
 	if a.opts.Interfaces == nil {
 		bindings = withoutKey(bindings, "i")
+	}
+	switch {
+	case a.opts.Capture == nil:
+		bindings = withoutKey(bindings, "w")
+	case a.recordingLabel() != "":
+		// While recording, how to stop matters more than most keys.
+		bindings = relabel(bindings, "w", "stop rec", 7)
 	}
 	return keyBar(s, bindings, keyBarWidth(a.width, left))
 }

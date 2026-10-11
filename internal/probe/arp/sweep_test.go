@@ -179,6 +179,7 @@ func TestSweepDiscoversRespondersAndRetriesSilent(t *testing.T) {
 	if c.count(engine.KindSent) != 8 || c.count(engine.KindReceived) != 2 {
 		t.Fatalf("sent=%d received=%d", c.count(engine.KindSent), c.count(engine.KindReceived))
 	}
+	checkFrames(t, c.events, false)
 
 	ip, ok := c.observation(macA.String(), model.FieldIP)
 	if !ok || ip.Value != "10.0.0.1" || ip.Confidence != 1 || ip.Raw == nil {
@@ -235,6 +236,29 @@ func TestSweepOverhearsOtherTraffic(t *testing.T) {
 	}
 	if c.count(engine.KindReceived) != 3 {
 		t.Fatalf("received events = %d, want 3", c.count(engine.KindReceived))
+	}
+	checkFrames(t, c.events, true)
+}
+
+// checkFrames asserts that every sent and received event carries the ARP
+// frame it is about, for a capture, and whether it was overheard.
+func checkFrames(t *testing.T, events []engine.ProbeEvent, overheard bool) {
+	t.Helper()
+	for _, ev := range events {
+		if ev.Kind != engine.KindSent && ev.Kind != engine.KindReceived {
+			continue
+		}
+		p := ev.Packet
+		if p == nil || p.Layer != engine.LayerEthernet {
+			t.Errorf("%s %q carries no Ethernet frame: %+v", ev.Kind, ev.Message, p)
+			continue
+		}
+		if _, err := Decode(p.Data); err != nil {
+			t.Errorf("%s %q: frame does not decode: %v", ev.Kind, ev.Message, err)
+		}
+		if want := ev.Kind == engine.KindReceived && overheard; p.Overheard != want {
+			t.Errorf("%s %q: overheard = %v, want %v", ev.Kind, ev.Message, p.Overheard, want)
+		}
 	}
 }
 

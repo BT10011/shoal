@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/BT10011/shoal/internal/engine"
@@ -115,8 +116,10 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 	txid := e.opts.NewID()
 	query := Query(txid)
 	dst := &net.UDPAddr{IP: ip, Port: e.opts.Port}
+	local := engine.SocketAddr(conn.LocalAddr())
 	report(engine.ProbeEvent{Kind: engine.KindSent, Target: d.Key,
-		Message: fmt.Sprintf("node status request for \"*\" → %s (id 0x%04x, %d bytes)", dst, txid, len(query))})
+		Message: fmt.Sprintf("node status request for \"*\" → %s (id 0x%04x, %d bytes)", dst, txid, len(query)),
+		Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: query, Src: local, Dst: engine.SocketAddr(dst)}})
 	if _, err := conn.WriteTo(query, dst); err != nil {
 		return fmt.Errorf("cannot send to %s: %w", dst, err)
 	}
@@ -129,7 +132,7 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 				Message: fmt.Sprintf("%s did not answer within %s; it is probably not running NetBIOS, or port %d is filtered", ip, e.opts.Timeout, e.opts.Port)})
 			return nil
 		}
-		if e.handle(d.Key, txid, append([]byte(nil), buf[:n]...), from, emit, report) {
+		if e.handle(d.Key, txid, append([]byte(nil), buf[:n]...), from, local, emit, report) {
 			return nil
 		}
 	}
@@ -137,7 +140,7 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 
 // handle decodes one reply. It returns true when the reply answered the
 // question shoal asked, so no further reading is needed.
-func (e *Enricher) handle(key string, txid uint16, wire []byte, from net.Addr, emit engine.Emit, report engine.Report) bool {
+func (e *Enricher) handle(key string, txid uint16, wire []byte, from net.Addr, local netip.AddrPort, emit engine.Emit, report engine.Report) bool {
 	status, err := ParseNodeStatus(wire)
 	if err != nil {
 		report(engine.ProbeEvent{Kind: engine.KindError, Target: key,
@@ -150,7 +153,8 @@ func (e *Enricher) handle(key string, txid uint16, wire []byte, from net.Addr, e
 		return false
 	}
 	report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-		Message: fmt.Sprintf("%s: %s", from, status.Summary())})
+		Message: fmt.Sprintf("%s: %s", from, status.Summary()),
+		Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: wire, Src: engine.SocketAddr(from), Dst: local}})
 
 	group := ""
 	if workgroup, ok := status.Workgroup(); ok {

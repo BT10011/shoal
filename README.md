@@ -122,12 +122,24 @@ shoal version              which build this is
 ```
 
 Also: `--unprivileged`, `--rate N`, `--max-hosts N`, `--theme NAME`,
-`--history PATH`, `--no-history`.
+`--history PATH`, `--no-history`, `--pcap FILE`.
 
 In the TUI: `Enter` shows how every value for the selected device was
 learned, `x` adds the raw packets, `/` filters (`/dante`, `/off-subnet`),
 `s` sorts, `Tab` moves between panes, `i` switches to another interface or
-address this machine has, `t` picks a theme and `q` quits.
+address this machine has, `w` records packets for Wireshark, `t` picks a
+theme and `q` quits.
+
+**Following a scan in Wireshark.** Nothing is recorded unless you ask.
+Press `w` (then `r` to rescan, so the whole process is captured, and `w`
+again to stop), or start with `--pcap FILE` to record from start to quit.
+Every packet Shoal sent and heard goes into a pcapng file, each with a
+comment carrying Shoal's own reading of it, so Wireshark and Shoal can be
+read side by side (`frame.comment` filters on it). ARP frames are exactly
+as on the wire; the IP and UDP headers of Shoal's DNS, mDNS, NetBIOS and
+ping traffic are rebuilt, since the operating system writes the real ones,
+and the file says so. A capture lists every address and name on the
+network, so check it before sharing it.
 
 **Large networks.** Shoal sweeps up to a `/22` without asking. On anything
 larger, up to a `/16`, it stops before sending anything, explains what a

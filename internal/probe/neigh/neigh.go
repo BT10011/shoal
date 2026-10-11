@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/BT10011/shoal/internal/engine"
@@ -29,12 +30,12 @@ const nudgePort = 9
 
 // Options tune the probe. Zero values are the defaults shown.
 type Options struct {
-	Table    func() ([]Entry, error) // Table
-	Nudge    func(net.IP) error      // a UDP datagram to the discard port
-	Rate     int                     // nudges per second: 200
-	Settle   time.Duration           // wait for the kernel to resolve: 1s
-	MaxHosts int                     // refuse larger subnets: 1022 (/22)
-	NoNudge  bool                    // only read what the cache already holds
+	Table    func() ([]Entry, error)              // Table
+	Nudge    func(net.IP) (netip.AddrPort, error) // a UDP datagram to the discard port; returns the socket's own address
+	Rate     int                                  // nudges per second: 200
+	Settle   time.Duration                        // wait for the kernel to resolve: 1s
+	MaxHosts int                                  // refuse larger subnets: 1022 (/22)
+	NoNudge  bool                                 // only read what the cache already holds
 }
 
 const (
@@ -148,10 +149,11 @@ func (d *Discoverer) nudgeAll(ctx context.Context, targets []net.IP, report engi
 			return ctx.Err()
 		case <-ticker.C:
 		}
-		if err := d.opts.Nudge(ip); err != nil {
+		if local, err := d.opts.Nudge(ip); err != nil {
 			report(engine.ProbeEvent{Kind: engine.KindInfo, Target: ip.String(), Message: "nudge failed: " + err.Error()})
 		} else {
-			report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("udp datagram to %s:%d to prompt a neighbour lookup", ip, nudgePort)})
+			report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("udp datagram to %s:%d to prompt a neighbour lookup", ip, nudgePort),
+				Packet: &engine.Packet{Layer: engine.LayerUDP, Data: nudgeData, Src: local, Dst: engine.SocketAddr(&net.UDPAddr{IP: ip, Port: nudgePort})}})
 		}
 		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: i + 1, Total: len(targets)})
 	}
@@ -188,17 +190,21 @@ func isZero(mac net.HardwareAddr) bool {
 	return true
 }
 
-func nudge(ip net.IP) error {
+// nudgeData is what a nudge sends: one byte, since only sending matters.
+var nudgeData = []byte{0}
+
+func nudge(ip net.IP) (netip.AddrPort, error) {
 	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: ip, Port: nudgePort})
 	if err != nil {
-		return err
+		return netip.AddrPort{}, err
 	}
 	defer conn.Close()
+	local := engine.SocketAddr(conn.LocalAddr())
 	if err := conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
-		return err
+		return local, err
 	}
-	_, err = conn.Write([]byte{0})
-	return err
+	_, err = conn.Write(nudgeData)
+	return local, err
 }
 
 // hostIPs lists every host address in the subnet except exclude.

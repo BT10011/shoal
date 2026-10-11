@@ -67,6 +67,10 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.opts.Engine != nil {
 			a.opts.Engine.Rescan()
 		}
+	case "w":
+		if a.opts.Capture != nil && a.opts.Engine != nil && !a.switching {
+			return a, a.toggleCapture()
+		}
 	case "c":
 		if a.opts.Engine != nil {
 			a.opts.Engine.Cancel()
@@ -134,8 +138,20 @@ var tableBindings = []binding{
 	{"r", "r", "rescan", 6},
 	{"t", "t", "theme", 1},
 	{"i", "i", "iface", 2},
+	{"w", "w", "pcap", 1},
 	{"?", "?", "help", 9},
 	{"q", "q", "quit", 8},
+}
+
+// relabel changes one binding's label and how long it survives.
+func relabel(bindings []binding, key, label string, keep int) []binding {
+	out := append([]binding(nil), bindings...)
+	for i := range out {
+		if out[i].key == key {
+			out[i].label, out[i].keep = label, keep
+		}
+	}
+	return out
 }
 
 // withoutKey drops one binding, for a key that does nothing in this run.
@@ -156,6 +172,7 @@ var detailBindings = []binding{
 	{"/", "/", "filter", 2},
 	{"c", "c", "stop", 7},
 	{"r", "r", "rescan", 6},
+	{"w", "w", "pcap", 1},
 	{"?", "?", "help", 9},
 	{"q", "q", "quit", 8},
 }
@@ -172,6 +189,7 @@ var hoodBindings = []binding{
 	{"esc", "esc", "back", 3},
 	{"c", "c", "stop", 7},
 	{"r", "r", "rescan", 6},
+	{"w", "w", "pcap", 1},
 	{"?", "?", "help", 9},
 	{"q", "q", "quit", 8},
 }

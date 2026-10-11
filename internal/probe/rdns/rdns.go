@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -17,8 +18,11 @@ import (
 )
 
 // Exchange sends one query to one resolver and returns the reply and how long
-// the round trip took. It is an option so tests can answer from fixtures.
-type Exchange func(ctx context.Context, r Resolver, query []byte) (reply []byte, rtt time.Duration, err error)
+// the round trip took. It calls sent with the socket's two addresses just
+// before the query goes out, so the probe can report it with the packet;
+// if it never gets that far, nothing was sent. It is an option so tests
+// can answer from fixtures.
+type Exchange func(ctx context.Context, r Resolver, query []byte, sent func(local, remote netip.AddrPort)) (reply []byte, rtt time.Duration, err error)
 
 // Confidence is how far a PTR answer is trusted. It sits below mDNS because
 // reverse DNS says what the network's administrator wrote down, which may be
@@ -135,12 +139,17 @@ func (e *Enricher) ask(ctx context.Context, key, name string, r Resolver, emit e
 	if err != nil {
 		return false, err
 	}
-	report(engine.ProbeEvent{Kind: engine.KindSent, Target: key,
-		Message: fmt.Sprintf("PTR? %s → %s (id 0x%04x, %d bytes, %s)", name, r.Addr, id, len(query), r.Origin)})
+	var local, remote netip.AddrPort
+	sent := func(l, rm netip.AddrPort) {
+		local, remote = l, rm
+		report(engine.ProbeEvent{Kind: engine.KindSent, Target: key,
+			Message: fmt.Sprintf("PTR? %s → %s (id 0x%04x, %d bytes, %s)", name, r.Addr, id, len(query), r.Origin),
+			Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: query, Src: l, Dst: rm}})
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, e.opts.Timeout)
 	defer cancel()
-	wire, rtt, err := e.opts.Exchange(ctx, r, query)
+	wire, rtt, err := e.opts.Exchange(ctx, r, query, sent)
 	if err != nil {
 		report(engine.ProbeEvent{Kind: engine.KindError, Target: key,
 			Message: fmt.Sprintf("%s did not answer: %v", r.Addr, err)})
@@ -159,7 +168,8 @@ func (e *Enricher) ask(ctx context.Context, key, name string, r Resolver, emit e
 		return false, err
 	}
 	report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-		Message: fmt.Sprintf("%s in %s: %s", r.Addr, round(rtt), reply.Summary())})
+		Message: fmt.Sprintf("%s in %s: %s", r.Addr, round(rtt), reply.Summary()),
+		Packet:  &engine.Packet{Layer: engine.LayerUDP, Data: wire, Src: remote, Dst: local}})
 
 	switch {
 	case reply.RCode == dnsmessage.RCodeSuccess && len(reply.Records) > 0:
@@ -200,7 +210,7 @@ func (e *Enricher) ask(ctx context.Context, key, name string, r Resolver, emit e
 
 // UDPExchange sends the query as a single UDP datagram, the way a resolver
 // expects, and reads one reply.
-func UDPExchange(ctx context.Context, r Resolver, query []byte) ([]byte, time.Duration, error) {
+func UDPExchange(ctx context.Context, r Resolver, query []byte, sent func(local, remote netip.AddrPort)) ([]byte, time.Duration, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "udp", r.Addr)
 	if err != nil {
@@ -212,6 +222,7 @@ func UDPExchange(ctx context.Context, r Resolver, query []byte) ([]byte, time.Du
 			return nil, 0, err
 		}
 	}
+	sent(engine.SocketAddr(conn.LocalAddr()), engine.SocketAddr(conn.RemoteAddr()))
 	start := time.Now()
 	if _, err := conn.Write(query); err != nil {
 		return nil, time.Since(start), err

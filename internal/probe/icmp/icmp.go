@@ -203,7 +203,9 @@ func (e *Enricher) roundTrips(ctx context.Context, conn net.PacketConn, mode Mod
 		}
 		sent[seq] = time.Now()
 		report(engine.ProbeEvent{Kind: engine.KindSent, Target: key,
-			Message: fmt.Sprintf("echo request seq=%d → %s (%d bytes, %s)", seq, ip, len(wire), mode)})
+			Message: fmt.Sprintf("echo request seq=%d → %s (%d bytes, %s)", seq, ip, len(wire), mode),
+			Packet: &engine.Packet{Layer: engine.LayerICMP, Data: wire,
+				Src: engine.SocketAddr(conn.LocalAddr()), Dst: engine.SocketAddr(dst)}})
 
 		// Collect replies during the gap before the next request, and after
 		// the last one until the deadline.
@@ -260,7 +262,9 @@ func (e *Enricher) collect(conn net.PacketConn, key string, ip net.IP, sent map[
 		rtt := time.Since(at)
 		rtts = append(rtts, rtt)
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("echo reply seq=%d from %s in %s", reply.Seq, host(from), FormatRTT(rtt))})
+			Message: fmt.Sprintf("echo reply seq=%d from %s in %s", reply.Seq, host(from), FormatRTT(rtt)),
+			Packet: &engine.Packet{Layer: engine.LayerICMP, Data: buf[:n],
+				Src: engine.SocketAddr(from), Dst: engine.SocketAddr(conn.LocalAddr())}})
 		if last && len(sent) == 0 {
 			return rtts, nil
 		}

@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -69,7 +71,55 @@ type ProbeEvent struct {
 	Done    int
 	Total   int
 	At      time.Time
+	// Packet is the packet a sent or received event is about, when the
+	// probe has it, so it can be written to a capture. It is only valid
+	// during the Listener call: a probe may reuse the buffer afterwards.
+	Packet *Packet
 }
+
+// Packet is the bytes behind a sent or received event.
+type Packet struct {
+	Layer Layer
+	Data  []byte
+	// Src and Dst are the addresses a socket probe used, from which a
+	// capture rebuilds the headers the kernel added; ports are unused for
+	// ICMP. Unset for an Ethernet frame, which carries its own.
+	Src, Dst netip.AddrPort
+	// Overheard is set for a packet heard on the network that shoal neither
+	// sent nor was sent: another device's ARP, or an mDNS announcement.
+	Overheard bool
+}
+
+// SocketAddr is a socket's address as a Packet wants it: IPv4 in its plain
+// form rather than IPv6-mapped, port 0 for a raw IP socket, and the zero
+// value for anything that is not UDP or IP.
+func SocketAddr(a net.Addr) netip.AddrPort {
+	switch v := a.(type) {
+	case *net.UDPAddr:
+		if v == nil {
+			break
+		}
+		ap := v.AddrPort()
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	case *net.IPAddr:
+		if v == nil {
+			break
+		}
+		if ip, ok := netip.AddrFromSlice(v.IP); ok {
+			return netip.AddrPortFrom(ip.Unmap(), 0)
+		}
+	}
+	return netip.AddrPort{}
+}
+
+// Layer says what a Packet's Data starts with.
+type Layer int
+
+const (
+	LayerEthernet Layer = iota + 1 // a whole frame, as the ARP probes send and hear
+	LayerUDP                       // a UDP payload, as a socket sends and reads it
+	LayerICMP                      // an ICMP message, as a socket sends and reads it
+)
 
 // ProbeState is the lifecycle state of a discoverer.
 type ProbeState string

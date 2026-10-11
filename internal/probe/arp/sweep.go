@@ -208,11 +208,13 @@ func (s *Sweep) pass(ctx context.Context, conn Conn, iface netif.Interface, targ
 		if !iface.Subnet.Contains(ip) {
 			sender, note = net.IPv4zero, fmt.Sprintf(" (probe, --also %s)", s.rangeOf(ip))
 		}
-		if err := conn.WriteFrame(Request(iface.MAC, sender, ip)); err != nil {
+		frame := Request(iface.MAC, sender, ip)
+		if err := conn.WriteFrame(frame); err != nil {
 			return done, fmt.Errorf("send who-has %s: %w", ip, err)
 		}
 		done++
-		report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("who-has %s tell %s%s", ip, sender, note)})
+		report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip.String(), Message: fmt.Sprintf("who-has %s tell %s%s", ip, sender, note),
+			Packet: &engine.Packet{Layer: engine.LayerEthernet, Data: frame}})
 		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: done, Total: total})
 	}
 	return done, nil
@@ -337,7 +339,8 @@ func (l *listener) handle(p Packet, frame []byte) {
 		}
 		method := fmt.Sprintf("ARP probe from %s overheard on %s: sender address 0.0.0.0, asking whether %s is free before taking it (RFC 5227); the device has no address yet", p.SenderMAC, l.iface.Name, p.TargetIP)
 		l.report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("probe: who-has %s tell 0.0.0.0 from %s (overheard; the sender has no address yet)", p.TargetIP, p.SenderMAC)})
+			Message: fmt.Sprintf("probe: who-has %s tell 0.0.0.0 from %s (overheard; the sender has no address yet)", p.TargetIP, p.SenderMAC),
+			Packet:  &engine.Packet{Layer: engine.LayerEthernet, Data: raw, Overheard: true}})
 		l.emit(model.Observation{DeviceKey: key, Field: model.FieldMAC, Value: key, Method: method, Confidence: 0.9, Raw: raw})
 		return
 	}
@@ -390,7 +393,8 @@ func (l *listener) handle(p Packet, frame []byte) {
 		l.mu.Unlock()
 	}
 
-	l.report(engine.ProbeEvent{Kind: engine.KindReceived, Target: p.SenderIP.String(), Message: message})
+	l.report(engine.ProbeEvent{Kind: engine.KindReceived, Target: p.SenderIP.String(), Message: message,
+		Packet: &engine.Packet{Layer: engine.LayerEthernet, Data: raw, Overheard: !toUs}})
 	l.emit(model.Observation{DeviceKey: key, Field: model.FieldMAC, Value: key, Method: method, Confidence: conf, Raw: raw})
 	l.emit(model.Observation{DeviceKey: key, Field: model.FieldIP, Value: p.SenderIP.String(), Method: method, Confidence: conf, Raw: raw})
 }

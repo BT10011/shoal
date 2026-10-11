@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
@@ -188,7 +189,8 @@ func TestEnrichEmitsHostnameFromPTR(t *testing.T) {
 	e := New(Options{
 		Resolvers: []Resolver{{Addr: "192.168.1.1:53", Origin: "nameserver on line 1 of /etc/resolv.conf"}},
 		NewID:     fixedID,
-		Exchange: func(_ context.Context, r Resolver, query []byte) ([]byte, time.Duration, error) {
+		Exchange: func(_ context.Context, r Resolver, query []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+			sent(testLocal, testRemote)
 			asked = append(asked, r.Addr)
 			if want := loadHex(t, "query.hex"); !bytesEqual(query, want) {
 				t.Errorf("query =\n%s\nwant\n%s", hex.Dump(query), hex.Dump(want))
@@ -228,6 +230,19 @@ func TestEnrichEmitsHostnameFromPTR(t *testing.T) {
 			t.Errorf("Method = %q, want it to mention %q", o.Method, want)
 		}
 	}
+	for _, ev := range rec.events {
+		p := ev.Packet
+		switch ev.Kind {
+		case engine.KindSent:
+			if p == nil || p.Layer != engine.LayerUDP || !bytesEqual(p.Data, loadHex(t, "query.hex")) || p.Src != testLocal || p.Dst != testRemote {
+				t.Errorf("the query should travel with its event, from %s to %s: %+v", testLocal, testRemote, p)
+			}
+		case engine.KindReceived:
+			if p == nil || !bytesEqual(p.Data, reply) || p.Src != testRemote || p.Dst != testLocal {
+				t.Errorf("the reply should travel with its event, back the other way: %+v", p)
+			}
+		}
+	}
 	if sent := rec.messages(engine.KindSent); len(sent) != 1 || !strings.Contains(sent[0], "PTR?") {
 		t.Errorf("sent events = %v, want one naming the question", sent)
 	}
@@ -241,7 +256,8 @@ func TestEnrichClampsShortTTL(t *testing.T) {
 	e := New(Options{
 		Resolvers: []Resolver{{Addr: "192.168.1.1:53", Origin: "test"}},
 		NewID:     fixedID,
-		Exchange: func(context.Context, Resolver, []byte) ([]byte, time.Duration, error) {
+		Exchange: func(_ context.Context, _ Resolver, _ []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+			sent(testLocal, testRemote)
 			return reply, time.Millisecond, nil
 		},
 	})
@@ -267,7 +283,8 @@ func TestEnrichTriesNextResolverWhenOneIsSilent(t *testing.T) {
 			{Addr: "192.168.1.1:53", Origin: "second"},
 		},
 		NewID: fixedID,
-		Exchange: func(_ context.Context, r Resolver, _ []byte) ([]byte, time.Duration, error) {
+		Exchange: func(_ context.Context, r Resolver, _ []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+			sent(testLocal, testRemote)
 			if r.Addr == "10.0.0.53:53" {
 				return nil, 2 * time.Second, errors.New("i/o timeout")
 			}
@@ -294,7 +311,8 @@ func TestEnrichStopsAtNXDomain(t *testing.T) {
 	e := New(Options{
 		Resolvers: []Resolver{{Addr: "a:53", Origin: "first"}, {Addr: "b:53", Origin: "second"}},
 		NewID:     func() uint16 { return 0x3c4d },
-		Exchange: func(context.Context, Resolver, []byte) ([]byte, time.Duration, error) {
+		Exchange: func(_ context.Context, _ Resolver, _ []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+			sent(testLocal, testRemote)
 			asked++
 			return loadHex(t, "nxdomain.hex"), time.Millisecond, nil
 		},
@@ -318,7 +336,8 @@ func TestEnrichDiscardsMismatchedID(t *testing.T) {
 	e := New(Options{
 		Resolvers: []Resolver{{Addr: "a:53", Origin: "first"}},
 		NewID:     func() uint16 { return 0x9999 }, // the fixture answers 0x1a2b
-		Exchange: func(context.Context, Resolver, []byte) ([]byte, time.Duration, error) {
+		Exchange: func(_ context.Context, _ Resolver, _ []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+			sent(testLocal, testRemote)
 			return loadHex(t, "reply.hex"), time.Millisecond, nil
 		},
 	})
@@ -336,7 +355,8 @@ func TestEnrichDiscardsMismatchedID(t *testing.T) {
 }
 
 func TestEnrichRejectsDeviceWithoutIP(t *testing.T) {
-	e := New(Options{Resolvers: []Resolver{{Addr: "a:53"}}, Exchange: func(context.Context, Resolver, []byte) ([]byte, time.Duration, error) {
+	e := New(Options{Resolvers: []Resolver{{Addr: "a:53"}}, Exchange: func(_ context.Context, _ Resolver, _ []byte, sent func(netip.AddrPort, netip.AddrPort)) ([]byte, time.Duration, error) {
+		sent(testLocal, testRemote)
 		t.Error("exchange called for a device with no IP")
 		return nil, 0, nil
 	}})
@@ -367,3 +387,9 @@ func TestTriggersAndName(t *testing.T) {
 		t.Errorf("Concurrency = %d, want %d", e.Concurrency(), defaultConcurrency)
 	}
 }
+
+// The socket addresses a fake exchange reports, as UDPExchange would.
+var (
+	testLocal  = netip.MustParseAddrPort("172.16.10.5:40000")
+	testRemote = netip.MustParseAddrPort("172.16.10.1:53")
+)

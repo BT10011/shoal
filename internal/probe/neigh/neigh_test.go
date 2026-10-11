@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -138,7 +139,7 @@ func TestRunEmitsUsableEntriesOnly(t *testing.T) {
 	c := &capture{}
 	d := New(Options{
 		Table:  func() ([]Entry, error) { return table, nil },
-		Nudge:  func(ip net.IP) error { nudged = append(nudged, ip.String()); return nil },
+		Nudge:  func(ip net.IP) (netip.AddrPort, error) { nudged = append(nudged, ip.String()); return nudgedFrom, nil },
 		Rate:   5000,
 		Settle: time.Millisecond,
 	})
@@ -151,6 +152,16 @@ func TestRunEmitsUsableEntriesOnly(t *testing.T) {
 	}
 	if c.count(engine.KindReceived) != 2 {
 		t.Fatalf("received events = %d, want 2 usable entries", c.count(engine.KindReceived))
+	}
+	for _, ev := range c.events {
+		switch {
+		case ev.Kind == engine.KindSent:
+			if p := ev.Packet; p == nil || p.Layer != engine.LayerUDP || p.Src != nudgedFrom || p.Dst.String() != ev.Target+":9" {
+				t.Errorf("a nudge should travel with its event, from %s to the discard port: %+v", nudgedFrom, p)
+			}
+		case ev.Packet != nil:
+			t.Errorf("%s %q: a cache entry is not a packet, so it carries none", ev.Kind, ev.Message)
+		}
 	}
 
 	got, ok := c.observation("00:00:5e:00:53:02", model.FieldIP)
@@ -185,7 +196,7 @@ func TestRunWithoutNudging(t *testing.T) {
 		Table: func() ([]Entry, error) {
 			return []Entry{{IP: net.IPv4(10, 0, 0, 1).To4(), MAC: mac(t, "00:00:5e:00:53:02"), Interface: "en0"}}, nil
 		},
-		Nudge:   func(net.IP) error { t.Fatal("must not nudge"); return nil },
+		Nudge:   func(net.IP) (netip.AddrPort, error) { t.Fatal("must not nudge"); return netip.AddrPort{}, nil },
 		NoNudge: true,
 	})
 	if err := d.Run(context.Background(), testIface(t, "10.0.0.0/29"), c.emit, c.report); err != nil {
@@ -204,7 +215,7 @@ func TestRunReportsNudgeFailures(t *testing.T) {
 	c := &capture{}
 	d := New(Options{
 		Table:  func() ([]Entry, error) { return nil, nil },
-		Nudge:  func(net.IP) error { return errors.New("network is unreachable") },
+		Nudge:  func(net.IP) (netip.AddrPort, error) { return netip.AddrPort{}, errors.New("network is unreachable") },
 		Rate:   5000,
 		Settle: time.Millisecond,
 	})
@@ -225,7 +236,7 @@ func TestRunReportsNudgeFailures(t *testing.T) {
 
 func TestRunRefusesBadInterfaceAndHugeSubnet(t *testing.T) {
 	c := &capture{}
-	d := New(Options{Table: func() ([]Entry, error) { return nil, nil }, Nudge: func(net.IP) error { return nil }})
+	d := New(Options{Table: func() ([]Entry, error) { return nil, nil }, Nudge: func(net.IP) (netip.AddrPort, error) { return nudgedFrom, nil }})
 	if err := d.Run(context.Background(), netif.Interface{Name: "utun0"}, c.emit, c.report); err == nil {
 		t.Error("interface without a subnet should be rejected")
 	}
@@ -241,7 +252,7 @@ func TestNoNudgeIgnoresTheHostLimit(t *testing.T) {
 		Table: func() ([]Entry, error) {
 			return []Entry{{IP: net.IPv4(10, 0, 0, 1).To4(), MAC: mac(t, "00:00:5e:00:53:02"), Interface: "en0"}}, nil
 		},
-		Nudge:   func(net.IP) error { t.Fatal("must not nudge"); return nil },
+		Nudge:   func(net.IP) (netip.AddrPort, error) { t.Fatal("must not nudge"); return netip.AddrPort{}, nil },
 		NoNudge: true,
 	})
 	// A /18 is far over the limit, but reading the cache sends nothing.
@@ -257,7 +268,7 @@ func TestRunSurfacesTableErrors(t *testing.T) {
 	c := &capture{}
 	d := New(Options{
 		Table:  func() ([]Entry, error) { return nil, errors.New("sysctl failed") },
-		Nudge:  func(net.IP) error { return nil },
+		Nudge:  func(net.IP) (netip.AddrPort, error) { return nudgedFrom, nil },
 		Rate:   5000,
 		Settle: time.Millisecond,
 	})
@@ -272,7 +283,7 @@ func TestRunStopsOnCancel(t *testing.T) {
 	c := &capture{}
 	d := New(Options{
 		Table:  func() ([]Entry, error) { return nil, nil },
-		Nudge:  func(net.IP) error { return nil },
+		Nudge:  func(net.IP) (netip.AddrPort, error) { return nudgedFrom, nil },
 		Rate:   50,
 		Settle: time.Hour,
 	})
@@ -304,3 +315,6 @@ func TestTableSmoke(t *testing.T) {
 	}
 	t.Logf("%d entries via %s", len(entries), TableSource)
 }
+
+// nudgedFrom is the socket address a fake nudge reports.
+var nudgedFrom = netip.MustParseAddrPort("10.0.0.2:40000")

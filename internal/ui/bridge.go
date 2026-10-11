@@ -54,6 +54,7 @@ func (b *bridge) onStore(store.Event) {
 }
 
 func (b *bridge) onProbe(ev engine.ProbeEvent) {
+	ev.Packet = nil // valid only during this call, and the log has no use for it
 	b.mu.Lock()
 	b.pending = append(b.pending, ev)
 	if len(b.pending) > maxPending {

@@ -290,6 +290,7 @@ always sort last.
   r            rescan
   t            theme picker: preview live, Enter keeps and remembers it
   i            interfaces: scan another network this machine is on
+  w            record packets for Wireshark; w again stops
   ?            this manual                     q     quit
 
 # Keeping it up to date, and removing it
@@ -314,6 +315,28 @@ It lists everything it would delete — the program, the remembered theme,
 the history of every network scanned, and the PATH line the installer
 added to your shell — and removes nothing until you agree.
 
+# Following a scan in Wireshark
+
+Nothing is recorded unless you ask. Press w and every packet shoal sends
+and hears from then on is written to a pcapng file in the folder shoal
+was started from; the log says which file. Press r to rescan so the whole
+process is in it, and w again to stop. The status bar shows REC and a
+count while it records. Start shoal with --pcap FILE instead to record
+from the first packet to quit. Switching interface with i ends a
+recording, so a file only ever holds one network.
+
+Open the file in Wireshark. Each packet carries a comment with shoal's
+reading of it, the same line as in the log, so the two can be read side
+by side; the frame.comment filter finds them. ARP frames are exactly what
+went over the wire. Shoal's DNS, mDNS, NetBIOS and ping traffic goes
+through the operating system, which builds the real IP and UDP headers,
+so those headers are rebuilt from the addresses used; the capture file
+says so. Packets other devices sent that shoal overheard are marked as
+overheard.
+
+A capture lists every address and name on the network. Keep it to
+yourself unless you have checked what is in it.
+
 # Going deeper
 
 Each probe has a written explanation in docs/protocols/ in the source
@@ -326,7 +349,8 @@ command line, printing what it sends, receives and concludes:
   shoal probe oui 00:11:32:aa:bb:cc
 
 For anything deeper than that, Wireshark shows the same packets in full
-and Nmap will tell you what shoal deliberately does not.
+(press w to hand it a capture) and Nmap will tell you what shoal
+deliberately does not.
 
 # Credits and licence
 
