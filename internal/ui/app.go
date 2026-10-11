@@ -138,16 +138,23 @@ type logView struct {
 }
 
 func newApp(o Options) *app {
-	theme, _ := tideui.ThemeByName(o.Theme)
-	return &app{
+	theme, known := ThemeByName(o.Theme)
+	a := &app{
 		opts:     o,
 		renderer: newRenderer(theme),
 		theme:    theme.Name,
 		now:      time.Now(),
 		filter:   newFilter(),
-		picker:   tideui.NewThemePicker(tideui.ThemePickerOptions{InitialTheme: theme.Name}),
+		picker:   tideui.NewThemePicker(tideui.ThemePickerOptions{Themes: Themes(), InitialTheme: theme.Name}),
 		log:      logView{follow: true},
 	}
+	if !known && o.Theme != "" {
+		// A remembered theme shoal no longer offers: say so, rather than
+		// leave the user wondering why the colours changed.
+		a.events = append(a.events, engine.ProbeEvent{Probe: "config", Kind: engine.KindInfo, At: time.Now(),
+			Message: fmt.Sprintf("theme %s is not one shoal offers any more, so %s is in use; press t to choose another", o.Theme, theme.Name)})
+	}
+	return a
 }
 
 func (a *app) Init() tea.Cmd {

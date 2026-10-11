@@ -232,6 +232,17 @@ Also compiled in: [Bubble Tea](https://github.com/charmbracelet/bubbletea),
 pure Go; and the IEEE's public registry of MAC address assignments, for
 vendor lookup.
 
+Six of the themes are Shoal's own adaptations of other projects' palettes,
+all MIT-licensed: **kanagawa-wave** from
+[kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim) by Tommaso Laurenzi,
+**ayu-mirage** from [ayu](https://github.com/ayu-theme/ayu-colors) by Konstantin Pschera,
+**oxocarbon** from [oxocarbon.nvim](https://github.com/nyoom-engineering/oxocarbon.nvim)
+by Riccardo Mazzarini, **vesper** from [Vesper](https://github.com/raunofreiberg/vesper)
+by Rauno Freiberg, **moonfly** from
+[vim-moonfly-colors](https://github.com/bluz71/vim-moonfly-colors) by its authors, and
+**synthwave-84** from [SynthWave '84](https://github.com/robb0wen/synthwave-vscode)
+by Robb Owen.
+
 ## Licence
 
 Shoal is released under the [MIT licence](LICENSE): use it, change it and

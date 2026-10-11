@@ -360,7 +360,13 @@ texts travel with each release in THIRD_PARTY_NOTICES.md.
 The panes, themes and the live theme picker are TideUI, by allisonhere,
 who also contributes to Shoal itself. Under TideUI sit Bubble Tea,
 Bubbles and Lip Gloss by Charm. Vendor names come from the IEEE's public
-registry of MAC address assignments.`
+registry of MAC address assignments.
+
+Six themes adapt other projects' MIT-licensed palettes: kanagawa-wave
+(kanagawa.nvim, Tommaso Laurenzi), ayu-mirage (ayu, Konstantin Pschera),
+oxocarbon (oxocarbon.nvim, Riccardo Mazzarini), vesper (Vesper, Rauno
+Freiberg), moonfly (vim-moonfly-colors, its authors) and synthwave-84
+(SynthWave '84, Robb Owen).`
 
 // help is the scroll state of the manual.
 type help struct {

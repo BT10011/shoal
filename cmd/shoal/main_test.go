@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/BT10011/shoal/internal/config"
@@ -78,5 +79,12 @@ func TestLargeAsksAboveTheLimitAndUpToASlash16(t *testing.T) {
 	l = c.large(testIface(t, "10.20.30.40", "10.0.0.0/8"))
 	if l == nil || l.Rate != 250 || l.Local.String() != "10.20.30.0/24" {
 		t.Errorf("a /8 should be asked about at the --rate given: %+v", l)
+	}
+}
+
+func TestUnknownThemeIsRefusedWithTheChoices(t *testing.T) {
+	err := runTUI([]string{"--theme", "no-such-theme", "--demo"})
+	if err == nil || !strings.Contains(err.Error(), `no theme called "no-such-theme"`) || !strings.Contains(err.Error(), "kanagawa-wave") {
+		t.Fatalf("err = %v, want the unknown name refused and the choices listed", err)
 	}
 }

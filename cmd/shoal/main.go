@@ -148,7 +148,7 @@ func runTUI(args []string) error {
 	unprivileged := fs.Bool("unprivileged", false, "read the kernel neighbour table instead of sending ARP")
 	rate := fs.Int("rate", 0, "probe packets per second")
 	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses")
-	theme := fs.String("theme", "catppuccin-mocha", "colour theme (a tideui built-in name)")
+	theme := fs.String("theme", ui.DefaultTheme, "colour theme (see the picker, t, for every name)")
 	historyPath := fs.String("history", "", "where to remember networks between runs")
 	noHistory := fs.Bool("no-history", false, "remember nothing")
 	pcapPath := fs.String("pcap", "", "record every packet to this pcapng file")
@@ -156,6 +156,9 @@ func runTUI(args []string) error {
 	fs.Func("also", "also ask every address in this IPv4 range with ARP (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if _, ok := ui.ThemeByName(*theme); !ok {
+		return fmt.Errorf("--theme: there is no theme called %q; choose one of: %s", *theme, strings.Join(ui.ThemeNames(), ", "))
 	}
 	themeName, saveTheme := themeSettings(fs, *theme)
 	if *demo {
