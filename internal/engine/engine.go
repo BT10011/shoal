@@ -42,6 +42,15 @@ type Enricher interface {
 	Enrich(ctx context.Context, d model.DeviceSnapshot, emit Emit, report Report) error
 }
 
+// Forgetter is implemented by a probe that remembers devices beyond the
+// session, so a device the user removes can be forgotten there as well.
+type Forgetter interface {
+	// Remembers reports whether anything is being remembered right now.
+	Remembers() bool
+	// Forget deletes the device with this key from what is remembered.
+	Forget(key string) error
+}
+
 // Producer is implemented by an enricher that exists to fill one field,
 // such as a name or a round trip. A lookup then counts as answered only
 // when that field came back, so the status can say how many devices a
@@ -234,6 +243,8 @@ type Engine struct {
 
 	refreshMu sync.Mutex
 	refreshed map[string]time.Time // device and enricher → when a renewal was last asked for
+
+	removed map[string]bool // devices the user removed and nothing has brought back; under mu
 }
 
 // refreshEvery is how often the engine looks for values nearing expiry.
@@ -549,6 +560,120 @@ func (e *Engine) busyLocked() bool {
 	return false
 }
 
+// CanForget reports whether removing a device can also forget it: a probe
+// is remembering this network.
+func (e *Engine) CanForget() bool {
+	for _, f := range e.forgetters() {
+		if f.Remembers() {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) forgetters() []Forgetter {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []Forgetter
+	for _, d := range e.discoverers {
+		if f, ok := d.Discoverer.(Forgetter); ok {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// Remove takes devices off the list at the user's request, the only way a
+// device ever leaves (a rescan never does it). Their queued lookups and
+// renewals are dropped, and an answer still on its way is not allowed to
+// bring one back; only a discoverer hearing the device again does. With
+// forget, every probe that remembers this network forgets them too. The
+// log says what went and why it could go. It returns how many devices were
+// removed and how many forgotten.
+func (e *Engine) Remove(keys []string, forget bool) (removed, forgotten int, err error) {
+	now := e.now()
+	var remembering []Forgetter
+	for _, f := range e.forgetters() {
+		if f.Remembers() {
+			remembering = append(remembering, f)
+		}
+	}
+	var errs []error
+	for _, key := range keys {
+		d, ok := e.store.Get(key)
+		if !ok || !e.store.Remove(key) {
+			continue
+		}
+		removed++
+		e.mu.Lock()
+		if e.removed == nil {
+			e.removed = make(map[string]bool)
+		}
+		e.removed[d.Key] = true
+		enrichers := e.enrichers
+		e.mu.Unlock()
+		for _, en := range enrichers {
+			en.drop(d.Key)
+		}
+
+		what := "removed " + describeDevice(d, now) + " by hand"
+		if at, source, ok := d.LastContact(); ok {
+			what += fmt.Sprintf("; it was last heard %s ago via %s", now.Sub(at).Round(time.Second), source)
+		}
+		forgot := false
+		// What is remembered is kept by MAC, so only a device known by its
+		// MAC can be forgotten; one known only by an address never was.
+		if mac, ok := d.ResolvedAt(model.FieldMAC, now); forget && ok && mac.Value == d.Key {
+			for _, f := range remembering {
+				if ferr := f.Forget(d.Key); ferr != nil {
+					errs = append(errs, fmt.Errorf("forget %s: %w", d.Key, ferr))
+					continue
+				}
+				forgot = true
+			}
+		}
+		switch {
+		case forgot:
+			forgotten++
+			what += ", and forgot it on this network, so a later visit that hears it calls it new"
+		case len(remembering) > 0:
+			what += "; it is still remembered, so a later visit lists it as missing"
+		}
+		e.publish(ProbeEvent{Probe: "remove", Kind: KindInfo, Target: d.Key, At: now,
+			Message: what + ". It comes back if it answers again."})
+	}
+	return removed, forgotten, errors.Join(errs...)
+}
+
+// describeDevice names a device the way the log does: its name and address
+// when known, and its key.
+func describeDevice(d model.DeviceSnapshot, now time.Time) string {
+	var parts []string
+	if o, ok := d.ResolvedAt(model.FieldHostname, now); ok {
+		parts = append(parts, o.Value)
+	}
+	if o, ok := d.ResolvedAt(model.FieldIP, now); ok && o.Value != d.Key {
+		parts = append(parts, o.Value)
+	}
+	parts = append(parts, d.Key)
+	return strings.Join(parts, " ")
+}
+
+// lateForRemoved reports whether an observation is a late answer about a
+// device the user removed, which must not bring it back: it was asked for
+// before the removal. A device a discoverer has heard again is back, and
+// welcome to its answers.
+func (e *Engine) lateForRemoved(key string) bool {
+	e.mu.Lock()
+	removed := e.removed[key]
+	e.mu.Unlock()
+	if !removed {
+		return false
+	}
+	_, back := e.store.Get(key)
+	return !back
+}
+
 // Stop cancels all probes and waits for them to exit.
 func (e *Engine) Stop() {
 	e.mu.Lock()
@@ -604,6 +729,12 @@ func (e *Engine) emitFor(probe string) Emit {
 }
 
 func (e *Engine) onStoreEvent(ev store.Event) {
+	if ev.Kind == store.EventDeviceAdded {
+		// Back after a removal: a discoverer heard it.
+		e.mu.Lock()
+		delete(e.removed, ev.Key)
+		e.mu.Unlock()
+	}
 	if ev.Kind == store.EventConflict {
 		values := ev.Device.Values(ev.Field, ev.At)
 		e.publish(ProbeEvent{
@@ -782,6 +913,23 @@ func (en *enricher) enqueueRefresh(key string) bool {
 	return true
 }
 
+// drop takes one device off the queue, for a device the user removed.
+func (en *enricher) drop(key string) {
+	en.mu.Lock()
+	defer en.mu.Unlock()
+	if !en.queued[key] {
+		return
+	}
+	delete(en.queued, key)
+	delete(en.renewals, key)
+	for i, k := range en.queue {
+		if k == key {
+			en.queue = append(en.queue[:i:i], en.queue[i+1:]...)
+			break
+		}
+	}
+}
+
 // clear empties the queue and reports how many lookups were dropped.
 func (en *enricher) clear() int {
 	en.mu.Lock()
@@ -884,6 +1032,9 @@ func (e *Engine) enrichWorker(ctx context.Context, en *enricher) {
 		}
 		var answered atomic.Bool
 		counted := func(o model.Observation) {
+			if e.lateForRemoved(o.DeviceKey) {
+				return
+			}
 			if en.produces == "" || o.Field == en.produces {
 				answered.Store(true)
 			}

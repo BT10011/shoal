@@ -290,6 +290,8 @@ always sort last.
   r            rescan
   t            theme picker: preview live, Enter keeps and remembers it
   i            interfaces: scan another network this machine is on
+  d            remove the selected device, if it has stopped answering
+  D            remove every device that has stopped answering
   w            record packets for Wireshark; w again stops
   ?            this manual                     q     quit
 
@@ -314,6 +316,26 @@ To remove shoal completely:
 It lists everything it would delete — the program, the remembered theme,
 the history of every network scanned, and the PATH line the installer
 added to your shell — and removes nothing until you agree.
+
+# Removing devices that have gone
+
+A device the scan has finished without hearing is drawn in red. It may
+have left: equipment that went home after a show, a laptop that was
+closed, a box that was replaced. Shoal never removes it by itself, since
+a device that has gone quiet is worth seeing, but you can.
+
+Press d on a red row to remove that device, or D to remove every red row
+at once. Shoal asks first, with cancel highlighted, and says what will
+happen. A device that is still answering, or that the running scan has
+not asked yet, cannot be removed; wait until the scan finishes. Every
+removal is written to the log, and a removed device comes back as soon as
+it answers again. It stays gone across a rescan (r) if it stays silent.
+
+When this network is remembered, you choose between two kinds of removal.
+Removing from this list keeps the memory, so on your next visit it is
+listed as missing again. Forgetting it on this network also deletes it
+from the history, so it is gone for good, and a later visit that hears it
+calls it new.
 
 # Following a scan in Wireshark
 

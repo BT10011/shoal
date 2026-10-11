@@ -259,5 +259,15 @@ func record(tx *sql.Tx, id NetworkID, r Remembered) error {
 	return nil
 }
 
+// Forget deletes one device from a network's history, at the user's
+// request, as if it had never been seen there: the next visit that hears
+// it calls it new. The network's own record is kept.
+func (h *History) Forget(id NetworkID, mac string) error {
+	if _, err := h.db.Exec(`DELETE FROM devices WHERE network = ? AND mac = ?`, id.String(), mac); err != nil {
+		return fmt.Errorf("history: forget %s: %w", mac, err)
+	}
+	return nil
+}
+
 func millis(t time.Time) int64      { return t.UnixMilli() }
 func fromMillis(ms int64) time.Time { return time.UnixMilli(ms) }

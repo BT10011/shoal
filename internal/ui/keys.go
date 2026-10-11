@@ -17,6 +17,8 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case a.large != nil:
 		return a, a.handleLargeKey(msg)
+	case a.remove != nil:
+		return a, a.handleRemoveKey(msg)
 	case a.ifaces.open:
 		return a, a.handleIfaceKey(msg)
 	case a.help.open:
@@ -71,6 +73,10 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.opts.Capture != nil && a.opts.Engine != nil && !a.switching {
 			return a, a.toggleCapture()
 		}
+	case "d":
+		a.removeOne()
+	case "D":
+		a.removeAll()
 	case "c":
 		if a.opts.Engine != nil {
 			a.opts.Engine.Cancel()
@@ -138,6 +144,8 @@ var tableBindings = []binding{
 	{"r", "r", "rescan", 6},
 	{"t", "t", "theme", 1},
 	{"i", "i", "iface", 2},
+	{"d", "d", "remove", 4},
+	{"D", "D", "remove all", 1},
 	{"w", "w", "pcap", 1},
 	{"?", "?", "help", 9},
 	{"q", "q", "quit", 8},
@@ -168,6 +176,7 @@ func withoutKey(bindings []binding, key string) []binding {
 var detailBindings = []binding{
 	{"↑↓", "^v", "scroll", 5},
 	{"x", "x", "raw", 4},
+	{"d", "d", "remove", 4},
 	{"esc", "esc", "back", 3},
 	{"/", "/", "filter", 2},
 	{"c", "c", "stop", 7},

@@ -125,7 +125,8 @@ type app struct {
 	switching  bool           // a session is being stopped or opened
 	pending    sync.WaitGroup // switches still running off the UI goroutine
 	ifaces     ifacePicker
-	large      *largeModal // a subnet too large to sweep without asking
+	large      *largeModal  // a subnet too large to sweep without asking
+	remove     *removeModal // confirming the removal of devices not answering
 }
 
 // logView is the reader's place in the event log. While follow is set the
@@ -192,6 +193,8 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.opened(msg)
 	case captureMsg:
 		a.captured(msg)
+	case removedMsg:
+		a.removed(msg)
 	case ifacesMsg:
 		a.openIfaces(msg)
 	case tea.KeyMsg:
@@ -406,6 +409,9 @@ func (a *app) View() string {
 	case a.large != nil:
 		m := a.largeModalOverlay()
 		layout.Modal = &m
+	case a.remove != nil:
+		m := a.removeModalOverlay()
+		layout.Modal = &m
 	case a.ifaces.open:
 		m := a.ifaceModal()
 		layout.Modal = &m
@@ -546,7 +552,7 @@ func (a *app) statusRight(left string) string {
 	s := a.renderer.Styles
 	bindings := tableBindings
 	switch {
-	case a.help.open, a.picker.Opened(), a.ifaces.open, a.large != nil:
+	case a.help.open, a.picker.Opened(), a.ifaces.open, a.large != nil, a.remove != nil:
 		return "" // the modal carries its own hints
 	case a.filter.editing:
 		bindings = filterBindings
@@ -557,6 +563,14 @@ func (a *app) statusRight(left string) string {
 	}
 	if a.opts.Interfaces == nil {
 		bindings = withoutKey(bindings, "i")
+	}
+	// d and D are offered only where they would do something: on a device
+	// that has stopped answering, and while any has.
+	if d, ok := a.current(); !ok || classify(d, a.status) != notAnswering {
+		bindings = withoutKey(bindings, "d")
+	}
+	if len(a.notAnswering()) == 0 {
+		bindings = withoutKey(bindings, "D")
 	}
 	switch {
 	case a.opts.Capture == nil:

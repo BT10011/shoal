@@ -10,10 +10,12 @@ package history
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BT10011/shoal/internal/engine"
@@ -56,6 +58,9 @@ const (
 type Probe struct {
 	opts Options
 
+	// mu guards everything below: the probe's loop and Forget, which the
+	// engine calls from elsewhere when the user removes a device.
+	mu       sync.Mutex
 	id       *store.NetworkID
 	prev     store.Network
 	known    map[string]store.Remembered // by MAC, as it stood before this visit
@@ -102,18 +107,54 @@ func (p *Probe) Run(ctx context.Context, iface netif.Interface, emit engine.Emit
 	t := time.NewTicker(p.opts.Poll)
 	defer t.Stop()
 	for {
+		p.mu.Lock()
 		p.compare(emit, report)
 		p.record(report, false)
 		p.reportMissing(report)
-		status(p.summary())
+		summary := p.summary()
+		p.mu.Unlock()
+		status(summary)
 		select {
 		case <-ctx.Done():
+			p.mu.Lock()
 			p.record(report, true) // what the last moments learned is worth keeping
-			report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("saved %d devices for %s", len(p.saved), p.id)})
+			n, id := len(p.saved), p.id
+			p.mu.Unlock()
+			report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("saved %d devices for %s", n, id)})
 			return nil
 		case <-t.C:
 		}
 	}
+}
+
+// The probe is how the engine forgets a device the user removes.
+var _ engine.Forgetter = (*Probe)(nil)
+
+// ErrNotRemembering is returned by Forget when this visit is not being
+// remembered: the gateway has not been heard, or never answered.
+var ErrNotRemembering = errors.New("this network is not being remembered, so there is nothing to forget")
+
+// Remembers reports whether this visit is being written down, which is
+// when forgetting a device means anything (engine.Forgetter).
+func (p *Probe) Remembers() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.id != nil
+}
+
+// Forget takes a device out of this network's history for good, at the
+// user's request (engine.Forgetter). It leaves the baseline too, so it is
+// not reported missing again; if it answers on a later visit it is new.
+// The key is the device's MAC, which is what the history is kept by.
+func (p *Probe) Forget(key string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.id == nil {
+		return ErrNotRemembering
+	}
+	delete(p.known, key)
+	delete(p.saved, key)
+	return p.opts.History.Forget(*p.id, key)
 }
 
 // recognise waits to hear the gateway, whose MAC names the network, then
@@ -150,6 +191,8 @@ func (p *Probe) recognise(ctx context.Context, iface netif.Interface, emit engin
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.id, p.prev = &id, prev
 	p.known = make(map[string]store.Remembered, len(known))
 	for _, r := range known {

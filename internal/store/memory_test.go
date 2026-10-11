@@ -402,3 +402,50 @@ func TestRememberedAddressIsNotAClaim(t *testing.T) {
 		t.Errorf("events should carry the observation's source: %q %q", events[0].Source, events[1].Source)
 	}
 }
+
+func TestRemoveTakesTheDeviceItsAliasesAndItsClaims(t *testing.T) {
+	m, rec := newTestStore()
+	// A device known first by address, then by MAC, so it has an alias.
+	must(t, m.Apply(obs(ip, model.FieldHostname, "laptop.local", "mdns")))
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+
+	if !m.Remove(mac) {
+		t.Fatal("Remove should report the device was there")
+	}
+	if m.Len() != 0 {
+		t.Fatalf("Len = %d after removal", m.Len())
+	}
+	last := rec.events[len(rec.events)-1]
+	if last.Kind != EventDeviceRemoved || last.Key != mac {
+		t.Fatalf("last event = %s %s, want the removal", last.Kind, last.Key)
+	}
+	if name, ok := last.Device.ResolvedAt(model.FieldHostname, t0); !ok || name.Value != "laptop.local" {
+		t.Error("the event should carry the device as it was, so a listener can say what went")
+	}
+	if m.Remove(mac) {
+		t.Error("removing it twice should report it was not there")
+	}
+
+	// A late fact about its old address starts a device of its own: it is
+	// not routed by the old alias or the old claim to the removed MAC.
+	must(t, m.Apply(obs(ip, model.FieldLatency, "1.9ms", "icmp")))
+	if _, ok := m.Get(mac); ok {
+		t.Error("the removed MAC came back through its alias or address claim")
+	}
+	if _, ok := m.Get(ip); !ok {
+		t.Errorf("the late fact should be its own device: %+v", m.Devices())
+	}
+}
+
+func TestRemovedDeviceComesBackWhenItSpeaksAgain(t *testing.T) {
+	m, rec := newTestStore()
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+	m.Remove(mac)
+	must(t, m.Apply(obs(mac, model.FieldIP, ip, "arp")))
+	if _, ok := m.Get(mac); !ok {
+		t.Fatal("a removal is not a block list: a device that answers again is back")
+	}
+	if last := rec.events[len(rec.events)-1]; last.Kind != EventDeviceAdded {
+		t.Errorf("it comes back as a new device, got %s", last.Kind)
+	}
+}

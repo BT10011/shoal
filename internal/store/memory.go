@@ -21,6 +21,7 @@ const (
 	EventDeviceUpdated EventKind = "device_updated"
 	EventDeviceMerged  EventKind = "device_merged"
 	EventConflict      EventKind = "conflict"
+	EventDeviceRemoved EventKind = "device_removed"
 )
 
 // Event describes a change to the store. Device is a snapshot taken at the
@@ -40,6 +41,44 @@ type Event struct {
 	// MergedFrom is set on EventDeviceMerged: the key that has just stopped
 	// existing, its facts now held by Key.
 	MergedFrom string
+}
+
+// Remove takes a device out of the store at the user's request, and
+// reports whether it was there. The store never removes a device by
+// itself (a rescan only adds observations); this is the one way a device
+// leaves. Its aliases and its claims on addresses go with it, so a later
+// fact about one of its old addresses starts a device of its own rather
+// than being routed to one that no longer exists. Duplicate-address flags
+// it caused on other devices stay, as flags do. The event carries the
+// device as it was, so listeners can say what went.
+func (m *Memory) Remove(key string) bool {
+	m.mu.Lock()
+	key = m.resolveKey(key)
+	dev, ok := m.devices[key]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	delete(m.devices, key)
+	for alias, target := range m.aliases {
+		if target == key {
+			delete(m.aliases, alias)
+		}
+	}
+	for ip, claimants := range m.ipOwners {
+		delete(claimants, key)
+		if len(claimants) == 0 {
+			delete(m.ipOwners, ip)
+		}
+	}
+	ev := Event{Kind: EventDeviceRemoved, Key: key, Changed: true, Device: dev.Snapshot(), At: m.now()}
+	listeners := append([]Listener(nil), m.listeners...)
+	m.mu.Unlock()
+
+	for _, l := range listeners {
+		l(ev)
+	}
+	return true
 }
 
 // Listener receives events. It is called outside the store's lock and may

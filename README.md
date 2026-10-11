@@ -127,8 +127,15 @@ Also: `--unprivileged`, `--rate N`, `--max-hosts N`, `--theme NAME`,
 In the TUI: `Enter` shows how every value for the selected device was
 learned, `x` adds the raw packets, `/` filters (`/dante`, `/off-subnet`),
 `s` sorts, `Tab` moves between panes, `i` switches to another interface or
-address this machine has, `w` records packets for Wireshark, `t` picks a
-theme and `q` quits.
+address this machine has, `d` removes a device that has stopped
+answering (`D` removes them all), `w` records packets for Wireshark, `t`
+picks a theme and `q` quits.
+
+**Devices that have gone.** A device the scan finished without hearing is
+shown in red; Shoal never drops it by itself. Press `d` on it, or `D` for
+all of them, and confirm. On a remembered network you can also forget it
+there for good, so it is not listed as missing next visit. Every removal
+is logged, and a device that answers again comes back.
 
 **Following a scan in Wireshark.** Nothing is recorded unless you ask.
 Press `w` (then `r` to rescan, so the whole process is captured, and `w`

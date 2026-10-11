@@ -308,3 +308,53 @@ func TestSameName(t *testing.T) {
 		}
 	}
 }
+
+func TestForgetDeletesTheDeviceAndStopsCallingItMissing(t *testing.T) {
+	r := newRig(t)
+	venue := store.NetworkID{Subnet: "10.0.0.0/24", GatewayMAC: gw}
+	lastWeek := time.Now().Add(-7 * 24 * time.Hour)
+	if _, _, err := r.hist.Visit(venue, "10.0.0.1", lastWeek); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.hist.Record(venue,
+		store.Remembered{MAC: gw, IP: "10.0.0.1", FirstSeen: lastWeek, LastSeen: lastWeek},
+		store.Remembered{MAC: proj, IP: "10.0.0.88", FirstSeen: lastWeek, LastSeen: lastWeek},
+		store.Remembered{MAC: prn, IP: "10.0.0.60", FirstSeen: lastWeek, LastSeen: lastWeek},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.probe.Forget(proj); err != ErrNotRemembering || r.probe.Remembers() {
+		t.Fatalf("before the network is recognised there is nothing to forget: %v", err)
+	}
+
+	r.seen(gw, "10.0.0.1")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := r.run(ctx)
+	eventually(t, "recognised", r.probe.Remembers)
+
+	// The user removes the projector and forgets it; the printer is only
+	// missing.
+	if err := r.probe.Forget(proj); err != nil {
+		t.Fatal(err)
+	}
+	r.settled.Store(true)
+	eventually(t, "missing reported", func() bool { return strings.Contains(r.log(), "missing: "+prn) })
+	cancel()
+	<-done
+
+	if strings.Contains(r.log(), "missing: "+proj) {
+		t.Errorf("a forgotten device is not missing:\n%s", r.log())
+	}
+	_, known, err := r.hist.Recall(venue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range known {
+		if k.MAC == proj {
+			t.Error("the forgotten device is still in the history file")
+		}
+	}
+	if len(known) != 2 {
+		t.Errorf("only the forgotten device should go: %+v", known)
+	}
+}

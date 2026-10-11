@@ -817,3 +817,123 @@ func TestAskedAndAnsweredCountDevicesNotLookups(t *testing.T) {
 		t.Fatalf("three devices, however many lookups (%d): asked %d answered %d", s.Completed, s.Asked, s.Answered)
 	}
 }
+
+// forgettingDiscoverer remembers like the history probe, and sends nothing.
+type forgettingDiscoverer struct {
+	mu        sync.Mutex
+	remembers bool
+	forgot    []string
+}
+
+func (f *forgettingDiscoverer) Name() string { return "history" }
+func (f *forgettingDiscoverer) Run(ctx context.Context, _ netif.Interface, _ Emit, _ Report) error {
+	<-ctx.Done()
+	return nil
+}
+func (f *forgettingDiscoverer) Remembers() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.remembers
+}
+func (f *forgettingDiscoverer) Forget(key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forgot = append(f.forgot, key)
+	return nil
+}
+
+func TestRemoveDropsQueuedWorkAndALateAnswerCannotBringItBack(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	// One slow lookup at a time, so mac-1's is in flight and mac-2's queued.
+	en := newCountingEnricher("rdns", 1, model.FieldIP)
+	en.delay = 200 * time.Millisecond
+	en.started = make(chan struct{}, 1)
+	if err := e.AddEnricher(en); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.AddDiscoverer(scriptedDiscoverer{name: "arp", devices: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	<-en.started
+	eventually(t, "both devices found", func() bool { return st.Len() == 2 })
+
+	removed, forgotten, err := e.Remove([]string{"mac-1", "mac-2", "mac-9"}, false)
+	if removed != 2 || forgotten != 0 || err != nil {
+		t.Fatalf("Remove = %d removed, %d forgotten, %v; want 2, 0, nil (mac-9 never existed)", removed, forgotten, err)
+	}
+	time.Sleep(400 * time.Millisecond) // the in-flight lookup finishes and answers
+	if st.Len() != 0 {
+		t.Fatalf("a late answer brought a removed device back: %+v", st.Devices())
+	}
+	if n := en.callCount("mac-2"); n != 0 {
+		t.Errorf("mac-2's queued lookup should have been dropped, ran %d times", n)
+	}
+	msgs := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "remove" })
+	if len(msgs) != 2 || !strings.Contains(msgs[0].Message, "removed 10.0.0.1 mac-1 by hand") || !strings.Contains(msgs[0].Message, "comes back if it answers again") {
+		t.Errorf("the log should say what went: %+v", msgs)
+	}
+	if strings.Contains(msgs[0].Message, "remembered") {
+		t.Errorf("nothing remembers this network, so the log should not talk about memory: %q", msgs[0].Message)
+	}
+
+	// A discoverer hearing it again brings it back, answers and all.
+	e.Rescan()
+	eventually(t, "heard again", func() bool { return st.Len() == 2 })
+	eventually(t, "answered again", func() bool {
+		d, ok := st.Get("mac-1")
+		_, has := d.ResolvedAt(model.FieldVendor, time.Now())
+		return ok && has
+	})
+}
+
+func TestRemoveCanForgetWhereANetworkIsRemembered(t *testing.T) {
+	st := store.NewMemory()
+	e := New(st, netif.Interface{})
+	log := &eventLog{}
+	e.Subscribe(log.add)
+	f := &forgettingDiscoverer{}
+	for _, d := range []Discoverer{scriptedDiscoverer{name: "arp", devices: 2}, f} {
+		if err := e.AddDiscoverer(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	eventually(t, "both devices found", func() bool { return st.Len() == 2 })
+
+	if e.CanForget() {
+		t.Fatal("nothing is remembered until the history probe says so")
+	}
+	f.mu.Lock()
+	f.remembers = true
+	f.mu.Unlock()
+	if !e.CanForget() {
+		t.Fatal("a remembering probe makes forgetting possible")
+	}
+
+	if _, forgotten, err := e.Remove([]string{"mac-1"}, true); forgotten != 1 || err != nil {
+		t.Fatalf("Remove with forget = %d forgotten, %v", forgotten, err)
+	}
+	if _, forgotten, _ := e.Remove([]string{"mac-2"}, false); forgotten != 0 {
+		t.Fatal("without forget nothing is forgotten")
+	}
+	f.mu.Lock()
+	got := strings.Join(f.forgot, ",")
+	f.mu.Unlock()
+	if got != "mac-1" {
+		t.Errorf("forgot %q, want only mac-1", got)
+	}
+	msgs := log.filter(func(ev ProbeEvent) bool { return ev.Probe == "remove" })
+	if len(msgs) != 2 || !strings.Contains(msgs[0].Message, "forgot it on this network") || !strings.Contains(msgs[1].Message, "still remembered") {
+		t.Errorf("the log should say which was forgotten and which only removed: %+v", msgs)
+	}
+}

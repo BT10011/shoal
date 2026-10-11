@@ -1103,6 +1103,9 @@ func TestKeyBarDropsWholeEntriesRatherThanWrapping(t *testing.T) {
 	a.opts.Capture = &fakeCapture{}
 	bar := ansi.Strip(a.View())
 	for _, b := range tableBindings {
+		if b.key == "d" || b.key == "D" {
+			continue // shown only while a device is not answering; see remove_test.go
+		}
 		if !strings.Contains(bar, b.key+" "+b.label) {
 			t.Errorf("160 columns should fit every binding, missing %q", b.key+" "+b.label)
 		}
