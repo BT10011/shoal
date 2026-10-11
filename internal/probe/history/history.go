@@ -162,6 +162,9 @@ func (p *Probe) recognise(ctx context.Context, iface netif.Interface, emit engin
 	}
 	if prev.Visits == 0 {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("first visit to %s: everything found is new here, and is remembered in %s for next time", id, where)})
+		if msg := p.sameGatewayElsewhere(id, gatewayIP); msg != "" {
+			report(engine.ProbeEvent{Kind: engine.KindInfo, Message: msg})
+		}
 	} else {
 		report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("recognised %s: visit %d, last on %s; %d devices remembered from before", id, prev.Visits+1, stamp(prev.LastVisit), len(known))})
 	}
@@ -169,6 +172,32 @@ func (p *Probe) recognise(ctx context.Context, iface netif.Interface, emit engin
 		p.recall(r, emit)
 	}
 	return nil
+}
+
+// sameGatewayElsewhere explains a first visit to a gateway already
+// remembered on another subnet. A network is known by its gateway and
+// subnet together, so the devices behind it read new this visit. That is
+// right when the gateway serves several subnets or another address was
+// picked, and it is also what happens once after v2.0.0 on a machine
+// holding several addresses, where an older shoal scanned the wrong one.
+// Saying so keeps the reset from looking like a fault.
+func (p *Probe) sameGatewayElsewhere(id store.NetworkID, gatewayIP string) string {
+	if id.GatewayMAC == "" {
+		return ""
+	}
+	nets, err := p.opts.History.Networks()
+	if err != nil {
+		return ""
+	}
+	for _, n := range nets { // most recently visited first
+		if n.ID.GatewayMAC != id.GatewayMAC || n.ID.Subnet == id.Subnet {
+			continue
+		}
+		return fmt.Sprintf("the gateway %s (%s) is remembered on %s, last visited %s; a network is known by its gateway and subnet together, so %s starts afresh and its devices read new. "+
+			"Expected once after v2.0.0 if an earlier shoal scanned another of this machine's addresses: it now scans the subnet that holds the gateway",
+			gatewayIP, id.GatewayMAC, n.ID.Subnet, stamp(n.LastVisit), id.Subnet)
+	}
+	return ""
 }
 
 // recall puts one remembered device back on screen as history facts, dated

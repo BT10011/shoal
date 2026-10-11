@@ -246,6 +246,37 @@ func TestFirstVisitFlagsNothingNew(t *testing.T) {
 	if !strings.Contains(r.log(), "first visit to 10.0.0.0/24 via "+gw) {
 		t.Errorf("log:\n%s", r.log())
 	}
+	if strings.Contains(r.log(), "starts afresh") {
+		t.Errorf("a gateway never seen before has nothing to explain:\n%s", r.log())
+	}
+}
+
+// TestSameGatewayOnAnotherSubnetIsExplained covers the history reset the
+// subnet fix causes: the gateway was remembered under the subnet an older
+// shoal wrongly scanned, so this visit is a first one, and the log says why.
+func TestSameGatewayOnAnotherSubnetIsExplained(t *testing.T) {
+	r := newRig(t)
+	before := time.Now().Add(-7 * 24 * time.Hour)
+	if _, _, err := r.hist.Visit(store.NetworkID{Subnet: "10.0.9.0/24", GatewayMAC: gw}, "10.0.0.1", before); err != nil {
+		t.Fatal(err)
+	}
+	r.seen(gw, "10.0.0.1")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := r.run(ctx)
+	eventually(t, "the reset explained", func() bool {
+		return strings.Contains(r.log(), "the gateway 10.0.0.1 ("+gw+") is remembered on 10.0.9.0/24")
+	})
+	cancel()
+	<-done
+	log := r.log()
+	for _, want := range []string{"first visit to 10.0.0.0/24 via " + gw, "so 10.0.0.0/24 starts afresh", "scans the subnet that holds the gateway"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q\n%s", want, log)
+		}
+	}
+	if strings.Count(log, "starts afresh") != 1 {
+		t.Errorf("said once, not on every poll:\n%s", log)
+	}
 }
 
 func TestSilentGatewayRemembersNothing(t *testing.T) {

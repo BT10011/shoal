@@ -240,7 +240,9 @@ whether it has been stopped.
 # Other interfaces and large networks
 
 Shoal starts on the interface carrying the default route, or the one
-named with --iface. Press i to list every interface this machine has
+named with --iface. If that interface holds more than one IPv4 address,
+it scans from the one whose subnet holds the gateway; shoal iface says
+which address it chose and why. Press i to list every interface this machine has
 that is up with an IPv4 address, one row per address, so an interface on
 two networks offers both. The line beneath the list says which subnet the
 highlighted entry would scan and whether its gateway is known. Enter stops

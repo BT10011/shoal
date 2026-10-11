@@ -139,3 +139,86 @@ func TestSame(t *testing.T) {
 		t.Error("another interface is not the same")
 	}
 }
+
+func cidr(t *testing.T, s string) *net.IPNet {
+	t.Helper()
+	ip, n, err := net.ParseCIDR(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &net.IPNet{IP: ip.To4(), Mask: n.Mask}
+}
+
+func TestChooseAddressPicksTheGatewaysSubnet(t *testing.T) {
+	cases := []struct {
+		name    string
+		nets    []string
+		gw      string
+		want    int
+		because string
+	}{
+		{"gateway on the second", []string{"172.16.10.5/24", "198.51.100.5/24"}, "198.51.100.1", 1, "its subnet holds the gateway 198.51.100.1 (eth0 has 2 IPv4 addresses)"},
+		{"gateway on the first", []string{"198.51.100.5/24", "172.16.10.5/24"}, "198.51.100.1", 0, "its subnet holds the gateway 198.51.100.1"},
+		{"gateway on none", []string{"172.16.10.5/24", "198.51.100.5/24"}, "192.0.2.1", 0, "first of 2 IPv4 addresses on eth0; none of their subnets holds the gateway 192.0.2.1"},
+		{"no gateway", []string{"172.16.10.5/24", "198.51.100.5/24"}, "", 0, "first of 2 IPv4 addresses on eth0; no gateway to choose by"},
+		{"only one", []string{"172.16.10.5/24"}, "172.16.10.1", 0, "the only IPv4 address on eth0"},
+		{"only one, gateway outside", []string{"172.16.10.5/32"}, "172.16.10.1", 0, "the gateway 172.16.10.1 is outside its subnet"},
+		{"narrowest of two that hold it", []string{"172.16.0.5/16", "172.16.10.5/24"}, "172.16.10.1", 1, "its subnet holds the gateway 172.16.10.1"},
+	}
+	for _, c := range cases {
+		var nets []*net.IPNet
+		for _, s := range c.nets {
+			nets = append(nets, cidr(t, s))
+		}
+		var gw net.IP
+		if c.gw != "" {
+			gw = net.ParseIP(c.gw)
+		}
+		got, why := chooseAddress("eth0", nets, gw)
+		if got != c.want {
+			t.Errorf("%s: chose %s, want %s", c.name, nets[got], nets[c.want])
+		}
+		if !strings.Contains(why, c.because) {
+			t.Errorf("%s: reason %q, want it to say %q", c.name, why, c.because)
+		}
+	}
+}
+
+// TestFromAddrsScansTheSubnetTheGatewayIsOn is the reported bug: an
+// interface holding two addresses, the gateway on the second, used to be
+// described by the first.
+func TestFromAddrsScansTheSubnetTheGatewayIsOn(t *testing.T) {
+	ni := net.Interface{Name: "eth0", Index: 2, MTU: 1500, HardwareAddr: net.HardwareAddr{0, 0, 0x5e, 0, 0x53, 1}}
+	addrs := []net.Addr{
+		&net.IPNet{IP: net.IPv4(172, 16, 10, 5), Mask: net.CIDRMask(24, 32)},
+		&net.IPNet{IP: net.ParseIP("2001:db8::5"), Mask: net.CIDRMask(64, 128)},
+		&net.IPNet{IP: net.IPv4(198, 51, 100, 5), Mask: net.CIDRMask(24, 32)},
+	}
+	gw := net.IPv4(198, 51, 100, 1)
+
+	i, ok := fromAddrs(ni, addrs, gw)
+	if !ok {
+		t.Fatal("an interface with IPv4 addresses should be usable")
+	}
+	if !i.IP.Equal(net.IPv4(198, 51, 100, 5)) || i.Subnet.String() != "198.51.100.0/24" {
+		t.Fatalf("scans %s in %s, want 198.51.100.5 in 198.51.100.0/24", i.IP, i.Subnet)
+	}
+	if out := i.Describe(); !strings.Contains(out, "its subnet holds the gateway 198.51.100.1") {
+		t.Errorf("shoal iface should say why this address:\n%s", out)
+	}
+
+	// The startup choice and the interface picker agree on which entry
+	// carries the gateway.
+	for _, c := range expand(ni, addrs, gw, "eth0", nil) {
+		if (c.Gateway != nil) != c.Same(i) {
+			t.Errorf("picker entry %s (gateway %v) disagrees with the startup choice %s", c.IP, c.Gateway, i.IP)
+		}
+	}
+
+	if first, _ := fromAddrs(ni, addrs, nil); !first.IP.Equal(net.IPv4(172, 16, 10, 5)) {
+		t.Errorf("with no gateway the first address is kept, got %s", first.IP)
+	}
+	if _, ok := fromAddrs(ni, addrs[1:2], gw); ok {
+		t.Error("an interface with only IPv6 has nothing to scan")
+	}
+}
