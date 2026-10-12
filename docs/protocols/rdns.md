@@ -45,7 +45,11 @@ offset 12 of this message".
 
 Shoal reads `nameserver` lines from `/etc/resolv.conf` **in order** (macOS
 keeps that file in step with whatever configd chose for the primary
-interface). If the file names none, it tries the default gateway, since on a
+interface). Windows has no such file, so there shoal takes the DNS servers
+set on each adapter that is up (`GetAdaptersAddresses`): every IPv4 server
+before any IPv6 one, adapters with the lowest metric first, leaving out the
+`fec0:0:0:ffff::1`–`3` placeholders Windows lists when no IPv6 server is set,
+which never answer. If the system names none, it tries the default gateway, since on a
 home network the router is usually the resolver too. Every answer records
 which of them replied, so two resolvers disagreeing about a device is visible
 rather than hidden.

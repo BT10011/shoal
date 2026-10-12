@@ -230,12 +230,12 @@ func chooseResolvers(server string) ([]rdns.Resolver, error) {
 		iface, err := netif.Default()
 		if err != nil {
 			// Without an interface there is no gateway to fall back to,
-			// but resolv.conf may still name a resolver.
+			// but the system may still name a resolver.
 			iface = netif.Interface{}
 		}
 		resolvers := rdns.SystemResolvers(iface.Gateway)
 		if len(resolvers) == 0 {
-			return nil, fmt.Errorf("no resolver found in %s and no default gateway; name one with -resolver", rdns.ResolvConf)
+			return nil, fmt.Errorf("no resolver found in %s and no default gateway; name one with -resolver", rdns.ResolverSource)
 		}
 		return resolvers, nil
 	}

@@ -111,7 +111,7 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 		return err
 	}
 	if len(e.opts.Resolvers) == 0 {
-		return fmt.Errorf("no DNS resolver to ask: %s names none and no gateway was given", ResolvConf)
+		return fmt.Errorf("no DNS resolver to ask: none was found in %s and no gateway was given", ResolverSource)
 	}
 
 	var failures []string

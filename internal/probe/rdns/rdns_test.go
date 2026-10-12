@@ -141,19 +141,22 @@ func TestParseResolvConfFixture(t *testing.T) {
 }
 
 func TestSystemResolversFallsBackToGateway(t *testing.T) {
-	got := SystemResolvers(net.ParseIP("192.168.1.1"))
-	if len(got) == 0 {
+	if got := SystemResolvers(net.ParseIP("192.168.1.1")); len(got) == 0 {
 		t.Fatal("SystemResolvers = none, want at least the gateway")
 	}
-	// The host running the tests usually has a resolv.conf; the gateway is
-	// only used when it names nothing.
-	if _, err := os.Stat(ResolvConf); errors.Is(err, os.ErrNotExist) {
-		if got[0].Addr != "192.168.1.1:53" {
-			t.Errorf("resolver = %q, want the gateway", got[0].Addr)
-		}
-		if !strings.Contains(got[0].Origin, "gateway") {
-			t.Errorf("origin = %q, want it to explain the gateway fallback", got[0].Origin)
-		}
+	got := orGateway(nil, net.ParseIP("192.168.1.1"))
+	if len(got) != 1 || got[0].Addr != "192.168.1.1:53" {
+		t.Fatalf("resolvers = %v, want the gateway when the system names none", got)
+	}
+	if !strings.Contains(got[0].Origin, "gateway") || !strings.Contains(got[0].Origin, ResolverSource) {
+		t.Errorf("origin = %q, want it to explain the gateway fallback and where nothing was found", got[0].Origin)
+	}
+	named := []Resolver{{Addr: "172.16.10.53:53", Origin: "nameserver on line 1 of " + ResolvConf}}
+	if got := orGateway(named, net.ParseIP("192.168.1.1")); len(got) != 1 || got[0].Addr != "172.16.10.53:53" {
+		t.Errorf("resolvers = %v, want only the one the system named", got)
+	}
+	if got := orGateway(nil, nil); len(got) != 0 {
+		t.Errorf("resolvers = %v, want none with no gateway either", got)
 	}
 }
 
@@ -370,8 +373,8 @@ func TestEnrichWithoutResolvers(t *testing.T) {
 	e := New(Options{Resolvers: []Resolver{}})
 	var rec recorder
 	err := e.Enrich(context.Background(), snapshot("k", deviceIP), rec.emit, rec.report)
-	if err == nil || !strings.Contains(err.Error(), ResolvConf) {
-		t.Errorf("Enrich = %v, want an error naming %s", err, ResolvConf)
+	if err == nil || !strings.Contains(err.Error(), ResolverSource) {
+		t.Errorf("Enrich = %v, want an error naming %s", err, ResolverSource)
 	}
 }
 

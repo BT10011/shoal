@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 )
 
@@ -54,18 +53,20 @@ func ParseResolvConf(r io.Reader) []Resolver {
 }
 
 // SystemResolvers returns the resolvers to ask, in the order the system
-// prefers them. When the system names none, the gateway is worth a try: on a
-// home network it is usually the resolver as well.
+// prefers them: from resolv.conf on Unix, from the adapters' settings on
+// Windows (ResolverSource says which). When the system names none, the
+// gateway is worth a try: on a home network it is usually the resolver as
+// well.
 func SystemResolvers(gateway net.IP) []Resolver {
-	var resolvers []Resolver
-	if f, err := os.Open(ResolvConf); err == nil {
-		resolvers = ParseResolvConf(f)
-		f.Close()
-	}
+	return orGateway(systemResolvers(), gateway)
+}
+
+// orGateway falls back to the gateway when the system named no resolver.
+func orGateway(resolvers []Resolver, gateway net.IP) []Resolver {
 	if len(resolvers) == 0 && gateway != nil {
 		resolvers = append(resolvers, Resolver{
 			Addr:   net.JoinHostPort(gateway.String(), DefaultPort),
-			Origin: fmt.Sprintf("the default gateway, because %s named no nameserver", ResolvConf),
+			Origin: fmt.Sprintf("the default gateway, because no DNS server was found in %s", ResolverSource),
 		})
 	}
 	return dedupe(resolvers)
