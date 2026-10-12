@@ -347,6 +347,9 @@ func TestModeAddressing(t *testing.T) {
 	if _, ok := ModeRaw.addr(ip).(*net.IPAddr); !ok {
 		t.Error("raw mode should address the host by IP")
 	}
+	if _, ok := ModeEchoAPI.addr(ip).(*net.IPAddr); !ok {
+		t.Error("the echo API should address the host by IP")
+	}
 }
 
 func TestFormatRTT(t *testing.T) {

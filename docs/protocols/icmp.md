@@ -35,6 +35,17 @@ shoal's platforms offer an unprivileged alternative, and shoal prefers it:
 |---|---|---|
 | **Unprivileged datagram** | `icmp.ListenPacket("udp4", …)` | macOS: nothing. Linux: the process's group inside `net.ipv4.ping_group_range` |
 | **Raw** | `icmp.ListenPacket("ip4:icmp", …)` | root, or `cap_net_raw` via `make setcap` |
+| **Windows echo API** | `IcmpSendEcho` in `iphlpapi.dll`, the call `ping.exe` makes | nothing |
+
+Windows has no unprivileged ICMP socket, and a raw one needs an
+administrator, so there shoal always uses the echo API. It is not a socket:
+Windows builds the request itself and returns what the reply said, so shoal
+wraps it to look like one. Each request is one call, made in the background;
+an answer is rebuilt into the echo reply a socket would have read, and the
+round trip is timed by shoal from send to answer, which keeps microsecond
+resolution where the API reports whole milliseconds. Since those reply bytes
+are shoal's reconstruction, each reply's log line, and its comment in a
+capture, says so.
 
 With a datagram socket the kernel owns the ICMP **id**: it rewrites the id on
 the way out and demultiplexes replies back to the socket that sent them. Shoal

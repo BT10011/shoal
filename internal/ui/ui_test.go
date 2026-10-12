@@ -1731,8 +1731,12 @@ func TestDemoFlagsDanteAndNDI(t *testing.T) {
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	details := strings.Join(strings.Fields(ansi.Strip(joinLines(a.renderDetails(120)))), " ")
+	// Compared without spaces: where the evidence wraps depends on the order
+	// the services arrived in, and a line can break at the hyphen inside
+	// _netaudio-arc, which rejoins as "_netaudio- arc".
+	unwrapped := strings.ReplaceAll(details, " ", "")
 	for _, want := range []string{"dante-device", "a Dante audio-over-IP device", "announces _netaudio-arc._udp over mDNS", "made by Audinate"} {
-		if !strings.Contains(details, want) {
+		if !strings.Contains(unwrapped, strings.ReplaceAll(want, " ", "")) {
 			t.Errorf("details missing %q\n%s", want, details)
 		}
 	}

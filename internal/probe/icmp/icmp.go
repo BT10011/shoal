@@ -38,20 +38,27 @@ const (
 	ModeDatagram Mode = "unprivileged datagram socket"
 	// ModeRaw is a raw socket, which needs root or cap_net_raw.
 	ModeRaw Mode = "raw socket"
+	// ModeEchoAPI is Windows' IcmpSendEcho, the call ping.exe makes: no
+	// socket at all, and no privileges. Windows builds the request and
+	// hands back what the reply said, which shoal rebuilds into the reply.
+	ModeEchoAPI Mode = "unprivileged Windows echo API (IcmpSendEcho)"
 )
 
 // Short is a status-bar-sized name for the socket kind.
 func (m Mode) Short() string {
-	if m == ModeRaw {
+	switch m {
+	case ModeRaw:
 		return "raw"
+	case ModeEchoAPI:
+		return "IcmpSendEcho"
 	}
 	return "unprivileged"
 }
 
 // addr returns the destination in the form the socket expects. A datagram
-// ICMP socket is addressed like UDP; a raw one is addressed by IP.
+// ICMP socket is addressed like UDP; a raw one, and the echo API, by IP.
 func (m Mode) addr(ip net.IP) net.Addr {
-	if m == ModeRaw {
+	if m == ModeRaw || m == ModeEchoAPI {
 		return &net.IPAddr{IP: ip}
 	}
 	return &net.UDPAddr{IP: ip}
@@ -90,22 +97,6 @@ func (o Options) withDefaults() Options {
 		o.Listen = Listen
 	}
 	return o
-}
-
-// Listen opens an ICMP socket, preferring the unprivileged kind. macOS allows
-// datagram ICMP to every process; Linux allows it only to group ids inside
-// net.ipv4.ping_group_range, and falls back to a raw socket, which needs
-// cap_net_raw.
-func Listen(ctx context.Context) (net.PacketConn, Mode, error) {
-	conn, dgramErr := xicmp.ListenPacket("udp4", "0.0.0.0")
-	if dgramErr == nil {
-		return conn, ModeDatagram, nil
-	}
-	conn, rawErr := xicmp.ListenPacket("ip4:icmp", "0.0.0.0")
-	if rawErr == nil {
-		return conn, ModeRaw, nil
-	}
-	return nil, "", fmt.Errorf("no ICMP socket available: unprivileged (%v); raw (%v). On Linux, either widen net.ipv4.ping_group_range or grant cap_net_raw with `make setcap`", dgramErr, rawErr)
 }
 
 // CheckAccess reports whether this process can send echo requests at all, and
@@ -214,7 +205,7 @@ func (e *Enricher) roundTrips(ctx context.Context, conn net.PacketConn, mode Mod
 		if last {
 			until = deadline
 		}
-		got, err := e.collect(conn, key, ip, sent, until, last, report)
+		got, err := e.collect(conn, mode, key, ip, sent, until, last, report)
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +218,7 @@ func (e *Enricher) roundTrips(ctx context.Context, conn net.PacketConn, mode Mod
 // sequence number and payload. After the last request it returns as soon as
 // every request has been answered, rather than waiting out a timeout that
 // nothing is left to arrive in.
-func (e *Enricher) collect(conn net.PacketConn, key string, ip net.IP, sent map[int]time.Time, until time.Time, last bool, report engine.Report) ([]time.Duration, error) {
+func (e *Enricher) collect(conn net.PacketConn, mode Mode, key string, ip net.IP, sent map[int]time.Time, until time.Time, last bool, report engine.Report) ([]time.Duration, error) {
 	var rtts []time.Duration
 	buf := make([]byte, 1500)
 	for time.Now().Before(until) {
@@ -261,8 +252,14 @@ func (e *Enricher) collect(conn net.PacketConn, key string, ip net.IP, sent map[
 		delete(sent, reply.Seq)
 		rtt := time.Since(at)
 		rtts = append(rtts, rtt)
+		message := fmt.Sprintf("echo reply seq=%d from %s in %s", reply.Seq, host(from), FormatRTT(rtt))
+		if mode == ModeEchoAPI {
+			// The bytes are shoal's, not the wire's: say so here, which is
+			// also the packet's comment in a capture.
+			message += "; Windows' echo API reported it and shoal rebuilt the reply"
+		}
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: key,
-			Message: fmt.Sprintf("echo reply seq=%d from %s in %s", reply.Seq, host(from), FormatRTT(rtt)),
+			Message: message,
 			Packet: &engine.Packet{Layer: engine.LayerICMP, Data: buf[:n],
 				Src: engine.SocketAddr(from), Dst: engine.SocketAddr(conn.LocalAddr())}})
 		if last && len(sent) == 0 {
