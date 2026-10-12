@@ -55,6 +55,7 @@ directly observed value and keeps the cache entry visible underneath it.
 |---|---|
 | macOS / BSD | routing table via `sysctl NET_RT_FLAGS` with `RTF_LLINFO` — on BSD the ARP table *is* the routing table; each neighbour is a host route whose gateway is a link-layer address |
 | Linux | `/proc/net/arp`, skipping rows without the `ATF_COM` (complete) flag |
+| Windows | `GetIpNetTable` in `iphlpapi.dll`, the table `arp -a` prints, skipping rows of type *invalid* (asked for, never answered); interface names come from `net.InterfaceByIndex` |
 
 ## Running it
 
