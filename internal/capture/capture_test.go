@@ -79,8 +79,8 @@ func TestRecordingWritesEachPacketWithShoalsExplanation(t *testing.T) {
 	if want := filepath.Join(tap.dir, "shoal-20261011-093000.pcapng"); path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("the capture lists every device on the network, so only its owner may read it: %v %v", fi.Mode(), err)
+	if problem := ownerOnlyProblem(path); problem != "" {
+		t.Errorf("the capture lists every device on the network, so only its owner may read it: %s", problem)
 	}
 	if _, err := tap.Start(iface); err != ErrRecording {
 		t.Errorf("a second Start = %v, want ErrRecording", err)
@@ -139,6 +139,9 @@ func TestStartNeverOverwritesAndStartFileDoes(t *testing.T) {
 	tap.Stop()
 	if b, _ := os.ReadFile(named); string(b) == "old" || len(b) < 28 {
 		t.Error("--pcap names its file, so it is replaced")
+	}
+	if problem := ownerOnlyProblem(named); problem != "" {
+		t.Errorf("a replaced file must not keep letting others read it: %s", problem)
 	}
 }
 

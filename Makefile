@@ -17,10 +17,14 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.releaseRepo=$(RELEASE_REPO)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64
 DIST := dist
 
-.PHONY: build test vet race check demo iface setcap notices release clean
+.PHONY: build build-windows test vet race check demo iface setcap notices release clean
 
 build:
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/shoal
+
+# A Windows build from any machine, for trying on a Windows box.
+build-windows:
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN).exe ./cmd/shoal
 
 test:
 	$(GO) test ./...

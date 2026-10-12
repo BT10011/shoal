@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -114,7 +115,8 @@ func TestUpdateReplacesTheBinaryWithTheLatestRelease(t *testing.T) {
 	if string(got) != "the new shoal" {
 		t.Errorf("binary = %q, want the downloaded one", got)
 	}
-	if fi, err := os.Stat(target); err != nil || fi.Mode().Perm() != 0o755 {
+	// Windows keeps no permission bits: Go reports any writable file as 0666.
+	if fi, err := os.Stat(target); runtime.GOOS != "windows" && (err != nil || fi.Mode().Perm() != 0o755) {
 		t.Errorf("mode = %v (err %v), want the old binary's 0755", fi.Mode().Perm(), err)
 	}
 	for _, want := range []string{"v1.2.0", "Checksum verified"} {

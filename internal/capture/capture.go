@@ -107,6 +107,11 @@ func (t *Tap) begin(f *os.File, iface netif.Interface) (string, error) {
 		os.Remove(f.Name())
 		return "", err
 	}
+	// The capture lists every device on the network, so before anything is
+	// written to it, only its owner may read it.
+	if err := ownerOnly(f.Name()); err != nil {
+		return fail(fmt.Errorf("cannot make %s private to its owner: %w", path, err))
+	}
 	if r.w, err = pcapng.NewWriter(r.bw, "shoal "+t.version); err != nil {
 		return fail(err)
 	}

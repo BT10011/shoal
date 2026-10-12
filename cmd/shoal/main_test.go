@@ -23,6 +23,7 @@ func parse(t *testing.T, args ...string) (*flag.FlagSet, string) {
 func TestThemeSettings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir()) // Windows, where os.UserConfigDir ignores the other two
 
 	fs, flagTheme := parse(t)
 	name, save := themeSettings(fs, flagTheme)
