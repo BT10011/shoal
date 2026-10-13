@@ -132,6 +132,7 @@ log shows each frame once; its "heard" count starts when it takes over.
 |---|---|---|
 | macOS / BSD | `/dev/bpf*` (BPF), pure Go via `golang.org/x/sys/unix` | root, or membership of `access_bpf` (Wireshark's ChmodBPF sets this up) |
 | Linux | `AF_PACKET` socket bound to the interface | root, or `cap_net_raw` on the binary via `make setcap` |
+| Windows | [Npcap](https://npcap.com)'s driver, through its `wpcap.dll`, loaded at run time (no cgo) | none, once Npcap is installed with access *not* restricted to administrators |
 
 On BPF the kernel is asked to hand us only ARP frames (`BIOCSETF` with a
 four-instruction filter on the ethertype), to return them immediately
@@ -142,8 +143,33 @@ On Linux the socket's protocol is `ETH_P_ARP`, so the kernel delivers only
 ARP frames and no userspace filter is needed; frames the kernel marks
 `PACKET_OUTGOING` are ours and are ignored.
 
+Windows gives programs no raw link-layer socket at all, administrators
+included, so the frames go through Npcap, which the user installs once
+(its licence does not let shoal ship it). shoal loads `wpcap.dll` from
+`System32\Npcap`, or from `System32` for Npcap's WinPcap-compatible mode,
+and from nowhere else, so a stray copy beside `shoal.exe` is never loaded.
+The device is `\Device\NPF_{GUID}`, the GUID being the adapter's name in
+Windows' adapter table. Two handles are opened on it, because one must not
+be used from two threads at once and the listener reads while the sweep
+sends: the receiving one runs the same four-instruction ARP filter as BPF,
+in the driver, with the read timeout at 100 ms and frames delivered as
+they arrive (`pcap_setmintocopy` 0); the sending one has a filter that
+keeps nothing. Npcap hands a frame sent on one handle to every other, so
+frames from this machine's own MAC are dropped as they are read. Npcap is
+not put in promiscuous mode, which matches the other platforms: the
+listener hears broadcasts and frames for this machine.
+
+If Npcap was installed with *Restrict Npcap driver's access to
+Administrators only* ticked and shoal is not running as an administrator,
+shoal does not open the adapter at all (Npcap would answer with a Windows
+elevation prompt every time shoal started); it reads that setting,
+`AdminOnly` under `HKLM\SYSTEM\CurrentControlSet\Services\npcap\Parameters`,
+first.
+
 If raw access is refused, `shoal` says so and falls back to the
-unprivileged [`neigh`](neigh.md) probe instead of failing.
+unprivileged [`neigh`](neigh.md) probe instead of failing. On Windows the
+mode line reads `no Npcap` or `Npcap is for administrators only`, and the
+log says what is lost without it and what to do.
 
 ## Running it
 

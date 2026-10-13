@@ -4,6 +4,7 @@ package netif
 
 import (
 	"net"
+	"regexp"
 	"testing"
 )
 
@@ -39,5 +40,20 @@ func TestNameserversReadsTheAdapterTable(t *testing.T) {
 		if _, err := net.InterfaceByName(s.Adapter); err != nil {
 			t.Errorf("server %v's adapter %q is not a name net.Interfaces knows: %v", s.IP, s.Adapter, err)
 		}
+	}
+}
+
+func TestAdapterGUIDNamesTheDefaultInterface(t *testing.T) {
+	iface, err := Default()
+	if err != nil {
+		t.Skipf("no default interface on this machine: %v", err)
+	}
+	guid, err := AdapterGUID(iface.Index)
+	if err != nil {
+		t.Fatalf("the default interface %s (index %d) should have a GUID: %v", iface.Name, iface.Index, err)
+	}
+	// Npcap's device name is built from it, so it must be the braced form.
+	if !regexp.MustCompile(`^\{[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}$`).MatchString(guid) {
+		t.Errorf("GUID %q is not in the braced form Npcap's device names use", guid)
 	}
 }

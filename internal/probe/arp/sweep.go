@@ -459,6 +459,18 @@ func sleep(ctx context.Context, d time.Duration) error {
 // ErrPermission wraps a raw-socket permission failure with advice.
 var ErrPermission = errors.New("raw packet access denied")
 
+// AccessError is a refusal of raw packet access that shoal can explain in
+// full: a few words for the mode line, and what is lost and the one thing
+// to do about it, for the log. It matches ErrPermission.
+type AccessError struct {
+	Reason string // "no Npcap"
+	Advice string // a sentence or three for the user
+}
+
+func (e *AccessError) Error() string { return e.Reason + ": " + e.Advice }
+
+func (e *AccessError) Is(target error) bool { return target == ErrPermission }
+
 // CheckAccess reports whether raw packet access is available on the
 // interface by opening a connection and closing it again.
 func CheckAccess(iface netif.Interface) error {

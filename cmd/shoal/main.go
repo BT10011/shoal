@@ -194,7 +194,7 @@ func runTUI(args []string) error {
 		return err
 	}
 	if large == nil {
-		opts.Store, opts.Engine, opts.Mode = s.Store, s.Engine, s.Mode
+		opts.Store, opts.Engine, opts.Mode, opts.AccessNote = s.Store, s.Engine, s.Mode, s.AccessNote
 	}
 	if *pcapPath != "" {
 		if _, err := tap.StartFile(*pcapPath, iface); err != nil {
@@ -235,7 +235,7 @@ type scanConfig struct {
 // subnet larger than shoal sweeps without asking, it returns what the UI
 // needs to warn the user instead, and builds nothing.
 func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Session, *ui.LargeSweep, error) {
-	raw, why := c.rawAccess(iface)
+	raw, why, advice := c.rawAccess(iface)
 	if raw && choice == ui.SweepAsk {
 		if large := c.large(iface); large != nil {
 			return ui.Session{}, large, nil
@@ -243,6 +243,9 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 	}
 	if !raw && len(c.also) > 0 {
 		// Asked for, and impossible: say so rather than quietly scan less.
+		if advice != "" {
+			return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP (%s). %s", why, advice)
+		}
 		return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", why)
 	}
 
@@ -337,22 +340,26 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 			return ui.Session{}, nil, err
 		}
 	}
-	return ui.Session{Store: st, Engine: eng, Iface: iface, Mode: mode}, nil, nil
+	return ui.Session{Store: st, Engine: eng, Iface: iface, Mode: mode, AccessNote: advice}, nil, nil
 }
 
 // rawAccess reports whether the ARP sweep can run on iface, and if not, a
-// few words on why for the mode line.
-func (c *scanConfig) rawAccess(iface netif.Interface) (bool, string) {
+// few words on why for the mode line and, where the probe can say more (no
+// Npcap on Windows), what is lost and what to do about it, for the log.
+func (c *scanConfig) rawAccess(iface netif.Interface) (ok bool, why, advice string) {
 	if c.unprivileged {
-		return false, "unprivileged"
+		return false, "unprivileged", ""
 	}
+	var refused *arp.AccessError
 	switch err := arp.CheckAccess(iface); {
 	case err == nil:
-		return true, ""
+		return true, "", ""
+	case errors.As(err, &refused):
+		return false, refused.Reason, refused.Advice
 	case errors.Is(err, arp.ErrPermission):
-		return false, "no raw packet access"
+		return false, "no raw packet access", ""
 	default:
-		return false, err.Error()
+		return false, err.Error(), ""
 	}
 }
 

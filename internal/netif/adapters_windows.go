@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// readAdapters reads each IPv4 adapter's name, state, metric, gateways and
+// readAdapters reads each IPv4 adapter's names, state, metric, gateways and
 // DNS servers from the adapter table.
 func readAdapters() ([]adapter, error) {
 	const flags = windows.GAA_FLAG_INCLUDE_GATEWAYS | windows.GAA_FLAG_SKIP_ANYCAST |
@@ -35,6 +35,7 @@ func readAdapters() ([]adapter, error) {
 			ad := adapter{
 				Index:  int(a.IfIndex),
 				Name:   windows.UTF16PtrToString(a.FriendlyName),
+				GUID:   windows.BytePtrToString(a.AdapterName),
 				Up:     a.OperStatus == windows.IfOperStatusUp,
 				Metric: a.Ipv4Metric,
 			}
@@ -69,4 +70,19 @@ func Nameservers() ([]Nameserver, error) {
 		return nil, err
 	}
 	return orderNameservers(adapters), nil
+}
+
+// AdapterGUID returns the GUID Windows knows an interface by, braces
+// included. Npcap names its capture device after it: \Device\NPF_{GUID}.
+func AdapterGUID(index int) (string, error) {
+	adapters, err := readAdapters()
+	if err != nil {
+		return "", err
+	}
+	for _, a := range adapters {
+		if a.Index == index && a.GUID != "" {
+			return a.GUID, nil
+		}
+	}
+	return "", fmt.Errorf("no IPv4 adapter has interface index %d", index)
 }

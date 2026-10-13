@@ -6,13 +6,14 @@ import (
 	"sort"
 )
 
-// adapter is what Windows' adapter table says about one adapter: its name,
+// adapter is what Windows' adapter table says about one adapter: its names,
 // whether it is up, its IPv4 metric, and the gateways and DNS servers
 // configured on it. It is kept apart from the Windows call that fills it,
 // so the choices below are tested on every platform.
 type adapter struct {
 	Index       int
 	Name        string // the friendly name, as net.Interfaces gives it
+	GUID        string // AdapterName, "{GUID}": what Npcap names its device after
 	Up          bool
 	Metric      uint32 // the interface's IPv4 metric; lower is preferred
 	Gateways    []net.IP
