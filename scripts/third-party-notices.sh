@@ -8,7 +8,7 @@ set -euo pipefail
 GO=${GO:-go}
 out=${1:-THIRD_PARTY_NOTICES.md}
 # The release platforms; `make notices` passes the Makefile's list.
-PLATFORMS=${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64}
+PLATFORMS=${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64 windows/amd64 windows/arm64}
 goroot=$("$GO" env GOROOT)
 goversion=$("$GO" env GOVERSION)
 
@@ -59,9 +59,34 @@ section() { # title, version, directory...
 		echo
 	done < <(licence_files "$@")
 	if [ "$found" = 0 ]; then
-		echo "No licence file found in the module; see its source."
+		# Some modules state their licence only in the README (one that
+		# Windows builds pull in does); quote what it says rather than
+		# leave the reader to go and look.
+		local said
+		said=$(readme_licence "$@")
+		if [ -n "$said" ]; then
+			echo "The module carries no licence file. Its README says:"
+			echo
+			echo '```'
+			echo "$said"
+			echo '```'
+		else
+			echo "No licence file found in the module; see its source."
+		fi
 		echo
 	fi
+}
+
+# readme_licence prints the "License" section of a module's README, up to
+# the next heading, without the heading or surrounding blank lines.
+readme_licence() {
+	local f
+	for f in "$1"/README*; do
+		[ -f "$f" ] || continue
+		awk 'tolower($0) ~ /^#+ *licen[cs]e/ { on = 1; next } on && /^#/ { exit } on { print }' "$f" |
+			sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
+		return
+	done
 }
 
 {

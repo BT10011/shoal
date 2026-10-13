@@ -13,8 +13,9 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.releaseRepo=$(RELEASE_REPO)
 
 # Release targets: shoal is pure Go, so every one cross-compiles from any
-# machine with CGO disabled. Windows is a planned update (see the plan).
-PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64
+# machine with CGO disabled. Windows on Arm is built but has only been tried
+# on x86-64 Windows.
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64 windows/amd64 windows/arm64
 DIST := dist
 
 .PHONY: build build-windows test vet race check demo iface setcap notices release clean
@@ -59,7 +60,9 @@ notices:
 # download against and the installer. Archive names carry no version, so
 # install.sh can always ask GitHub for "the latest release's
 # shoal-linux-amd64.tar.gz"; the folder inside, and `shoal version`, say
-# which build it is.
+# which build it is. Windows gets shoal.exe in a .zip, which Windows opens
+# with nothing installed, beside the .tar.gz files rather than instead of
+# any: v1 binaries update from those names.
 #
 # To publish: tag the commit (git tag v1.0.0), make release, then
 #   gh release create v1.0.0 dist/* --title "Shoal v1.0.0" --latest
@@ -74,12 +77,17 @@ release: check notices
 		os=$${p%/*}; arch=$${p#*/}; folder=shoal-$(VERSION)-$$os-$$arch; \
 		echo "building shoal-$$os-$$arch ($(VERSION))"; \
 		mkdir -p $(DIST)/$$folder; \
-		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$$folder/shoal ./cmd/shoal; \
+		exe=shoal; [ $$os = windows ] && exe=shoal.exe; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST)/$$folder/$$exe ./cmd/shoal; \
 		cp README.md LICENSE THIRD_PARTY_NOTICES.md $(DIST)/$$folder/; \
-		tar -C $(DIST) -czf $(DIST)/shoal-$$os-$$arch.tar.gz $$folder; \
+		if [ $$os = windows ]; then \
+			(cd $(DIST) && zip -qrX shoal-$$os-$$arch.zip $$folder); \
+		else \
+			tar -C $(DIST) -czf $(DIST)/shoal-$$os-$$arch.tar.gz $$folder; \
+		fi; \
 		rm -rf $(DIST)/$$folder; \
 	done
-	cd $(DIST) && sha256sum *.tar.gz > SHA256SUMS
+	cd $(DIST) && sha256sum *.tar.gz *.zip > SHA256SUMS
 	sed -e 's|repo="BT10011/shoal"|repo="$(RELEASE_REPO)"|' \
 	    -e 's|github.com/BT10011/shoal/|github.com/$(RELEASE_REPO)/|g' install.sh > $(DIST)/install.sh
 	@echo "installer in $(DIST)/ downloads from github.com/$(RELEASE_REPO)"
