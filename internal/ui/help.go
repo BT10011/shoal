@@ -56,7 +56,8 @@ A discoverer finds devices. The ARP sweep asks every address in the subnet
 "who has this IP?" and notes which MAC address answers; it needs raw
 packet access. Without it, shoal nudges each address and reads the
 kernel's neighbour table instead, which is the same information one step
-removed. The dns-sd listener sends nothing at all: it writes down what
+removed. On Windows, raw packet access comes from Npcap, which you install
+once from npcap.com; when it is missing, the log says what that costs. The dns-sd listener sends nothing at all: it writes down what
 devices announce about themselves on the mDNS multicast group, the
 traffic behind Bonjour and Avahi. Its facts are credited to mdns, since
 they are mDNS records; its row carries its own name so it is not mistaken
@@ -307,7 +308,10 @@ published with the release, and installs nothing if they do not match. If
 shoal lives somewhere only the administrator can write, such as
 /usr/local/bin, run it with sudo. On Linux, replacing the file drops the
 raw-network capability that lets shoal sweep with ARP; it is granted again
-where possible, and otherwise the exact command to run is printed.
+where possible, and otherwise the exact command to run is printed. On
+Windows, where a running program cannot be replaced, the old shoal.exe is
+moved aside as shoal.exe.old and deleted the next time shoal starts; Npcap
+is left as it is.
 
 To remove shoal completely:
 
@@ -315,7 +319,10 @@ To remove shoal completely:
 
 It lists everything it would delete — the program, the remembered theme,
 the history of every network scanned, and the PATH line the installer
-added to your shell — and removes nothing until you agree.
+added to your shell — and removes nothing until you agree. On Windows the
+program itself is deleted a moment after the command ends, and Npcap,
+which is not part of shoal, stays until you remove it from Windows'
+installed apps.
 
 # Removing devices that have gone
 

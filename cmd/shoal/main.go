@@ -26,6 +26,7 @@ import (
 	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/rdns"
 	"github.com/BT10011/shoal/internal/probe/rogue"
+	"github.com/BT10011/shoal/internal/selfupdate"
 	"github.com/BT10011/shoal/internal/store"
 	"github.com/BT10011/shoal/internal/ui"
 )
@@ -88,6 +89,10 @@ func main() {
 }
 
 func run(args []string) error {
+	// On Windows an update leaves the program it replaced beside the new
+	// one, since a running program cannot be deleted there; that one has
+	// stopped by now.
+	selfupdate.RemoveLeftovers()
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		// --update and --uninstall look like flags but are commands: they
 		// change the machine rather than the scan, so they are taken before
@@ -245,6 +250,9 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 		// Asked for, and impossible: say so rather than quietly scan less.
 		if advice != "" {
 			return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP (%s). %s", why, advice)
+		}
+		if c.unprivileged {
+			return ui.Session{}, nil, errors.New("--also needs raw packet access to send ARP, and --unprivileged turns it off; leave one of them out")
 		}
 		return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", why)
 	}

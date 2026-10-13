@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -22,6 +23,9 @@ type Item struct {
 	// Line is set for a shell startup file: the PATH entry to take out of
 	// it, rather than the file itself.
 	Line string
+	// Running marks the program this uninstall is running from, which
+	// Windows deletes only once it has exited.
+	Running bool
 }
 
 // UninstallOptions configure a removal. The caller passes the paths shoal
@@ -68,6 +72,14 @@ func Plan(o UninstallOptions) ([]Item, error) {
 		return nil, err
 	}
 	add(bin, "the shoal program")
+	if seen[bin] && o.Binary == "" {
+		items[0].Running = true
+	}
+	if runtime.GOOS == "windows" {
+		for _, old := range leftovers(bin) {
+			add(old, "a copy of the program an earlier update moved aside")
+		}
+	}
 	// On macOS both files live in one directory, so these can name the
 	// same thing; add skips the repeat.
 	add(owned(o.ConfigFile), "settings, including the remembered theme")
@@ -124,15 +136,25 @@ func Uninstall(o UninstallOptions) error {
 
 	var failed []Item
 	for _, it := range items {
-		var err error
-		if it.Line != "" {
+		var (
+			err   error
+			later bool
+		)
+		switch {
+		case it.Line != "":
 			err = removeInstallerLine(it.Path)
-		} else {
+		case it.Running:
+			later, err = removeRunning(it.Path)
+		default:
 			err = os.RemoveAll(it.Path)
 		}
 		if err != nil {
 			failed = append(failed, it)
 			fmt.Fprintf(o.out(), "could not remove %s: %v\n", it.Path, err)
+			continue
+		}
+		if later {
+			fmt.Fprintf(o.out(), "%s is deleted as soon as this command ends\n", it.Path)
 			continue
 		}
 		fmt.Fprintf(o.out(), "removed %s\n", it.Path)
@@ -142,11 +164,25 @@ func Uninstall(o UninstallOptions) error {
 		for _, it := range failed {
 			paths = append(paths, it.Path)
 		}
-		return fmt.Errorf("could not remove %s.\nIf it is under /usr/local, it belongs to the administrator: sudo rm -rf %s",
-			strings.Join(paths, ", "), strings.Join(paths, " "))
+		return fmt.Errorf("could not remove %s.\n%s", strings.Join(paths, ", "), adminRemoval(paths))
 	}
-	fmt.Fprintln(o.out(), "\nShoal is gone. Open a new terminal for the PATH change to take effect.")
+	for _, it := range items {
+		if it.Line != "" {
+			fmt.Fprintln(o.out(), "\nShoal is gone. Open a new terminal for the PATH change to take effect.")
+			return nil
+		}
+	}
+	fmt.Fprintln(o.out(), "\nShoal is gone.")
 	return nil
+}
+
+// adminRemoval says what to do about files only the administrator can
+// remove.
+func adminRemoval(paths []string) string {
+	if runtime.GOOS == "windows" {
+		return "If they are in a folder only an administrator can change, such as Program Files, " + asAdministrator("shoal --uninstall")
+	}
+	return "If it is under /usr/local, it belongs to the administrator: sudo rm -rf " + strings.Join(paths, " ")
 }
 
 // shells are the startup files install.sh may have written a PATH line to.

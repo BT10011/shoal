@@ -205,3 +205,21 @@ func TestRemoveInstallerLineLeavesAFileWithoutOneAlone(t *testing.T) {
 		t.Fatal("found an installer line in a file that has none")
 	}
 }
+
+func TestUninstallMentionsThePATHOnlyWhenItChangedIt(t *testing.T) {
+	for _, withLine := range []bool{true, false} {
+		in := installation_(t)
+		o := in.options()
+		if !withLine {
+			o.Shells = []string{} // a Windows machine today: no startup file to edit
+		}
+		var out bytes.Buffer
+		o.Out, o.Confirm = &out, func(string) bool { return true }
+		if err := Uninstall(o); err != nil {
+			t.Fatal(err)
+		}
+		if said := strings.Contains(out.String(), "PATH change"); said != withLine {
+			t.Errorf("with a PATH line to remove %v, the farewell mentions the PATH %v:\n%s", withLine, said, out.String())
+		}
+	}
+}

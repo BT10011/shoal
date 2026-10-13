@@ -11,6 +11,7 @@ package selfupdate
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -20,8 +21,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -99,9 +102,30 @@ func (o Options) platform() (string, string) {
 
 // Asset is the release file holding the build for a platform. The name
 // carries no version, so "the latest release's" build can always be asked
-// for by the same name; the folder inside says which build it is.
+// for by the same name; the folder inside says which build it is. Windows
+// builds come as a .zip, which Windows opens without anything installed.
 func Asset(goos, goarch string) string {
+	if goos == "windows" {
+		return fmt.Sprintf("shoal-%s-%s.zip", goos, goarch)
+	}
 	return fmt.Sprintf("shoal-%s-%s.tar.gz", goos, goarch)
+}
+
+// binaryName is the program's file name inside a platform's archive.
+func binaryName(goos string) string {
+	if goos == "windows" {
+		return "shoal.exe"
+	}
+	return "shoal"
+}
+
+// asAdministrator says how to run a shoal command with the rights to
+// change a folder only the administrator can write to.
+func asAdministrator(command string) string {
+	if runtime.GOOS == "windows" {
+		return "open a terminal with Run as administrator and run: " + command
+	}
+	return "run: sudo " + command
 }
 
 // Update fetches the latest release and replaces the running binary with
@@ -151,7 +175,7 @@ func Update(ctx context.Context, o Options) error {
 	}
 	fmt.Fprintln(o.out(), "Checksum verified.")
 
-	binary, err := binaryFromArchive(archive)
+	binary, err := binaryFromArchive(archive, binaryName(goos))
 	if err != nil {
 		return err
 	}
@@ -242,12 +266,16 @@ func checksumFor(sums []byte, asset string) (string, error) {
 	return "", fmt.Errorf("%s is not listed in the release's SHA256SUMS", asset)
 }
 
-// binaryFromArchive pulls the shoal binary out of a release archive, which
-// holds it in a folder named for the build.
-func binaryFromArchive(archive []byte) ([]byte, error) {
+// binaryFromArchive pulls the program, the file called name, out of a
+// release archive, which holds it in a folder named for the build. The
+// archive is a .tar.gz, or a .zip for Windows.
+func binaryFromArchive(archive []byte, name string) ([]byte, error) {
+	if bytes.HasPrefix(archive, []byte("PK\x03\x04")) {
+		return binaryFromZip(archive, name)
+	}
 	zr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return nil, fmt.Errorf("the download is not a gzip archive: %w", err)
+		return nil, fmt.Errorf("the download is not a gzip or zip archive: %w", err)
 	}
 	defer zr.Close()
 	tr := tar.NewReader(zr)
@@ -259,28 +287,54 @@ func binaryFromArchive(archive []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cannot read the release archive: %w", err)
 		}
-		if h.Typeflag != tar.TypeReg || filepath.Base(h.Name) != "shoal" {
+		if h.Typeflag != tar.TypeReg || filepath.Base(h.Name) != name {
 			continue
 		}
 		b, err := io.ReadAll(io.LimitReader(tr, maxDownload))
 		if err != nil {
-			return nil, fmt.Errorf("cannot read shoal out of the archive: %w", err)
+			return nil, fmt.Errorf("cannot read %s out of the archive: %w", name, err)
 		}
 		return b, nil
 	}
-	return nil, fmt.Errorf("the release archive holds no shoal binary")
+	return nil, fmt.Errorf("the release archive holds no %s", name)
+}
+
+// binaryFromZip is binaryFromArchive for a .zip. Names in a zip use
+// forward slashes whatever made it, so path, not filepath, splits them.
+func binaryFromZip(archive []byte, name string) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the release archive: %w", err)
+	}
+	for _, f := range zr.File {
+		if !f.Mode().IsRegular() || path.Base(f.Name) != name {
+			continue
+		}
+		r, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %s out of the archive: %w", name, err)
+		}
+		defer r.Close()
+		b, err := io.ReadAll(io.LimitReader(r, maxDownload))
+		if err != nil {
+			return nil, fmt.Errorf("cannot read %s out of the archive: %w", name, err)
+		}
+		return b, nil
+	}
+	return nil, fmt.Errorf("the release archive holds no %s", name)
 }
 
 // replace writes the new binary beside the old one and renames it over the
 // top. A running binary cannot be written to (the kernel refuses with
 // ETXTBSY), but it can be renamed over, and a rename within one directory
 // is atomic: either the old shoal is there or the new one is, never half of
-// either.
+// either. Windows refuses even the rename over a running program, so there
+// the old one is moved aside first (swapAside).
 func replace(target string, binary []byte) error {
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".shoal-update-*")
 	if err != nil {
-		return fmt.Errorf("cannot write to %s: %w\n\nTo update a shoal installed there, run: sudo shoal --update", dir, err)
+		return fmt.Errorf("cannot write to %s: %w\n\nTo update a shoal installed there, %s", dir, err, asAdministrator("shoal --update"))
 	}
 	defer os.Remove(tmp.Name()) // a no-op once the rename has happened
 	if _, err := tmp.Write(binary); err != nil {
@@ -297,8 +351,76 @@ func replace(target string, binary []byte) error {
 	if err := os.Chmod(tmp.Name(), mode); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp.Name(), target); err != nil {
-		return fmt.Errorf("cannot replace %s: %w\n\nTo update a shoal installed there, run: sudo shoal --update", target, err)
+	put := os.Rename
+	if runtime.GOOS == "windows" {
+		put = swapAside
+	}
+	if err := put(tmp.Name(), target); err != nil {
+		return fmt.Errorf("cannot replace %s: %w\n\nTo update a shoal installed there, %s", target, err, asAdministrator("shoal --update"))
 	}
 	return nil
+}
+
+// oldSuffix marks the copy an update on Windows moves aside.
+const oldSuffix = ".old"
+
+// swapAside puts next where target is without writing to or deleting
+// target, which Windows refuses while that program is running: it renames
+// target to target.old, which Windows allows, then next into its place,
+// undoing the first rename if the second fails. The running shoal carries
+// on from target.old, which the next start deletes (RemoveLeftovers).
+func swapAside(next, target string) error {
+	removeLeftovers(target)
+	old := target + oldSuffix
+	// A leftover still held open: an older shoal is running from it.
+	for n := 2; exists(old); n++ {
+		old = target + oldSuffix + "-" + strconv.Itoa(n)
+	}
+	if err := os.Rename(target, old); err != nil {
+		return fmt.Errorf("cannot move the running program aside: %w", err)
+	}
+	if err := os.Rename(next, target); err != nil {
+		if back := os.Rename(old, target); back != nil {
+			return fmt.Errorf("%w; the old program could not be put back either (%v), and is at %s", err, back, old)
+		}
+		return err
+	}
+	return nil
+}
+
+// leftovers lists the copies earlier updates moved aside from target:
+// target.old, and target.old-2 and on. Only those names, so a file of the
+// user's such as shoal.exe.old-backup is never taken for one.
+func leftovers(target string) []string {
+	var found []string
+	if exists(target + oldSuffix) {
+		found = append(found, target+oldSuffix)
+	}
+	more, _ := filepath.Glob(target + oldSuffix + "-*")
+	for _, p := range more {
+		if n, err := strconv.Atoi(strings.TrimPrefix(p, target+oldSuffix+"-")); err == nil && n >= 2 {
+			found = append(found, p)
+		}
+	}
+	return found
+}
+
+// removeLeftovers deletes what it can of them; one still running stays.
+func removeLeftovers(target string) {
+	for _, p := range leftovers(target) {
+		os.Remove(p)
+	}
+}
+
+// RemoveLeftovers deletes the copy of the program an earlier update moved
+// aside on Windows, now that it has stopped running. It is called as shoal
+// starts, says nothing, and does nothing on other platforms, where an
+// update leaves nothing behind and a file named like one is the user's.
+func RemoveLeftovers() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if target, err := targetPath(""); err == nil {
+		removeLeftovers(target)
+	}
 }
