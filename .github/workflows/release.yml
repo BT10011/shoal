@@ -58,6 +58,19 @@ jobs:
           make notices
           git diff --exit-code THIRD_PARTY_NOTICES.md
 
+      # A release's changelog starts at the last release, not at a
+      # pre-release such as v2.0.0-rc.1, so the notes cover everything its
+      # users get. Git sorts v1.0.0-beta.2 above v1.0.0, so pre-releases
+      # are left out of the search, not sorted out.
+      - name: Find the last release
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          prev=$(git tag --list 'v*' --merged HEAD --sort=-v:refname | grep -v -e - | grep -v -x -F "$TAG" | head -n 1)
+          echo "Changelog from ${prev:-the first commit}"
+          if [ -n "$prev" ]; then echo "GORELEASER_PREVIOUS_TAG=$prev" >>"$GITHUB_ENV"; fi
+
       - name: Build and publish with GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
