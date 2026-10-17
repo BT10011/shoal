@@ -110,6 +110,9 @@ release:
     owner: BT10011
     name: shoal
   name_template: "Shoal {{ .Tag }}"
+  # The release page names the commit it was built from, the tagged one,
+  # rather than the default branch.
+  target_commitish: "{{ .Commit }}"
   prerelease: auto
   extra_files:
     - glob: ./install.sh
