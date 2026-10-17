@@ -199,7 +199,9 @@ sudo shoal --update
 ```
 
 The first time v2.0 starts, it asks for your password to set up full
-network access.
+network access. On a Mac where v1.0 ran with `sudo`, which left Shoal's
+settings and history belonging to root, setup gives them back to you at
+the same time.
 
 ### Removing it
 

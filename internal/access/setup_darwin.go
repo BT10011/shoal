@@ -4,7 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // For is what full access takes on macOS, where only root may use the
@@ -33,8 +35,29 @@ func For(_ string, _ error) Setup {
 		s.Changes = append(s.Changes, "install a start-up job, "+DaemonPlist+",\n    that opens /dev/bpf* to the "+Group+" group each time the Mac starts")
 	}
 	s.Changes = append(s.Changes, "open /dev/bpf* to the "+Group+" group now, without waiting for a restart")
-	s.command = []string{"/bin/sh", "-c", macSetup, "shoal-setup", name}
+	giveBack := ""
+	if rootOwnsData() {
+		s.Changes = append(s.Changes, "give "+name+" back the folder of settings and history,\n    ~/"+DataFolder+", which running shoal with sudo\n    left belonging to root")
+		giveBack = "1"
+	}
+	s.command = []string{"/bin/sh", "-c", macSetup, "shoal-setup", name, giveBack}
 	return s
+}
+
+// rootOwnsData reports whether root owns the folder of settings and
+// history, as it does after shoal was run with sudo, which keeps HOME on
+// macOS: the folder setup gives back (giveBack).
+func rootOwnsData() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(home, DataFolder))
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == 0
 }
 
 // setupUser is the account to add to the group: the one running shoal, or

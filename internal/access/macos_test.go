@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,7 +20,7 @@ import (
 
 func TestMacScriptsParse(t *testing.T) {
 	for name, script := range map[string]string{
-		"macSetup": macSetup, "macRemove": macRemove, "chmodScript": chmodScript,
+		"macSetup": macSetup, "macRemove": macRemove, "chmodScript": chmodScript, "giveBack": giveBack,
 	} {
 		if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
 			t.Errorf("%s does not parse: %v\n%s", name, err, out)
@@ -123,5 +125,133 @@ func TestOpenDevicesSkipsMissingDevicesAndChangesTheRest(t *testing.T) {
 	want := "chgrp " + Group + " " + b0 + " " + b1 + "\nchmod g+rw " + b0 + " " + b1 + "\n"
 	if string(got) != want {
 		t.Errorf("openDevices ran:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// runGiveBack runs give_back for the account alice, whose home is home,
+// with id and chown replaced and holds made in a folder of the test's
+// rather than /private/tmp. The test runs as an ordinary account, so a
+// folder it owns stands in for one root owns. It returns what chown was
+// asked to do, one call to a line.
+func runGiveBack(t *testing.T, home string) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	holds := filepath.Join(dir, "tmp")
+	for _, d := range []string{bin, holds} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log := filepath.Join(dir, "log")
+	for name, body := range map[string]string{
+		"id":    `echo "alice:*:501:20::0:0:Alice:` + home + `:/bin/zsh"`,
+		"chown": `echo "chown $*" >>"` + log + `"`,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := strings.NewReplacer("/private/tmp", holds, "-user root", "-user "+strconv.Itoa(os.Getuid())).Replace(giveBack)
+	cmd := exec.Command("sh", "-c", "set -e\nuser=alice\n"+script+"give_back\n")
+	cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("give_back failed: %v\n%s", err, out)
+	}
+	if left, _ := os.ReadDir(holds); len(left) != 0 {
+		t.Errorf("give_back left %d holding folders behind", len(left))
+	}
+	got, err := os.ReadFile(log)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return string(got)
+}
+
+// shoalData makes the folder of settings and history under home.
+func shoalData(t *testing.T, home string, mode os.FileMode) string {
+	t.Helper()
+	data := filepath.Join(home, DataFolder)
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"history.db", "config.toml"} {
+		if err := os.WriteFile(filepath.Join(data, f), []byte(f), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(data, mode); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestGiveBackChangesTheContentsThenTheFolderAndPutsItBack(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "alice")
+	data := shoalData(t, home, 0o700)
+	got := runGiveBack(t, home)
+	calls := strings.Split(strings.TrimSpace(got), "\n")
+	if len(calls) != 1 {
+		t.Fatalf("chown was called %d times, want once for everything:\n%s", len(calls), got)
+	}
+	args := strings.Fields(calls[0])
+	if len(args) != 6 || args[1] != "-h" || args[2] != "alice" {
+		t.Fatalf("chown %v, want chown -h alice and the folder's three paths", args[1:])
+	}
+	// What is changed is the copy held where only root can reach, never
+	// the path in the home folder, and the folder itself goes last.
+	held := filepath.Dir(filepath.Dir(args[3]))
+	if !strings.HasSuffix(args[5], "/shoal") || filepath.Dir(args[5]) != held {
+		t.Errorf("the folder was not changed last, or not in its holding folder: %v", args[3:])
+	}
+	files := []string{filepath.Base(args[3]), filepath.Base(args[4])}
+	sort.Strings(files)
+	if files[0] != "config.toml" || files[1] != "history.db" {
+		t.Errorf("chown changed %v, want the settings and the history", files)
+	}
+	for _, f := range []string{"history.db", "config.toml"} {
+		if b, err := os.ReadFile(filepath.Join(data, f)); err != nil || string(b) != f {
+			t.Errorf("%s did not come back intact: %q, %v", f, b, err)
+		}
+	}
+}
+
+func TestGiveBackLeavesAFolderOthersCouldWriteTo(t *testing.T) {
+	// Someone else could have put anything in it, a hard link to a system
+	// file among them, so root changes nothing in it.
+	home := filepath.Join(t.TempDir(), "alice")
+	data := shoalData(t, home, 0o770)
+	if got := runGiveBack(t, home); got != "" {
+		t.Errorf("give_back changed a folder others could write to:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(data, "history.db")); err != nil {
+		t.Errorf("the folder did not come back: %v", err)
+	}
+}
+
+func TestGiveBackLeavesALinkAndAMissingFolderAlone(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "alice")
+	if got := runGiveBack(t, home); got != "" {
+		t.Errorf("give_back changed something with no folder there:\n%s", got)
+	}
+	elsewhere := shoalData(t, filepath.Join(t.TempDir(), "elsewhere"), 0o700)
+	link := filepath.Join(home, DataFolder)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := runGiveBack(t, home); got != "" {
+		t.Errorf("give_back followed a link:\n%s", got)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link was not left in place: %v", err)
+	}
+}
+
+func TestMacSetupGivesBackOnlyWhenAsked(t *testing.T) {
+	if !strings.Contains(macSetup, "if [ \"$2\" = 1 ]; then\n\tgive_back || ") {
+		t.Error("macSetup does not give the folder back when $2 is 1")
 	}
 }
