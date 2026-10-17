@@ -43,6 +43,10 @@ func runUpdate(args []string) error {
 			fmt.Printf("shoal %s is the latest release.\n", version)
 			return nil
 		}
+		if selfupdate.Ahead(version, latest) {
+			fmt.Printf("shoal %s is newer than the latest release, %s.\n", version, latest)
+			return nil
+		}
 		fmt.Printf("shoal %s is installed; %s is the latest release.\nRun shoal --upgrade to install it.\n", version, latest)
 		return nil
 	}

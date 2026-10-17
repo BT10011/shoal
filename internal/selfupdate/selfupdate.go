@@ -176,6 +176,10 @@ func Update(ctx context.Context, o Options) error {
 	case latest == o.Version:
 		fmt.Fprintf(o.out(), "Already the latest release (%s). Nothing to do.\n", latest)
 		return nil
+	case Ahead(o.Version, latest):
+		// A pre-release: the latest release skips those, so it is older.
+		fmt.Fprintf(o.out(), "This build (%s) is newer than the latest release (%s). Nothing to do.\n", o.Version, latest)
+		return nil
 	case !looksReleased(o.Version):
 		// A build from source, or one with uncommitted changes. Replacing
 		// it with a published release throws that build away.
