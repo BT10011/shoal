@@ -8,7 +8,7 @@ do not edit by hand.
 The embedded vendor list, data/oui.csv, is the IEEE Registration
 Authority's public MA-L listing, from https://standards-oui.ieee.org/.
 
-## The Go standard library go1.27.1
+## The Go standard library go1.27.2
 
 ### LICENSE
 

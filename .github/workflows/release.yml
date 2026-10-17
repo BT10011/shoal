@@ -1,0 +1,135 @@
+# Builds and publishes a release of shoal when a version tag is pushed:
+#
+#   git tag -a v2.0.0 -m "Shoal v2.0.0" && git push origin v2.0.0
+#
+# Nothing is built anywhere else, so every file in a release can be traced
+# back to this workflow and the tagged commit (gh attestation verify). With
+# immutable releases switched on in the repository's settings, nothing can
+# be changed once it is published. See "Release 2 — installing, upgrading
+# and full access" in the project plan.
+#
+# Secrets:
+#   HOMEBREW_TAP_TOKEN  writes Formula/shoal.rb to BT10011/homebrew-tap: a
+#                       fine-grained token with Contents read and write on
+#                       that repository only. Without it the formula is
+#                       not published, with a warning.
+#   WINGET_TOKEN        opens a pull request to microsoft/winget-pkgs from
+#                       the fork BT10011/winget-pkgs: a classic token with
+#                       the public_repo scope. Without it winget is skipped.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the changelog reads the history since the last tag
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # The Go that builds the release. THIRD_PARTY_NOTICES.md names it,
+          # so change the two together: run make notices after a bump.
+          go-version: "1.27.2"
+          cache: false # a release builds from nothing cached
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./...
+          GOOS=darwin go vet ./...
+          go test -race ./...
+
+      - name: Check the third-party notices are current
+        run: |
+          make notices
+          git diff --exit-code THIRD_PARTY_NOTICES.md
+
+      - name: Build and publish with GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+
+  # The next two jobs work from the published release rather than this
+  # job's files, so either can be re-run on its own if it fails: the release
+  # itself cannot be made twice.
+  provenance:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # download the release
+      id-token: write # sign the build provenance
+      attestations: write # store it
+    steps:
+      - name: Download the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist
+
+      - name: Record build provenance for every file
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Record build provenance for SHA256SUMS
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/SHA256SUMS
+
+  homebrew:
+    needs: release
+    # Not for a pre-release (a tag such as v2.1.0-rc.1).
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # download the release and the formula script
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Publish the Homebrew formula
+        env:
+          TAG: ${{ github.ref_name }}
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew formula was not published"
+            exit 0
+          fi
+          GH_TOKEN=$RELEASE_TOKEN gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir dist
+          scripts/homebrew-formula.sh "$TAG" dist/SHA256SUMS > shoal.rb
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/BT10011/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp shoal.rb tap/Formula/shoal.rb
+          # Committed as the token's owner, at their GitHub noreply address.
+          login=$(GH_TOKEN=$TAP_TOKEN gh api user --jq .login)
+          id=$(GH_TOKEN=$TAP_TOKEN gh api user --jq .id)
+          cd tap
+          git add Formula/shoal.rb
+          if git diff --cached --quiet; then
+            echo "The formula is already up to date."
+            exit 0
+          fi
+          git -c user.name="$login" -c user.email="${id}+${login}@users.noreply.github.com" commit -m "shoal $TAG"
+          git push origin HEAD

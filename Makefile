@@ -18,7 +18,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.releaseRepo=$(RELEASE_REPO)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 freebsd/amd64 windows/amd64 windows/arm64
 DIST := dist
 
-.PHONY: build build-windows test vet race check demo iface setcap notices release clean
+.PHONY: build build-windows test vet race check demo iface setcap notices release snapshot clean
 
 build:
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/shoal
@@ -45,8 +45,8 @@ iface:
 	$(GO) run ./cmd/shoal iface
 
 # Linux: let the built binary open raw sockets without running as root.
-# macOS has no equivalent; join the access_bpf group (Wireshark's ChmodBPF)
-# or run with sudo. See "Installing" in README.md.
+# bin/shoal --setup does the same, and on macOS opens the BPF devices to the
+# access_bpf group. See "Full network access" in README.md.
 setcap: build
 	sudo setcap cap_net_raw+ep $(BIN)
 
@@ -55,22 +55,21 @@ setcap: build
 notices:
 	GO=$(GO) PLATFORMS="$(PLATFORMS)" ./scripts/third-party-notices.sh THIRD_PARTY_NOTICES.md
 
-# One archive per platform, each holding the binary, the README, the
-# licence and the third-party notices, plus a SHA256SUMS file to check a
-# download against and the installer. Archive names carry no version, so
-# install.sh can always ask GitHub for "the latest release's
-# shoal-linux-amd64.tar.gz"; the folder inside, and `shoal version`, say
-# which build it is. Windows gets shoal.exe in a .zip, which Windows opens
-# with nothing installed, beside the .tar.gz files rather than instead of
-# any: v1 binaries update from those names.
+# Releases are built and published by .github/workflows/release.yml, with
+# GoReleaser (.goreleaser.yaml), when a version tag is pushed:
+#   git tag -a v2.0.0 -m "Shoal v2.0.0" && git push origin v2.0.0
+# That is the only way a release is made, so every file in one can be
+# traced to the workflow and the tag. `make snapshot` builds the same files
+# locally, packages and all, without publishing anything.
 #
-# To publish: tag the commit (git tag v1.0.0), make release, then
-#   gh release create v1.0.0 dist/* --title "Shoal v1.0.0" --latest
-# The installer's one-liner works once the repository is public. For a beta
-# from a public download-only repository:
+# `make release` is the older local build: one archive per platform, each
+# holding the binary, the README, the licence and the third-party notices,
+# plus SHA256SUMS and the installer, named exactly as the workflow names
+# them. It stays for a beta from a public download-only repository:
 #   make release RELEASE_REPO=BT10011/shoal-beta
-#   gh release create v1.0.0-beta.1 dist/* --repo BT10011/shoal-beta --latest --title "Shoal v1.0.0-beta.1"
-# Mark it latest, not a pre-release: the installer fetches "latest".
+#   gh release create v2.1.0-beta.1 dist/* --repo BT10011/shoal-beta --latest --title "Shoal v2.1.0-beta.1"
+# Mark it latest, not a pre-release: the installer fetches "latest". A
+# beta has no record of its build, so install it with SHOAL_SKIP_PROVENANCE=1.
 release: check notices
 	rm -rf $(DIST) && mkdir -p $(DIST)
 	@set -e; for p in $(PLATFORMS); do \
@@ -92,6 +91,11 @@ release: check notices
 	    -e 's|github.com/BT10011/shoal/|github.com/$(RELEASE_REPO)/|g' install.sh > $(DIST)/install.sh
 	@echo "installer in $(DIST)/ downloads from github.com/$(RELEASE_REPO)"
 	@echo "release files in $(DIST)/:" && ls -1 $(DIST)
+
+# The workflow's build, run here with nothing published. Needs goreleaser
+# (https://goreleaser.com); dist/ ends up holding what a release would.
+snapshot:
+	goreleaser release --snapshot --clean
 
 clean:
 	rm -rf bin $(DIST)

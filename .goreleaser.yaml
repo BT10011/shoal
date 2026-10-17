@@ -1,0 +1,178 @@
+# How a release of shoal is built: run by .github/workflows/release.yml
+# when a version tag is pushed, never by hand. See "Release 2 — installing,
+# upgrading and full access" in the project plan for why each part is here.
+#
+# The archive names, the folder inside them, SHA256SUMS and install.sh are a
+# contract: every installed shoal, v1.0 included, updates from them. Keep
+# them exactly as they are.
+#
+# Try it without publishing: goreleaser release --snapshot --clean
+version: 2
+project_name: shoal
+
+builds:
+  - id: shoal
+    main: ./cmd/shoal
+    binary: shoal
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # main.version is the tag with its v: --update tells a release from a
+    # build by it. main.releaseRepo is where --update looks for the next one.
+    ldflags:
+      - -s -w -X main.version={{ .Tag }} -X main.releaseRepo={{ envOrDefault "RELEASE_REPO" "BT10011/shoal" }}
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - darwin_amd64
+      - darwin_arm64
+      - freebsd_amd64
+      - windows_amd64
+      - windows_arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: shoal
+    ids: [shoal]
+    # No version in the name, so "the latest release's
+    # shoal-linux-amd64.tar.gz" is always the same URL; the folder inside,
+    # and shoal version, say which build it is.
+    name_template: "shoal-{{ .Os }}-{{ .Arch }}"
+    wrap_in_directory: "shoal-{{ .Tag }}-{{ .Os }}-{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # Owned by root and dated by the commit, so an archive says nothing
+    # about the machine that built it and the same tag builds the same file.
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: README.md
+        info: &fileinfo
+          owner: root
+          group: root
+          mtime: "{{ .CommitDate }}"
+      - src: LICENSE
+        info: *fileinfo
+      - src: THIRD_PARTY_NOTICES.md
+        info: *fileinfo
+
+nfpms:
+  - id: packages
+    ids: [shoal]
+    package_name: shoal
+    file_name_template: "shoal-{{ .Os }}-{{ .Arch }}{{ .ConventionalExtension }}"
+    vendor: BT10011
+    homepage: https://github.com/BT10011/shoal
+    maintainer: BT10011
+    description: |-
+      LAN discovery in the terminal that shows its work.
+      Shoal finds the devices on the local network with ARP, names them with
+      DNS, mDNS and NetBIOS, and shows how every value was learned.
+    license: MIT
+    formats: [deb, rpm, archlinux]
+    section: net
+    priority: optional
+    bindir: /usr/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/shoal/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/shoal/LICENSE
+      - src: THIRD_PARTY_NOTICES.md
+        dst: /usr/share/doc/shoal/THIRD_PARTY_NOTICES.md
+    # The package grants the one capability shoal needs, so it needs no
+    # setup: installing already asked for the password.
+    scripts:
+      postinstall: packaging/linux/postinstall.sh
+    archlinux:
+      packager: BT10011
+      scripts:
+        postupgrade: packaging/linux/postinstall.sh
+    overrides:
+      deb:
+        dependencies: [libcap2-bin]
+      archlinux:
+        dependencies: [libcap]
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+  extra_files:
+    - glob: ./install.sh
+
+release:
+  github:
+    owner: BT10011
+    name: shoal
+  name_template: "Shoal {{ .Tag }}"
+  prerelease: auto
+  extra_files:
+    - glob: ./install.sh
+  footer: |
+    ## Install
+
+    - **macOS and Linux, with Homebrew:** `brew install BT10011/tap/shoal`
+    - **Debian, Ubuntu:** download `shoal-linux-amd64.deb` (or `-arm64`), then `sudo apt install ./shoal-linux-amd64.deb`
+    - **Fedora, RHEL, openSUSE:** `sudo dnf install ./shoal-linux-amd64.rpm` (or `sudo zypper install …`)
+    - **Arch:** `sudo pacman -U shoal-linux-amd64.pkg.tar.zst`
+    - **Windows:** `winget install BT10011.Shoal`, or the zip below; then install [Npcap](https://npcap.com)
+    - **The install script:** see the README for how to check it before running it
+
+    Shoal needs full network access to scan. The first time it runs it says what that takes and asks for your password once, or run `shoal --setup`.
+
+    **Upgrading from v1.0:** run `sudo shoal --update` (v1.0 knows only that name; from v2.0 on, `shoal --upgrade` works too).
+
+    ## Check a download
+
+    Every file here was built from this tag by the release workflow. With the [GitHub CLI](https://cli.github.com):
+
+    ```
+    gh attestation verify shoal-linux-amd64.tar.gz --repo BT10011/shoal
+    gh release verify-asset {{ .Tag }} shoal-linux-amd64.tar.gz --repo BT10011/shoal
+    ```
+
+    Or compare it with `SHA256SUMS`: `sha256sum --ignore-missing -c SHA256SUMS`
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
+winget:
+  - name: Shoal
+    package_identifier: BT10011.Shoal
+    publisher: BT10011
+    publisher_url: https://github.com/BT10011
+    author: BT10011
+    short_description: LAN discovery in the terminal that shows how every device was found
+    description: |-
+      Shoal finds the devices on the local network with ARP, names them with
+      DNS, mDNS and NetBIOS, and shows where every value on screen came from.
+    homepage: https://github.com/BT10011/shoal
+    license: MIT
+    license_url: https://github.com/BT10011/shoal/blob/main/LICENSE
+    release_notes_url: "https://github.com/BT10011/shoal/releases/tag/{{ .Tag }}"
+    installation_notes: "Shoal sends ARP through Npcap, which its licence does not allow to be bundled: install it from https://npcap.com, or run shoal --setup to be walked through it."
+    tags: [network, lan, discovery, arp, mdns, terminal]
+    ids: [shoal]
+    # Off until a WINGET_TOKEN secret exists, and never for a pre-release.
+    skip_upload: '{{ if eq (envOrDefault "WINGET_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
+    repository:
+      owner: BT10011
+      name: winget-pkgs
+      token: '{{ envOrDefault "WINGET_TOKEN" "" }}'
+      pull_request:
+        enabled: true
+        # A draft, so the checklist in winget-pkgs' template can be ticked
+        # before Microsoft's reviewers see it.
+        draft: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
