@@ -54,10 +54,9 @@ kinds, and the difference explains the order in which the table fills in.
 
 A discoverer finds devices. The ARP sweep asks every address in the subnet
 "who has this IP?" and notes which MAC address answers; it needs raw
-packet access. Without it, shoal nudges each address and reads the
-kernel's neighbour table instead, which is the same information one step
-removed. On Windows, raw packet access comes from Npcap, which you install
-once from npcap.com; when it is missing, the log says what that costs. The dns-sd listener sends nothing at all: it writes down what
+packet access, which shoal sets up once with your password (see "Full
+network access" below) and never scans without. The dns-sd listener sends
+nothing at all: it writes down what
 devices announce about themselves on the mDNS multicast group, the
 traffic behind Bonjour and Avahi. Its facts are credited to mdns, since
 they are mDNS records; its row carries its own name so it is not mistaken
@@ -296,33 +295,63 @@ always sort last.
   w            record packets for Wireshark; w again stops
   ?            this manual                     q     quit
 
+# Full network access
+
+The ARP sweep sends and hears frames below the IP layer, which an ordinary
+program may not do, so shoal needs raw network access and does not scan
+without it. The first time it starts without that access, it says what is
+missing and what it will change, asks, and once you agree, asks for your
+password and starts again with the access in place. To do it at any time:
+
+  shoal --setup
+
+On Linux it gives the shoal program file the cap_net_raw capability, so
+shoal never runs as root. The .deb, .rpm and Arch packages do that as they
+install, and an upgrade that replaces the file asks for it again.
+
+On macOS only root may use the packet capture devices, /dev/bpf*. Setup
+adds you to the access_bpf group and installs a small start-up job that
+opens the devices to that group whenever the Mac starts, as Wireshark's
+ChmodBPF does; the two share the group. Any program you run can then
+capture packets, as with Wireshark. If macOS has not applied the new group
+yet, log out and back in.
+
+On Windows the access comes from Npcap, which its licence does not let
+shoal include: setup opens npcap.com for you to install it, with
+"Restrict Npcap driver's access to Administrators only" left unticked.
+Windows asks for an administrator's password while it installs.
+
+On FreeBSD run shoal as root.
+
 # Keeping it up to date, and removing it
 
-Shoal updates itself. Quit and run:
+Quit and run:
 
-  shoal --update        fetch the latest release and replace this binary
-  shoal --update --check   say what the latest release is, change nothing
+  shoal --upgrade          fetch the latest release and install it
+  shoal --upgrade --check  say what the latest release is, change nothing
 
-It downloads the build for this machine, checks it against the checksums
-published with the release, and installs nothing if they do not match. If
-shoal lives somewhere only the administrator can write, such as
-/usr/local/bin, run it with sudo. On Linux, replacing the file drops the
-raw-network capability that lets shoal sweep with ARP; it is granted again
-where possible, and otherwise the exact command to run is printed. On
-Windows, where a running program cannot be replaced, the old shoal.exe is
-moved aside as shoal.exe.old and deleted the next time shoal starts; Npcap
-is left as it is.
+It checks the download against the checksums published with the release,
+and installs nothing if they do not match. If a package manager installed
+shoal, it hands the job over: Homebrew upgrades it, and apt, dnf, zypper
+or pacman install the new package, through sudo. winget cannot replace a
+program while it runs, so shoal tells you its command to run afterwards.
+Where only the administrator can write, as in /usr/local/bin, shoal puts
+the new copy there through sudo, and on Linux keeps the network access the
+old one had. On Windows the old shoal.exe is moved aside and deleted the
+next time shoal starts. Shoal 1.0 knows the command only by its first
+name: sudo shoal --update.
 
 To remove shoal completely:
 
   shoal --uninstall
 
-It lists everything it would delete — the program, the remembered theme,
-the history of every network scanned, and the PATH line the installer
-added to your shell — and removes nothing until you agree. On Windows the
-program itself is deleted a moment after the command ends, and Npcap,
-which is not part of shoal, stays until you remove it from Windows'
-installed apps.
+It lists everything it would delete and removes nothing until you agree:
+the program, through its package manager if one installed it; the
+remembered theme; the history of every network scanned; the PATH line the
+installer added to your shell; and on macOS, the start-up job setup
+installed. The access_bpf group on macOS, and Npcap on Windows, stay,
+since other programs use them. On Windows the program itself is deleted a
+moment after the command ends.
 
 # Removing devices that have gone
 

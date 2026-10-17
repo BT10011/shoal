@@ -62,43 +62,161 @@ privileges, no packets sent.
 
 ## Install
 
-**macOS and Linux:** paste this into a terminal.
+Choose whichever suits you: each installs the same build, made by GitHub
+Actions from the tagged source.
+
+**macOS and Linux, with [Homebrew](https://brew.sh):**
+
+```
+brew install BT10011/tap/shoal
+```
+
+**Debian and Ubuntu:**
+
+```
+curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linux-amd64.deb
+sudo apt install ./shoal-linux-amd64.deb
+```
+
+**Fedora, RHEL and openSUSE:**
+
+```
+curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linux-amd64.rpm
+sudo dnf install ./shoal-linux-amd64.rpm     # openSUSE: sudo zypper install ./shoal-linux-amd64.rpm
+```
+
+**Arch:**
+
+```
+curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linux-amd64.pkg.tar.zst
+sudo pacman -U shoal-linux-amd64.pkg.tar.zst
+```
+
+On 64-bit Arm, use `arm64` in place of `amd64`. A package grants Shoal
+the network access it needs as it installs, so there is nothing else to do.
+
+**Windows:**
+
+```
+winget install BT10011.Shoal
+```
+
+or download `shoal-windows-amd64.zip` (`-arm64` for Arm) from the
+[latest release](https://github.com/BT10011/shoal/releases/latest). Shoal
+sends ARP through **[Npcap](https://npcap.com)**, which you install once
+yourself, since its licence does not allow Shoal to include it: leave
+"Restrict Npcap driver's access to Administrators only" unticked.
+`shoal --setup` walks you through it.
+
+**The install script**, for macOS, Linux and FreeBSD:
 
 ```
 curl -fsSL https://github.com/BT10011/shoal/releases/latest/download/install.sh | sh
 ```
 
-Then type `shoal` anywhere. **Windows** is coming with the next release.
-
-The installer downloads the build for your system, checks it against the
-release's published checksums and installs nothing if they do not match,
-puts it in `/usr/local/bin` (asking for your password once), and on Linux
-grants it the one capability it needs to send ARP without running as root.
-To install without administrator rights, add
-`SHOAL_INSTALL_DIR="$HOME/.local/bin"` before `sh` and it will add that
-folder to your PATH; `SHOAL_VERSION=v1.0.0` picks a release and
-`SHOAL_NO_SUDO=1` never uses sudo.
-
-**Updating and removing.** Shoal updates itself:
+To read it, and check where it came from, before it runs:
 
 ```
-shoal --update           fetch the latest release and replace this binary
-shoal --update --check   say what the latest release is, change nothing
-shoal --uninstall        remove shoal, its settings and its history
+curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/install.sh
+gh attestation verify install.sh --repo BT10011/shoal
+less install.sh
+sh install.sh
 ```
 
-`--update` verifies the download against the release's checksums before
-replacing anything, and re-grants the Linux capability it needs (use
-`sudo shoal --update` if Shoal lives somewhere only root can write).
-`--uninstall` lists everything it would delete — the program, the
-remembered theme, the history of every network scanned, and the PATH line
-the installer added — and removes nothing until you agree.
+It downloads the build for your system and checks it against the
+release's published checksums. If the GitHub CLI is installed and signed
+in, it also checks that Shoal's release workflow built it. If either check
+fails, nothing is installed. It puts `shoal` in `/usr/local/bin`, asking
+for your password once, then runs `shoal --setup`. The whole script runs
+from its last line, so a download cut short runs nothing. Settings, before
+`sh`:
+- `SHOAL_INSTALL_DIR="$HOME/.local/bin"` installs without administrator
+  rights and adds that folder to your PATH.
+- `SHOAL_VERSION=v2.0.0` picks a release.
+- `SHOAL_NO_SUDO=1` never uses sudo.
 
-**Per-platform notes.** On **macOS**, raw network access goes through the
-BPF devices, which are root-only: run `sudo shoal`, or install
-Wireshark's **ChmodBPF** once. On **FreeBSD**, run Shoal as root. Without
-raw access Shoal still works in a reduced mode, reading the kernel's ARP
-cache instead of sweeping, and says so on screen.
+### Full network access
+
+Shoal sweeps the network with ARP, which takes raw network access, and it
+does not scan without it. The first time it runs it says what is missing
+and what it will change, and asks for your password once. `shoal --setup`
+does the same whenever you like.
+
+| System | What setup does |
+|---|---|
+| Linux | Gives the shoal program the `cap_net_raw` capability, so it never runs as root. The packages do this as they install. |
+| macOS | Adds you to the `access_bpf` group, and installs a small start-up job that opens the packet capture devices, `/dev/bpf*`, to that group. This is what Wireshark's ChmodBPF does, and the two share the group. Any program you run can then capture packets, as with Wireshark. |
+| Windows | Opens npcap.com for you to install Npcap; Windows asks for an administrator's password. |
+| FreeBSD | Nothing to set up: run `sudo shoal`. |
+
+### Checking a download
+
+Every release file is built from its tag by GitHub Actions, and releases
+are immutable: once published, no file in one can be changed. With the
+[GitHub CLI](https://cli.github.com):
+
+```
+gh attestation verify shoal-linux-amd64.tar.gz --repo BT10011/shoal
+gh release verify-asset v2.0.0 shoal-linux-amd64.tar.gz --repo BT10011/shoal
+```
+
+The first checks that Shoal's release workflow built the file, the second
+that it is the file the release holds. Or compare it with the release's
+`SHA256SUMS`: `sha256sum --ignore-missing -c SHA256SUMS` (on macOS,
+`shasum -a 256 -c SHA256SUMS`).
+
+Shoal is not yet signed with an Apple or Microsoft certificate. So a file
+downloaded in a browser may warn the first time it runs:
+- macOS says it cannot check the developer.
+- Windows SmartScreen says it protected your PC.
+
+Homebrew, the Linux packages and the install script do not download
+through a browser, so they show neither warning.
+
+### Upgrading
+
+```
+shoal --upgrade           fetch the latest release and install it
+shoal --upgrade --check   say what the latest release is, change nothing
+```
+
+`--upgrade` checks the download against the release's checksums before
+changing anything. If a package manager installed Shoal, `--upgrade`
+hands the update to it:
+- Homebrew runs `brew upgrade`.
+- apt, dnf, zypper or pacman installs the new package.
+- winget cannot replace a program while it runs, so Shoal prints the
+  command to run afterwards: `winget upgrade BT10011.Shoal`.
+
+Where only the administrator can write, as in `/usr/local/bin`, it asks
+for your password through sudo. On Linux the new copy keeps the network
+access the old one had.
+
+**From v1.0**, which knows the command only as `--update`:
+
+```
+sudo shoal --update
+```
+
+The first time v2.0 starts, it asks for your password to set up full
+network access.
+
+### Removing it
+
+```
+shoal --uninstall
+```
+
+Before deleting anything, it lists everything it would remove and asks
+you to agree:
+- the program, through the package manager if one installed it;
+- the remembered theme;
+- the history of every network scanned;
+- the PATH line the installer added;
+- on macOS, the start-up job setup installed.
+
+Npcap on Windows and the `access_bpf` group on macOS stay, since other
+programs use them.
 
 **From source**, with Go 1.27 or later:
 
@@ -106,7 +224,7 @@ cache instead of sweeping, and says so on screen.
 git clone https://github.com/BT10011/shoal.git
 cd shoal
 make build           # bin/shoal
-make setcap          # Linux: grant the capability to bin/shoal
+bin/shoal --setup    # full network access for that binary
 ```
 
 ## Using it
@@ -118,11 +236,12 @@ shoal --iface en0          choose the interface
 shoal --also 192.168.1.0/24   also ask another range, on this segment
 shoal iface                the interface, subnet and gateway Shoal would use
 shoal probe <name>         run one probe on its own and print what it does
+shoal --setup              give Shoal the network access it needs, once
 shoal version              which build this is
 ```
 
-Also: `--unprivileged`, `--rate N`, `--max-hosts N`, `--theme NAME`,
-`--history PATH`, `--no-history`, `--pcap FILE`.
+Also: `--rate N`, `--max-hosts N`, `--theme NAME`, `--history PATH`,
+`--no-history`, `--pcap FILE`.
 
 In the TUI: `Enter` shows how every value for the selected device was
 learned, `x` adds the raw packets, `/` filters (`/dante`, `/off-subnet`),
@@ -168,7 +287,7 @@ enrichers add facts to one already found. Each has a write-up in
 | Probe | What it does |
 |---|---|
 | `arp` | Asks every address in the subnet "who has this IP?", then keeps listening — which is how wrong-subnet devices are heard. Needs raw packet access |
-| `neigh` | Reads the OS's ARP cache after nudging each address: the fallback without raw access |
+| `neigh` | Reads the OS's ARP cache after nudging each address. Scans use `arp`; this one runs on its own, to compare |
 | `oui` | Looks the maker up from the MAC in the embedded IEEE registry |
 | `rdns` | Asks your DNS server for each address's name |
 | `mdns` | Asks each device its own name over multicast DNS |
@@ -213,15 +332,23 @@ everything.
 
 ## Status
 
-This is **release 1** (v1.0.0). Planned for release 2:
+This is **release 2** (v2.0.0). New since release 1:
 
-- **Windows**, with the same features as macOS and Linux.
-- **Wireshark export**: save every packet Shoal's probes sent and received
-  as a pcapng file, to open in Wireshark next to Shoal's explanation of
-  each one.
+- **Windows**, with the same features as macOS and Linux, through Npcap.
+- **Wireshark export**: `w` or `--pcap FILE` records every packet Shoal's
+  probes send and hear as a pcapng file, each packet carrying Shoal's
+  reading of it as a comment.
+- **Interfaces and large networks**: `i` switches to any interface or
+  address this machine has, and above a `/22` Shoal asks before sweeping.
+- **Removing devices** that have stopped answering, with `d` and `D`.
+- **Six new dark themes.**
+- **Installing**: Homebrew, `.deb`, `.rpm` and Arch packages, winget, and
+  an install script that can be checked. Shoal now always scans with full
+  network access, set up once with `shoal --setup`, and `shoal --upgrade`
+  updates it however it was installed.
 
-After that, optional modules such as LLDP, which would say which switch
-port and VLAN you are plugged into.
+Next: optional modules such as LLDP, which would say which switch port and
+VLAN you are plugged into.
 
 ## Credits
 
