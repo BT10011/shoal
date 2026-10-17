@@ -44,7 +44,18 @@ func (in installation) options() UninstallOptions {
 	return UninstallOptions{
 		Binary: in.binary, ConfigFile: in.config, HistoryFile: in.history,
 		Shells: []string{in.rc},
+		// Never this machine's own setup, sudo or package manager: a test
+		// that wants one of them sets it.
+		Undo:    func() []string { return nil },
+		Elevate: refuse, Run: refuse,
+		Has:  func(string) bool { return false },
+		Owns: func(...string) bool { return false },
 	}
+}
+
+// refuse stands in for running a command a test did not expect to run.
+func refuse(name string, args ...string) error {
+	panic("a test ran " + name + " " + strings.Join(args, " "))
 }
 
 func TestUninstallRemovesEverythingShoalWrote(t *testing.T) {

@@ -3,53 +3,43 @@ package selfupdate
 import (
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 
-	"golang.org/x/sys/unix"
+	"github.com/BT10011/shoal/internal/access"
 )
 
-// reportRawAccess deals with the one thing an update silently takes away.
-//
 // On Linux the ability to send ARP without running as root is a capability
-// attached to the file (cap_net_raw, granted by install.sh or `make
-// setcap`). Replacing the file drops it, so a shoal that swept the subnet
-// before an update would quietly fall back to reading the kernel's
-// neighbour table afterwards, with no hint that the update caused it. If
-// the old binary had the capability, put it back — or, when that needs a
-// password shoal cannot ask for, say exactly what to run.
-func reportRawAccess(out io.Writer, target, goos string) {
-	if goos != "linux" || !hadRawAccess(target) {
-		return
-	}
-	grant := fmt.Sprintf("sudo setcap cap_net_raw+ep %s", target)
-	setcap, err := exec.LookPath("setcap")
-	if err != nil {
-		for _, p := range []string{"/usr/sbin/setcap", "/sbin/setcap"} {
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-				setcap, err = p, nil
-				break
-			}
-		}
-	}
+// attached to the file (cap_net_raw, granted by shoal --setup, a package's
+// install script, install.sh or `make setcap`). Replacing the file drops
+// it, so an update has to look for it on the old file and put it back on
+// the new one.
+
+// restoreRawAccess gives the new binary at target the capability the old
+// one had, through sudo, which asks for the password on the terminal.
+func (o Options) restoreRawAccess(target string) {
+	setcap := access.SetcapPath()
 	if setcap == "" {
-		fmt.Fprintf(out, "\nThe new binary cannot send ARP until it is granted raw network access,\nand setcap is not installed to grant it. Install libcap (libcap2-bin on\nDebian and Ubuntu) and run: %s\n", grant)
+		noSetcap(o.out(), target)
 		return
 	}
-	if os.Geteuid() == 0 {
-		if err := exec.Command(setcap, "cap_net_raw+ep", target).Run(); err == nil {
-			fmt.Fprintln(out, "Raw network access (cap_net_raw) granted again, as the old binary had.")
-			return
-		}
+	run := o.elevator()
+	if run == nil {
+		fmt.Fprintf(o.out(), "\nThe old binary could send ARP without root; replacing it dropped that.\nTo give it back, run once:\n  %s\n", grantCommand(target))
+		return
 	}
-	fmt.Fprintf(out, "\nThe old binary could send ARP without root; replacing it dropped that.\nTo give it back, run once:\n  %s\n\nWithout it Shoal still works, reading the kernel's neighbour table\ninstead of sweeping, and says so in the \"under the hood\" pane.\n", grant)
+	fmt.Fprintln(o.out(), "Giving the new binary raw network access (cap_net_raw), as the old one had: sudo may ask for your password.")
+	if err := run(setcap, "cap_net_raw+ep", target); err != nil {
+		fmt.Fprintf(o.out(), "\nCould not grant it (%v). Run once:\n  %s\n\nUntil then shoal asks for it when it starts.\n", err, grantCommand(target))
+		return
+	}
+	fmt.Fprintln(o.out(), "Raw network access (cap_net_raw) granted again.")
 }
 
-// hadRawAccess reports whether the file carries a capability set. The
-// capabilities live in an extended attribute, so reading it needs no
-// privileges and no cgo; only its presence matters here.
-func hadRawAccess(path string) bool {
-	buf := make([]byte, 64)
-	n, err := unix.Getxattr(path, "security.capability", buf)
-	return err == nil && n > 0
+// noSetcap says what to do when setcap is not installed to put the
+// capability back.
+func noSetcap(out io.Writer, target string) {
+	fmt.Fprintf(out, "\nThe new binary cannot send ARP until it is granted raw network access,\nand setcap is not installed to grant it. Install libcap (libcap2-bin on\nDebian and Ubuntu) and run: %s\n", grantCommand(target))
+}
+
+func grantCommand(target string) string {
+	return "sudo setcap cap_net_raw+ep " + target
 }

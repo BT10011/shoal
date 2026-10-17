@@ -21,7 +21,7 @@ var releaseRepo = selfupdate.DefaultRepo
 
 // runUpdate replaces this binary with the latest published release.
 func runUpdate(args []string) error {
-	fs := flag.NewFlagSet("shoal --update", flag.ContinueOnError)
+	fs := flag.NewFlagSet("shoal --upgrade", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "answer yes to the question about replacing a build made from source")
 	check := fs.Bool("check", false, "say which release is latest and stop, changing nothing")
 	if err := fs.Parse(args); err != nil {
@@ -43,7 +43,7 @@ func runUpdate(args []string) error {
 			fmt.Printf("shoal %s is the latest release.\n", version)
 			return nil
 		}
-		fmt.Printf("shoal %s is installed; %s is the latest release.\nRun shoal --update to install it.\n", version, latest)
+		fmt.Printf("shoal %s is installed; %s is the latest release.\nRun shoal --upgrade to install it.\n", version, latest)
 		return nil
 	}
 	return selfupdate.Update(context.Background(), opts)

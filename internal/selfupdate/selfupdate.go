@@ -17,8 +17,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -27,6 +29,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/BT10011/shoal/internal/access"
+	"github.com/BT10011/shoal/internal/elevate"
 )
 
 // DefaultRepo is the GitHub repository releases are fetched from. A build
@@ -59,6 +64,30 @@ type Options struct {
 	Confirm func(question string) bool
 	// GOOS and GOARCH name the build to fetch; empty means this machine's.
 	GOOS, GOARCH string
+	// Elevate runs a command as root, with the terminal attached so sudo
+	// can ask for the password. Nil means through sudo, where there is one.
+	Elevate func(name string, args ...string) error
+	// Run runs a command as the user, with the terminal attached: a
+	// package manager's upgrade. Nil means the real thing.
+	Run func(name string, args ...string) error
+	// Has and Owns are how the package manager that installed shoal, if
+	// any, is found: whether a tool is installed, and whether a command
+	// such as dpkg-query -S says its package owns the binary. Nil means
+	// ask the machine.
+	Has  func(tool string) bool
+	Owns func(args ...string) bool
+}
+
+// elevator is how this update runs a command as root, or nil when it
+// cannot.
+func (o Options) elevator() func(string, ...string) error {
+	if o.Elevate != nil {
+		return o.Elevate
+	}
+	if elevate.Available() {
+		return elevate.Run
+	}
+	return nil
 }
 
 func (o Options) repo() string {
@@ -156,6 +185,9 @@ func Update(ctx context.Context, o Options) error {
 		}
 	}
 	fmt.Fprintf(o.out(), "Updating to %s (%s/%s)...\n", latest, goos, goarch)
+	if m := detectManager(target, goos, goarch, probes{has: o.Has, owns: o.Owns}); m != nil {
+		return o.upgradeWith(ctx, m, latest)
+	}
 
 	asset := Asset(goos, goarch)
 	sums, err := fetch(ctx, o, o.base()+"/latest/download/SHA256SUMS")
@@ -179,12 +211,99 @@ func Update(ctx context.Context, o Options) error {
 	if err != nil {
 		return err
 	}
-	if err := replace(target, binary); err != nil {
+	// On Linux raw network access is a capability stored on the file, so
+	// it has to be looked for on the old file, before the new one takes its
+	// place. (v1.0 looked afterwards, found none every time, and so never
+	// put it back.)
+	hadRaw := goos == "linux" && access.HasCapability(target)
+	if err := o.put(target, binary, hadRaw); err != nil {
 		return err
 	}
 	fmt.Fprintf(o.out(), "Replaced %s with %s.\n", target, latest)
-	reportRawAccess(o.out(), target, goos)
 	return nil
+}
+
+// put replaces target with binary, and carries over the raw network
+// access the old binary had. When target's folder belongs to root, as
+// /usr/local/bin does, it does both through sudo rather than giving up.
+func (o Options) put(target string, binary []byte, hadRaw bool) error {
+	err := replace(target, binary)
+	var denied *deniedError
+	switch {
+	case err == nil:
+		if hadRaw {
+			o.restoreRawAccess(target)
+		}
+		return nil
+	case !errors.As(err, &denied) || o.elevator() == nil:
+		return err
+	}
+	setcap := ""
+	if hadRaw {
+		setcap = access.SetcapPath()
+	}
+	also := ""
+	if setcap != "" {
+		also = " and to give it raw network access again, as the old one had"
+	}
+	fmt.Fprintf(o.out(), "%s belongs to the administrator: sudo may ask for your password to put the new shoal there%s.\n", filepath.Dir(target), also)
+	if err := o.replaceAsRoot(target, binary, setcap); errors.Is(err, elevate.ErrUnavailable) {
+		return denied
+	} else if err != nil {
+		return fmt.Errorf("could not put the new shoal in %s: %w", filepath.Dir(target), err)
+	}
+	switch {
+	case setcap != "":
+		fmt.Fprintln(o.out(), "Raw network access (cap_net_raw) granted again.")
+	case hadRaw:
+		noSetcap(o.out(), target)
+	}
+	return nil
+}
+
+// rootCopy is the script replaceAsRoot runs as root: copy the checked
+// download beside the target, check the copy is still that download,
+// rename it over the target (atomic, as in replace) and, when asked, grant
+// it cap_net_raw. The copy is root's own file in root's folder, so nothing
+// the user runs can change it between the check and the rename.
+const rootCopy = `set -e
+next="$2.shoal-update"
+trap 'rm -f "$next"' EXIT
+cp "$1" "$next"
+if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$next")
+elif command -v shasum >/dev/null 2>&1; then sum=$(shasum -a 256 "$next")
+else sum=$(sha256 -q "$next"); fi
+if [ "${sum%% *}" != "$4" ]; then
+	echo "shoal: the file to install no longer matches the checked download; nothing was changed" >&2
+	exit 1
+fi
+chmod "$3" "$next"
+mv -f "$next" "$2"
+if [ -n "$5" ]; then "$5" cap_net_raw+ep "$2"; fi
+`
+
+// replaceAsRoot is replace for a folder only root can write. The download
+// has been checked as the user; it is written to a private temporary file,
+// and one sudo then puts it in place (rootCopy).
+func (o Options) replaceAsRoot(target string, binary []byte, setcap string) error {
+	tmp, err := os.CreateTemp("", "shoal-update-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(binary); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	mode := os.FileMode(0o755)
+	if fi, err := os.Stat(target); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	sum := sha256.Sum256(binary)
+	return o.elevator()("/bin/sh", "-c", rootCopy, "shoal-update", tmp.Name(), target, fmt.Sprintf("%o", mode), hex.EncodeToString(sum[:]), setcap)
 }
 
 // LatestVersion asks which release is latest, without the GitHub API: the
@@ -334,7 +453,10 @@ func replace(target string, binary []byte) error {
 	dir := filepath.Dir(target)
 	tmp, err := os.CreateTemp(dir, ".shoal-update-*")
 	if err != nil {
-		return fmt.Errorf("cannot write to %s: %w\n\nTo update a shoal installed there, %s", dir, err, asAdministrator("shoal --update"))
+		if errors.Is(err, fs.ErrPermission) {
+			return &deniedError{fmt.Errorf("cannot write to %s: %w", dir, err)}
+		}
+		return fmt.Errorf("cannot write to %s: %w", dir, err)
 	}
 	defer os.Remove(tmp.Name()) // a no-op once the rename has happened
 	if _, err := tmp.Write(binary); err != nil {
@@ -356,10 +478,23 @@ func replace(target string, binary []byte) error {
 		put = swapAside
 	}
 	if err := put(tmp.Name(), target); err != nil {
-		return fmt.Errorf("cannot replace %s: %w\n\nTo update a shoal installed there, %s", target, err, asAdministrator("shoal --update"))
+		if errors.Is(err, fs.ErrPermission) {
+			return &deniedError{fmt.Errorf("cannot replace %s: %w", target, err)}
+		}
+		return fmt.Errorf("cannot replace %s: %w", target, err)
 	}
 	return nil
 }
+
+// deniedError is replace refused for want of the administrator's rights,
+// which put can get through sudo. Shown as it is, it says what to run.
+type deniedError struct{ err error }
+
+func (e *deniedError) Error() string {
+	return fmt.Sprintf("%v\n\nTo update a shoal installed there, %s", e.err, asAdministrator("shoal --upgrade"))
+}
+
+func (e *deniedError) Unwrap() error { return e.err }
 
 // oldSuffix marks the copy an update on Windows moves aside.
 const oldSuffix = ".old"

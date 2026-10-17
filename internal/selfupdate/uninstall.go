@@ -2,12 +2,15 @@ package selfupdate
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/BT10011/shoal/internal/access"
 )
 
 // installerMarker is the comment install.sh writes above the line it adds
@@ -26,6 +29,17 @@ type Item struct {
 	// Running marks the program this uninstall is running from, which
 	// Windows deletes only once it has exited.
 	Running bool
+	// Command removes the item instead of deleting Path: the package
+	// manager that installed shoal, or what undoes shoal --setup.
+	Command []string
+	// Root marks a Command that needs the administrator.
+	Root bool
+	// ByHand marks a Command the user runs once shoal has exited, since
+	// it cannot run while shoal does (winget).
+	ByHand bool
+	// Manual is what to run to remove the item by hand, should Command
+	// fail; the advice for a plain file is worked out from its path.
+	Manual string
 }
 
 // UninstallOptions configure a removal. The caller passes the paths shoal
@@ -44,6 +58,32 @@ type UninstallOptions struct {
 	Out io.Writer
 	// Confirm is asked before anything is removed. Nil means refuse.
 	Confirm func(question string) bool
+	// Elevate, Run, Has and Owns are as in Options: running a command as
+	// root and as the user, and finding the package manager that
+	// installed shoal. Nil means the real thing.
+	Elevate func(name string, args ...string) error
+	Run     func(name string, args ...string) error
+	Has     func(tool string) bool
+	Owns    func(args ...string) bool
+	// Undo is the command that takes away what shoal --setup installed on
+	// this machine, or nil when there is nothing; nil Undo means ask
+	// access.Remove.
+	Undo func() []string
+}
+
+func (o UninstallOptions) undo() []string {
+	if o.Undo != nil {
+		return o.Undo()
+	}
+	return access.Remove()
+}
+
+func (o UninstallOptions) elevator() func(string, ...string) error {
+	return Options{Elevate: o.Elevate}.elevator()
+}
+
+func (o UninstallOptions) runner() func(string, ...string) error {
+	return Options{Run: o.Run}.runner()
 }
 
 func (o UninstallOptions) out() io.Writer {
@@ -71,8 +111,16 @@ func Plan(o UninstallOptions) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	add(bin, "the shoal program")
-	if seen[bin] && o.Binary == "" {
+	// A package manager's install is removed by that package manager, so
+	// its records stay true.
+	if m := detectManager(bin, runtime.GOOS, runtime.GOARCH, probes{has: o.Has, owns: o.Owns}); m != nil && exists(bin) {
+		seen[bin] = true
+		items = append(items, Item{Path: bin, What: "the shoal program, removed by " + m.name + ": " + m.command(m.remove),
+			Command: m.remove, Root: m.root, ByHand: m.byHand, Manual: m.command(m.remove)})
+	} else {
+		add(bin, "the shoal program")
+	}
+	if seen[bin] && o.Binary == "" && items[0].Command == nil {
 		items[0].Running = true
 	}
 	if runtime.GOOS == "windows" {
@@ -89,6 +137,14 @@ func Plan(o UninstallOptions) ([]Item, error) {
 		if line, ok := installerLine(rc); ok {
 			items = append(items, Item{Path: rc, What: "the PATH entry the installer added", Line: line})
 		}
+	}
+	// What shoal --setup installed: on macOS, the start-up job that opens
+	// the packet capture devices, and its script.
+	if cmd := o.undo(); cmd != nil {
+		items = append(items, Item{Path: access.DaemonPlist,
+			What:    "the start-up job shoal --setup installed, and its script in " + access.SupportDir,
+			Command: cmd, Root: true,
+			Manual: fmt.Sprintf("sudo launchctl bootout system/%s; sudo rm -f %s; sudo rm -rf %q", access.DaemonLabel, access.DaemonPlist, access.SupportDir)})
 	}
 	return items, nil
 }
@@ -134,13 +190,31 @@ func Uninstall(o UninstallOptions) error {
 		return nil
 	}
 
-	var failed []Item
+	var (
+		failed []Item
+		byHand []string
+		setup  bool
+	)
 	for _, it := range items {
 		var (
 			err   error
 			later bool
 		)
 		switch {
+		case it.ByHand:
+			byHand = append(byHand, strings.Join(it.Command, " "))
+			continue
+		case it.Command != nil:
+			run := o.runner()
+			if it.Root {
+				run = o.elevator()
+			}
+			if run == nil {
+				err = errors.New("it needs the administrator, and sudo is not available")
+			} else {
+				err = run(it.Command[0], it.Command[1:]...)
+			}
+			setup = setup || (err == nil && it.Path == access.DaemonPlist)
 		case it.Line != "":
 			err = removeInstallerLine(it.Path)
 		case it.Running:
@@ -159,20 +233,38 @@ func Uninstall(o UninstallOptions) error {
 		}
 		fmt.Fprintf(o.out(), "removed %s\n", it.Path)
 	}
+	if setup {
+		fmt.Fprintf(o.out(), "\nThe %s group stays, since Wireshark uses it too. To remove it as well:\n  sudo dseditgroup -o delete %s\n", access.Group, access.Group)
+	}
+	if len(byHand) > 0 {
+		fmt.Fprintf(o.out(), "\nTo remove the program itself, run this once this command has finished:\n  %s\n", strings.Join(byHand, "\n  "))
+	}
 	if len(failed) > 0 {
-		var paths []string
+		var paths, files, advice []string
 		for _, it := range failed {
 			paths = append(paths, it.Path)
+			if it.Manual != "" {
+				advice = append(advice, "To remove "+it.What+" by hand, run: "+it.Manual)
+			} else {
+				files = append(files, it.Path)
+			}
 		}
-		return fmt.Errorf("could not remove %s.\n%s", strings.Join(paths, ", "), adminRemoval(paths))
+		if len(files) > 0 {
+			advice = append(advice, adminRemoval(files))
+		}
+		return fmt.Errorf("could not remove %s.\n%s", strings.Join(paths, ", "), strings.Join(advice, "\n"))
+	}
+	gone := "Shoal is gone."
+	if len(byHand) > 0 {
+		gone = "Everything else of shoal's is gone."
 	}
 	for _, it := range items {
 		if it.Line != "" {
-			fmt.Fprintln(o.out(), "\nShoal is gone. Open a new terminal for the PATH change to take effect.")
+			fmt.Fprintln(o.out(), "\n"+gone+" Open a new terminal for the PATH change to take effect.")
 			return nil
 		}
 	}
-	fmt.Fprintln(o.out(), "\nShoal is gone.")
+	fmt.Fprintln(o.out(), "\n"+gone)
 	return nil
 }
 
