@@ -18,7 +18,7 @@ import (
 // Windows has no raw link-layer socket, for administrators or anyone else,
 // so raw ARP goes through Npcap's packet driver and its libpcap, wpcap.dll.
 // The DLL is loaded when raw access is first wanted rather than linked:
-// without Npcap shoal still starts, in its reduced mode, and says why.
+// without Npcap shoal still starts, and offers to set it up (internal/access).
 
 // wpcap holds the functions shoal calls, found once.
 var wpcap struct {
@@ -50,7 +50,7 @@ func loadWpcap() error {
 			}
 		}
 		if err != nil {
-			wpcap.err = errNoNpcap
+			wpcap.err = ErrNoNpcap
 			return
 		}
 		dll := &windows.DLL{Name: "wpcap.dll", Handle: h}
@@ -94,7 +94,7 @@ func OpenConn(iface netif.Interface) (Conn, error) {
 	// administrators, Npcap answers an ordinary user's open with a Windows
 	// prompt asking for elevation, which would greet every start.
 	if npcapAdminOnly() && !windows.GetCurrentProcessToken().IsElevated() {
-		return nil, errNpcapAdminOnly
+		return nil, ErrNpcapAdminOnly
 	}
 	guid, err := netif.AdapterGUID(iface.Index)
 	if err != nil {

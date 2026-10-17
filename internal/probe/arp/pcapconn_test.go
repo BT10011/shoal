@@ -198,9 +198,9 @@ func TestNpcapDeviceName(t *testing.T) {
 }
 
 func TestNpcapRefusalsExplainThemselves(t *testing.T) {
-	for _, e := range []*AccessError{errNoNpcap, errNpcapAdminOnly} {
+	for _, e := range []*AccessError{ErrNoNpcap, ErrNpcapAdminOnly} {
 		if !errors.Is(e, ErrPermission) {
-			t.Errorf("%q does not match ErrPermission, so shoal would not fall back to the neighbour table", e.Reason)
+			t.Errorf("%q does not match ErrPermission, so shoal would not offer to set up access", e.Reason)
 		}
 		var ae *AccessError
 		if !errors.As(error(e), &ae) || ae.Reason == "" {
@@ -209,13 +209,13 @@ func TestNpcapRefusalsExplainThemselves(t *testing.T) {
 		if len(e.Reason) > 32 {
 			t.Errorf("reason %q is too long for the mode line", e.Reason)
 		}
-		for _, want := range []string{npcapURL, "Restrict Npcap driver's access to Administrators only", "neighbour table", "--also", "start shoal again"} {
+		for _, want := range []string{npcapURL, "Restrict Npcap driver's access to Administrators only", "shoal --setup", "start shoal again"} {
 			if !strings.Contains(e.Advice, want) {
 				t.Errorf("advice for %q does not mention %q:\n%s", e.Reason, want, e.Advice)
 			}
 		}
 	}
-	if !strings.Contains(errNoNpcap.Advice, "not installed") || !strings.Contains(errNpcapAdminOnly.Advice, "ticked") {
+	if !strings.Contains(ErrNoNpcap.Advice, "not installed") || !strings.Contains(ErrNpcapAdminOnly.Advice, "ticked") {
 		t.Error("each refusal must say which of the two cases it is")
 	}
 }

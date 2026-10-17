@@ -23,10 +23,6 @@ type Session struct {
 	Engine *engine.Engine
 	Iface  netif.Interface
 	Mode   string
-	// AccessNote says why raw ARP is off and what to do about it, when
-	// there is more to say than the mode line holds; it is logged as the
-	// session starts.
-	AccessNote string
 }
 
 // SweepChoice is what the user decided about a subnet too large to sweep
@@ -82,9 +78,6 @@ func (a *app) start(s Session) error {
 	}
 	a.stopBridge = cancel
 	a.opts.Store, a.opts.Engine, a.opts.Iface, a.opts.Mode = s.Store, s.Engine, s.Iface, s.Mode
-	if s.AccessNote != "" {
-		a.events = append(a.events, engine.ProbeEvent{Probe: "arp", Kind: engine.KindInfo, Message: s.AccessNote, At: time.Now()})
-	}
 	return nil
 }
 

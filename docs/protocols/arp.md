@@ -119,8 +119,8 @@ announces itself when it links up — so a second discoverer, `arp.Listener`,
 opens its own raw socket and keeps writing frames down for as long as the
 scan runs. It sends nothing, shares the sweep's decoder and rules above,
 reports as `arp` so its facts carry the same weight, and shows in the hood
-pane as a wave with a count of frames heard. It runs whenever raw access is
-available; the unprivileged neighbour-table fallback has no equivalent.
+pane as a wave with a count of frames heard. It runs in every scan, since
+shoal always scans with raw access.
 
 While the sweep is running both sockets receive every frame. The listener
 asks the sweep (`Sweep.Sweeping`) and stands aside until it finishes, so the
@@ -130,8 +130,9 @@ log shows each frame once; its "heard" count starts when it takes over.
 
 | Platform | Backend | Privilege |
 |---|---|---|
-| macOS / BSD | `/dev/bpf*` (BPF), pure Go via `golang.org/x/sys/unix` | root, or membership of `access_bpf` (Wireshark's ChmodBPF sets this up) |
-| Linux | `AF_PACKET` socket bound to the interface | root, or `cap_net_raw` on the binary via `make setcap` |
+| macOS | `/dev/bpf*` (BPF), pure Go via `golang.org/x/sys/unix` | root, or membership of `access_bpf` with the devices opened to that group (`shoal --setup`, or Wireshark's ChmodBPF) |
+| FreeBSD | the same BPF backend | root |
+| Linux | `AF_PACKET` socket bound to the interface | root, or `cap_net_raw` on the binary (`shoal --setup`, the packages, or `make setcap`) |
 | Windows | [Npcap](https://npcap.com)'s driver, through its `wpcap.dll`, loaded at run time (no cgo) | none, once Npcap is installed with access *not* restricted to administrators |
 
 On BPF the kernel is asked to hand us only ARP frames (`BIOCSETF` with a
@@ -166,10 +167,12 @@ elevation prompt every time shoal started); it reads that setting,
 `AdminOnly` under `HKLM\SYSTEM\CurrentControlSet\Services\npcap\Parameters`,
 first.
 
-If raw access is refused, `shoal` says so and falls back to the
-unprivileged [`neigh`](neigh.md) probe instead of failing. On Windows the
-mode line reads `no Npcap` or `Npcap is for administrators only`, and the
-log says what is lost without it and what to do.
+If raw access is refused, `shoal` does not scan some lesser way. It says
+what is missing and offers to set it up there and then (`shoal --setup`):
+the capability on Linux, the `access_bpf` group and a start-up job that
+opens the devices to it on macOS, and on Windows Npcap, which the user
+installs from npcap.com. Until v2.0 it fell back to the
+[`neigh`](neigh.md) probe, which still runs on its own.
 
 ## Running it
 

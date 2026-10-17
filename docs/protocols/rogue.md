@@ -47,7 +47,7 @@ correct address shows in the table because it is the most recent claim.
   sweep has finished, because AV gear speaks sporadically.
 - The mDNS listener records the source address of everything it hears
   (see [mdns.md](mdns.md)).
-- The kernel neighbour table, in unprivileged mode (see [neigh.md](neigh.md)).
+- The kernel neighbour table, read by `shoal probe neigh` (see [neigh.md](neigh.md)).
 
 ## When a device never speaks
 

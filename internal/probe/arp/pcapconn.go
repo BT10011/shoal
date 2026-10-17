@@ -97,26 +97,22 @@ const npcapURL = "https://npcap.com"
 // limits Npcap to administrators, so the advice names the box to look for.
 const npcapRestrictOption = `"Restrict Npcap driver's access to Administrators only"`
 
-// What is lost without raw access on Windows, for the advice below.
-const npcapCost = "There is no ARP sweep or listener (so a device on the wrong subnet is not overheard), --also is unavailable, and a capture holds no ARP frames."
-
 var (
-	// errNoNpcap: wpcap.dll is in neither of the places Npcap installs it.
-	errNoNpcap = &AccessError{
+	// ErrNoNpcap: wpcap.dll is in neither of the places Npcap installs it.
+	ErrNoNpcap = &AccessError{
 		Reason: "no Npcap",
-		Advice: "Npcap is not installed, so shoal reads Windows' neighbour table instead of sweeping with ARP. " +
-			npcapCost + " To scan in full, install Npcap from " + npcapURL + " with " + npcapRestrictOption +
-			" left unticked, then start shoal again. No administrator rights are needed after that.",
+		Advice: "Npcap is not installed. Windows has no raw network access of its own, so shoal sends and hears ARP through Npcap. " +
+			"Install it from " + npcapURL + " with " + npcapRestrictOption + " left unticked, then start shoal again; " +
+			"shoal --setup walks you through it. No administrator rights are needed after that.",
 	}
-	// errNpcapAdminOnly: Npcap is installed for administrators only and
+	// ErrNpcapAdminOnly: Npcap is installed for administrators only and
 	// shoal is not running as one. Opening the adapter anyway would make
 	// Npcap ask for elevation through a Windows prompt every time shoal
 	// started.
-	errNpcapAdminOnly = &AccessError{
+	ErrNpcapAdminOnly = &AccessError{
 		Reason: "Npcap is for administrators only",
-		Advice: "Npcap is installed with " + npcapRestrictOption + " ticked and shoal is not running as an administrator, " +
-			"so shoal reads Windows' neighbour table instead of sweeping with ARP. " + npcapCost +
-			" To scan in full without administrator rights, install Npcap again from " + npcapURL +
-			" with that box unticked, then start shoal again.",
+		Advice: "Npcap is installed with " + npcapRestrictOption + " ticked, and shoal is not running as an administrator. " +
+			"Install Npcap again from " + npcapURL + " with that box unticked, then start shoal again; " +
+			"shoal --setup walks you through it.",
 	}
 )

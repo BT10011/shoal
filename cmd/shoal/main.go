@@ -23,7 +23,6 @@ import (
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
 	"github.com/BT10011/shoal/internal/probe/nbns"
-	"github.com/BT10011/shoal/internal/probe/neigh"
 	"github.com/BT10011/shoal/internal/probe/rdns"
 	"github.com/BT10011/shoal/internal/probe/rogue"
 	"github.com/BT10011/shoal/internal/selfupdate"
@@ -39,12 +38,14 @@ Usage:
   shoal iface [name]      Show the interface, subnet and gateway shoal would scan
   shoal probe <name>      Run one probe standalone and print what it sends, receives and learns
   shoal version           Which build this is, for bug reports
-  shoal --update          Replace this binary with the latest release (--check just looks)
+  shoal --setup           Give shoal full network access, which it needs to scan: asks for
+                          your password once (Linux, macOS) or helps install Npcap (Windows)
+  shoal --upgrade         Replace this binary with the latest release (--check just looks);
+                          --update is the same command
   shoal --uninstall       Remove shoal, its settings and its history, after listing them
 
 Flags:
   --iface NAME            Interface to scan (default: the one carrying the default route)
-  --unprivileged          Skip raw ARP; read the kernel neighbour table instead
   --rate N                Probe packets per second (default 100; 500 for a whole large subnet)
   --max-hosts N           Largest subnet to sweep without asking, in addresses (default 1022,
                           a /22). On a larger network, up to a /16, shoal says what a full
@@ -52,7 +53,7 @@ Flags:
                           machine, or listen only
   --also CIDR             Also ask every address in CIDR with ARP, on this segment only,
                           e.g. a venue's usual 192.168.1.0/24, to find gear carrying a stale
-                          static address that never speaks. Repeatable. Needs raw access
+                          static address that never speaks. Repeatable
   --history PATH          Where to remember networks and their devices between runs
                           (default: the per-user data directory; see shoal probe history)
   --no-history            Remember nothing and write nothing
@@ -94,14 +95,17 @@ func run(args []string) error {
 	// stopped by now.
 	selfupdate.RemoveLeftovers()
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		// --update and --uninstall look like flags but are commands: they
-		// change the machine rather than the scan, so they are taken before
-		// any of the TUI's flags are parsed.
+		// --upgrade, --update and --uninstall look like flags but are
+		// commands: they change the machine rather than the scan, so they are
+		// taken before any of the TUI's flags are parsed. --update is the
+		// name v1.0 knows, and still works.
 		switch {
-		case isFlag(args, "update"):
-			return runUpdate(without(args, "update"))
+		case isFlag(args, "upgrade") || isFlag(args, "update"):
+			return runUpdate(without(without(args, "upgrade"), "update"))
 		case isFlag(args, "uninstall"):
 			return runUninstall(without(args, "uninstall"))
+		case isFlag(args, "setup"):
+			return runSetup(without(args, "setup"))
 		}
 		return runTUI(args)
 	}
@@ -150,7 +154,8 @@ func runTUI(args []string) error {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	demo := fs.Bool("demo", false, "use scripted fake probes instead of the network")
 	ifaceName := fs.String("iface", "", "interface to scan")
-	unprivileged := fs.Bool("unprivileged", false, "read the kernel neighbour table instead of sending ARP")
+	// Gone in v2.0.0, with the reduced mode it chose; kept so it can say so.
+	unprivileged := fs.Bool("unprivileged", false, "")
 	rate := fs.Int("rate", 0, "probe packets per second")
 	maxHosts := fs.Int("max-hosts", 0, "largest subnet to sweep, in addresses")
 	theme := fs.String("theme", ui.DefaultTheme, "colour theme (see the picker, t, for every name)")
@@ -161,6 +166,9 @@ func runTUI(args []string) error {
 	fs.Func("also", "also ask every address in this IPv4 range with ARP (repeatable)", alsoFlag(&also))
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *unprivileged {
+		return errors.New("--unprivileged was removed in v2.0.0: shoal now always scans with full network access, which shoal --setup grants once. To watch the kernel's neighbour table on its own, run shoal probe neigh")
 	}
 	if _, ok := ui.ThemeByName(*theme); !ok {
 		return fmt.Errorf("--theme: there is no theme called %q; choose one of: %s", *theme, strings.Join(ui.ThemeNames(), ", "))
@@ -174,10 +182,15 @@ func runTUI(args []string) error {
 	if err != nil {
 		return err
 	}
+	// There is no reduced mode: without raw packet access shoal offers to
+	// set it up, and restarts itself to use it, before anything else opens.
+	if err := ensureAccess(iface); err != nil {
+		return err
+	}
 	// Nothing is captured unless asked for, with --pcap or w; the tap only
 	// writes while a recording is running.
 	tap := capture.New(version)
-	c := &scanConfig{unprivileged: *unprivileged, rate: *rate, maxHosts: *maxHosts, also: also, tap: tap}
+	c := &scanConfig{rate: *rate, maxHosts: *maxHosts, also: also, tap: tap}
 	// Remember each network for next time. A history file that cannot be
 	// opened never stops a scan: the mode line says what happened.
 	if !*noHistory {
@@ -189,17 +202,16 @@ func runTUI(args []string) error {
 			c.history = h
 		}
 	}
-	// The first interface is opened here, so a flag that cannot work on it
-	// (--also without raw access) stops shoal before the screen clears.
-	// A subnet too large to sweep without asking is left to the UI, which
-	// asks before anything is sent.
+	// The first interface is opened here, so one that cannot be swept stops
+	// shoal before the screen clears. A subnet too large to sweep without
+	// asking is left to the UI, which asks before anything is sent.
 	opts := ui.Options{Iface: iface, Theme: themeName, SaveTheme: saveTheme, Interfaces: netif.Candidates, Open: c.open, Capture: tap}
 	s, large, err := c.open(iface, ui.SweepAsk)
 	if err != nil {
 		return err
 	}
 	if large == nil {
-		opts.Store, opts.Engine, opts.Mode, opts.AccessNote = s.Store, s.Engine, s.Mode, s.AccessNote
+		opts.Store, opts.Engine, opts.Mode = s.Store, s.Engine, s.Mode
 	}
 	if *pcapPath != "" {
 		if _, err := tap.StartFile(*pcapPath, iface); err != nil {
@@ -227,34 +239,27 @@ const largeRate = 500
 // interface is being scanned: the one shoal started on, or one chosen
 // later with i.
 type scanConfig struct {
-	unprivileged bool
-	rate         int
-	maxHosts     int
-	also         []*net.IPNet
-	history      *store.History // nil when nothing is remembered
-	historyNote  string         // why not, for the mode line
-	tap          *capture.Tap   // records packets while the user asks; nil for none
+	rate        int
+	maxHosts    int
+	also        []*net.IPNet
+	history     *store.History // nil when nothing is remembered
+	historyNote string         // why not, for the mode line
+	tap         *capture.Tap   // records packets while the user asks; nil for none
 }
 
 // open builds every probe for one interface. Asked with SweepAsk about a
 // subnet larger than shoal sweeps without asking, it returns what the UI
 // needs to warn the user instead, and builds nothing.
 func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Session, *ui.LargeSweep, error) {
-	raw, why, advice := c.rawAccess(iface)
-	if raw && choice == ui.SweepAsk {
+	// Shoal scans only with raw packet access, so an interface that refuses
+	// it is reported rather than scanned some lesser way.
+	if err := arp.CheckAccess(iface); err != nil {
+		return ui.Session{}, nil, fmt.Errorf("cannot sweep %s with ARP: %w", iface.Name, err)
+	}
+	if choice == ui.SweepAsk {
 		if large := c.large(iface); large != nil {
 			return ui.Session{}, large, nil
 		}
-	}
-	if !raw && len(c.also) > 0 {
-		// Asked for, and impossible: say so rather than quietly scan less.
-		if advice != "" {
-			return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP (%s). %s", why, advice)
-		}
-		if c.unprivileged {
-			return ui.Session{}, nil, errors.New("--also needs raw packet access to send ARP, and --unprivileged turns it off; leave one of them out")
-		}
-		return ui.Session{}, nil, fmt.Errorf("--also needs raw packet access to send ARP, and this run would use the kernel neighbour table (%s); run make setcap, or sudo", why)
 	}
 
 	st := store.NewMemory()
@@ -265,9 +270,6 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 	var mode string
 	var discoverers []engine.Discoverer
 	switch {
-	case !raw:
-		mode = "neigh · " + why
-		discoverers = append(discoverers, neigh.New(neigh.Options{Rate: c.rate, MaxHosts: c.maxHosts}))
 	case choice == ui.SweepNone:
 		// The user declined to sweep a large subnet: listen only, so the
 		// devices that speak still turn up.
@@ -348,27 +350,7 @@ func (c *scanConfig) open(iface netif.Interface, choice ui.SweepChoice) (ui.Sess
 			return ui.Session{}, nil, err
 		}
 	}
-	return ui.Session{Store: st, Engine: eng, Iface: iface, Mode: mode, AccessNote: advice}, nil, nil
-}
-
-// rawAccess reports whether the ARP sweep can run on iface, and if not, a
-// few words on why for the mode line and, where the probe can say more (no
-// Npcap on Windows), what is lost and what to do about it, for the log.
-func (c *scanConfig) rawAccess(iface netif.Interface) (ok bool, why, advice string) {
-	if c.unprivileged {
-		return false, "unprivileged", ""
-	}
-	var refused *arp.AccessError
-	switch err := arp.CheckAccess(iface); {
-	case err == nil:
-		return true, "", ""
-	case errors.As(err, &refused):
-		return false, refused.Reason, refused.Advice
-	case errors.Is(err, arp.ErrPermission):
-		return false, "no raw packet access", ""
-	default:
-		return false, err.Error(), ""
-	}
+	return ui.Session{Store: st, Engine: eng, Iface: iface, Mode: mode}, nil, nil
 }
 
 // large describes iface's subnet when it is more than shoal sweeps without

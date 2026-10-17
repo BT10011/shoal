@@ -43,7 +43,7 @@ func OpenConn(iface netif.Interface) (Conn, error) {
 		case errors.Is(err, unix.EBUSY):
 			continue
 		case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
-			return nil, fmt.Errorf("%w: cannot open %s (%v); run with sudo, or add your user to the access_bpf group (Wireshark's ChmodBPF does this) and log in again", ErrPermission, path, err)
+			return nil, fmt.Errorf("%w: cannot open %s (%v); %s", ErrPermission, path, err, bpfAdvice)
 		case errors.Is(err, unix.ENOENT):
 			return nil, errors.New("no /dev/bpf devices found")
 		default:

@@ -23,5 +23,5 @@ func Listen(ctx context.Context) (net.PacketConn, Mode, error) {
 	if rawErr == nil {
 		return conn, ModeRaw, nil
 	}
-	return nil, "", fmt.Errorf("no ICMP socket available: unprivileged (%v); raw (%v). On Linux, either widen net.ipv4.ping_group_range or grant cap_net_raw with `make setcap`", dgramErr, rawErr)
+	return nil, "", fmt.Errorf("no ICMP socket available: unprivileged (%v); raw (%v). On Linux, either widen net.ipv4.ping_group_range or grant cap_net_raw with shoal --setup", dgramErr, rawErr)
 }

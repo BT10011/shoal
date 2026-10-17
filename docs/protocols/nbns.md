@@ -84,8 +84,8 @@ confidence **0.9** — as direct as an ARP reply, but a claim rather than
 something observed on the wire, and the method says so. Samba sends six zero
 bytes there, which shoal treats as "not answered" rather than as an address.
 
-This is genuinely useful: a device found through the unprivileged `neigh` path
-or overheard by the mDNS listener may have no MAC yet, and this supplies one.
+This is genuinely useful: a device overheard by the mDNS listener may have
+no MAC yet, and this supplies one.
 If it disagrees with what ARP saw, the detail view shows both.
 
 ## Confidence

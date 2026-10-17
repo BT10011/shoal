@@ -1,8 +1,10 @@
 # neigh — the kernel's own ARP table
 
-`neigh` is a **discoverer**, and shoal's unprivileged fallback. It finds the
-same devices as [`arp`](arp.md) without opening a raw socket, by asking the
-operating system what it has already learned.
+`neigh` is a **discoverer** that finds the same devices as [`arp`](arp.md)
+without opening a raw socket, by asking the operating system what it has
+already learned. Until v2.0 it was shoal's unprivileged fallback; shoal now
+always scans with `arp`, set up once with `shoal --setup`, and `neigh` runs
+on its own, as a probe to compare with.
 
 ## Why it exists
 
@@ -63,7 +65,6 @@ directly observed value and keeps the cache entry visible underneath it.
 shoal probe neigh              # nudge the subnet, then read the cache
 shoal probe neigh en1
 shoal probe neigh -no-nudge    # read only what the OS already knew
-shoal --unprivileged           # the TUI, using this probe instead of arp
 ```
 
 `-no-nudge` sends nothing at all: it is the quietest thing shoal can do,

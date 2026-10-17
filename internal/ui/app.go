@@ -25,9 +25,7 @@ type Options struct {
 	Iface  netif.Interface
 	Demo   bool
 	Mode   string // how discovery is running, shown in the "under the hood" header
-	// AccessNote is Session.AccessNote for the session Run starts with.
-	AccessNote string
-	Theme      string
+	Theme  string
 	// SaveTheme remembers a theme kept in the picker for next time. The UI
 	// does no file I/O itself; nil means nothing is remembered.
 	SaveTheme func(name string) error
@@ -70,7 +68,7 @@ func Run(ctx context.Context, o Options) error {
 	p := tea.NewProgram(a, tea.WithAltScreen(), tea.WithContext(ctx))
 	a.ctx, a.send = ctx, p.Send
 	if o.Engine != nil {
-		if err := a.start(Session{Store: o.Store, Engine: o.Engine, Iface: o.Iface, Mode: o.Mode, AccessNote: o.AccessNote}); err != nil {
+		if err := a.start(Session{Store: o.Store, Engine: o.Engine, Iface: o.Iface, Mode: o.Mode}); err != nil {
 			return err
 		}
 	}

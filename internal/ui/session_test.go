@@ -30,7 +30,6 @@ type opener struct {
 	mu      sync.Mutex
 	calls   []SweepChoice
 	engines []*engine.Engine
-	note    string // the AccessNote each session carries
 }
 
 func (o *opener) open(iface netif.Interface, choice SweepChoice) (Session, *LargeSweep, error) {
@@ -44,7 +43,7 @@ func (o *opener) open(iface netif.Interface, choice SweepChoice) (Session, *Larg
 	st := store.NewMemory()
 	eng := engine.New(st, iface)
 	o.engines = append(o.engines, eng)
-	return Session{Store: st, Engine: eng, Iface: iface, Mode: "test on " + iface.Name, AccessNote: o.note}, nil, nil
+	return Session{Store: st, Engine: eng, Iface: iface, Mode: "test on " + iface.Name}, nil, nil
 }
 
 func (o *opener) stopAll() {
@@ -214,45 +213,5 @@ func TestDuration(t *testing.T) {
 	}
 	if got := thousands(65534); got != "65,534" {
 		t.Errorf("thousands = %q", got)
-	}
-}
-
-func TestASessionWithoutRawAccessSaysWhyInTheLog(t *testing.T) {
-	eth0 := candidate(t, "eth0", "172.16.10.5", "172.16.10.0/24")
-	a, o := switchingApp(t, eth0)
-	o.note = "Npcap is not installed, so shoal reads Windows' neighbour table instead of sweeping with ARP."
-
-	run(a, a.switchTo(eth0, SweepAsk))
-	var found bool
-	for _, ev := range a.events {
-		if ev.Message == o.note {
-			found = true
-			if ev.Probe != "arp" || ev.Kind != engine.KindInfo {
-				t.Errorf("the note is logged as %s/%s, want arp/info: it explains why arp is not running", ev.Probe, ev.Kind)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("the session's access note is not in the log")
-	}
-	// The log wraps the selected event in full; the note must be readable
-	// there, its first words and its last, not cut off at the pane's edge.
-	a.focus = paneHood
-	a.Update(tea.KeyMsg{Type: tea.KeyUp})
-	view := ansi.Strip(a.View())
-	for _, want := range []string{"Npcap is not installed", "sweeping with ARP."} {
-		if !strings.Contains(view, want) {
-			t.Errorf("the note cannot be read in full in the log: %q is missing", want)
-		}
-	}
-
-	// A session with nothing to say adds nothing.
-	before := len(a.events)
-	o.note = ""
-	run(a, a.switchTo(eth0, SweepAsk))
-	for _, ev := range a.events[before:] {
-		if ev.Probe == "arp" {
-			t.Errorf("an empty note was logged: %+v", ev)
-		}
 	}
 }

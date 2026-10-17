@@ -34,7 +34,7 @@ shoal's platforms offer an unprivileged alternative, and shoal prefers it:
 | Socket | How shoal opens it | Needs |
 |---|---|---|
 | **Unprivileged datagram** | `icmp.ListenPacket("udp4", …)` | macOS: nothing. Linux: the process's group inside `net.ipv4.ping_group_range` |
-| **Raw** | `icmp.ListenPacket("ip4:icmp", …)` | root, or `cap_net_raw` via `make setcap` |
+| **Raw** | `icmp.ListenPacket("ip4:icmp", …)` | root, or `cap_net_raw` (`shoal --setup`, or `make setcap` for a build) |
 | **Windows echo API** | `IcmpSendEcho` in `iphlpapi.dll`, the call `ping.exe` makes | nothing |
 
 Windows has no unprivileged ICMP socket, and a raw one needs an

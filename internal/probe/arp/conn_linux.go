@@ -33,7 +33,7 @@ func OpenConn(iface netif.Interface) (Conn, error) {
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, proto)
 	if err != nil {
 		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
-			return nil, fmt.Errorf("%w: AF_PACKET socket refused (%v); run with sudo, or grant the binary cap_net_raw (make setcap)", ErrPermission, err)
+			return nil, fmt.Errorf("%w: AF_PACKET socket refused (%v); run shoal --setup to grant the binary cap_net_raw", ErrPermission, err)
 		}
 		return nil, fmt.Errorf("AF_PACKET socket: %w", err)
 	}
