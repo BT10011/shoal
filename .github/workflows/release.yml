@@ -13,9 +13,7 @@
 #                       fine-grained token with Contents read and write on
 #                       that repository only. Without it the formula is
 #                       not published, with a warning.
-#   WINGET_TOKEN        opens a pull request to microsoft/winget-pkgs from
-#                       the fork BT10011/winget-pkgs: a classic token with
-#                       the public_repo scope. Without it winget is skipped.
+#   WINGET_TOKEN        submits the release to winget; see winget.yml.
 name: release
 
 on:
@@ -79,11 +77,10 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
-  # The next two jobs work from the published release rather than this
-  # job's files, so either can be re-run on its own if it fails: the release
-  # itself cannot be made twice.
+  # The jobs below work from the published release rather than this job's
+  # files, so each can be re-run on its own if it fails: the release itself
+  # cannot be made twice.
   provenance:
     needs: release
     runs-on: ubuntu-24.04
@@ -146,3 +143,15 @@ jobs:
           fi
           git -c user.name="$login" -c user.email="${id}+${login}@users.noreply.github.com" commit -m "shoal $TAG"
           git push origin HEAD
+
+  winget:
+    needs: release
+    # Not for a pre-release.
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read # download the release's checksums
+    uses: ./.github/workflows/winget.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}

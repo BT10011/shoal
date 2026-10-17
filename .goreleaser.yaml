@@ -120,7 +120,7 @@ release:
     - **Debian, Ubuntu:** download `shoal-linux-amd64.deb` (or `-arm64`), then `sudo apt install ./shoal-linux-amd64.deb`
     - **Fedora, RHEL, openSUSE:** `sudo dnf install ./shoal-linux-amd64.rpm` (or `sudo zypper install …`)
     - **Arch:** `sudo pacman -U shoal-linux-amd64.pkg.tar.zst`
-    - **Windows:** `winget install BT10011.Shoal`, or the zip below; then install [Npcap](https://npcap.com)
+    - **Windows:** `shoal-windows-amd64.zip` (or `-arm64`) below; then install [Npcap](https://npcap.com)
     - **The install script:** see the README for how to check it before running it
 
     Shoal needs full network access to scan. The first time it runs it says what that takes and asks for your password once, or run `shoal --setup`.
@@ -143,36 +143,3 @@ changelog:
   filters:
     exclude:
       - "^Merge "
-
-winget:
-  - name: Shoal
-    package_identifier: BT10011.Shoal
-    publisher: BT10011
-    publisher_url: https://github.com/BT10011
-    author: BT10011
-    short_description: LAN discovery in the terminal that shows how every device was found
-    description: |-
-      Shoal finds the devices on the local network with ARP, names them with
-      DNS, mDNS and NetBIOS, and shows where every value on screen came from.
-    homepage: https://github.com/BT10011/shoal
-    license: MIT
-    license_url: https://github.com/BT10011/shoal/blob/main/LICENSE
-    release_notes_url: "https://github.com/BT10011/shoal/releases/tag/{{ .Tag }}"
-    installation_notes: "Shoal sends ARP through Npcap, which its licence does not allow to be bundled: install it from https://npcap.com, or run shoal --setup to be walked through it."
-    tags: [network, lan, discovery, arp, mdns, terminal]
-    ids: [shoal]
-    # Off until a WINGET_TOKEN secret exists, and never for a pre-release.
-    skip_upload: '{{ if eq (envOrDefault "WINGET_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
-    repository:
-      owner: BT10011
-      name: winget-pkgs
-      token: '{{ envOrDefault "WINGET_TOKEN" "" }}'
-      pull_request:
-        enabled: true
-        # A draft, so the checklist in winget-pkgs' template can be ticked
-        # before Microsoft's reviewers see it.
-        draft: true
-        base:
-          owner: microsoft
-          name: winget-pkgs
-          branch: master

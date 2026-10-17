@@ -333,13 +333,12 @@ Quit and run:
 It checks the download against the checksums published with the release,
 and installs nothing if they do not match. If a package manager installed
 shoal, it hands the job over: Homebrew upgrades it, and apt, dnf, zypper
-or pacman install the new package, through sudo. winget cannot replace a
-program while it runs, so shoal tells you its command to run afterwards.
-Where only the administrator can write, as in /usr/local/bin, shoal puts
-the new copy there through sudo, and on Linux keeps the network access the
-old one had. On Windows the old shoal.exe is moved aside and deleted the
-next time shoal starts. Shoal 1.0 knows the command only by its first
-name: sudo shoal --update.
+or pacman install the new package, through sudo. Where only the
+administrator can write, as in /usr/local/bin, shoal puts the new copy
+there through sudo, and on Linux keeps the network access the old one had.
+On Windows the old shoal.exe is moved aside and deleted the next time
+shoal starts. Shoal 1.0 knows the command only by its first name: sudo
+shoal --update.
 
 To remove shoal completely:
 

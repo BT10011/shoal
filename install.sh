@@ -20,7 +20,7 @@
 #
 # Package managers do the same job: Homebrew (brew tap bt10011/tap, then
 # brew install shoal), the .deb, .rpm and Arch packages on the release
-# page, or on Windows, winget install BT10011.Shoal. See the README.
+# page, or on Windows, the zip on the release page. See the README.
 #
 # Optional settings, as environment variables before `sh`:
 #   SHOAL_VERSION=v2.0.0          a particular release (default: the latest)
@@ -70,7 +70,7 @@ main() {
 	Linux) os=linux ;;
 	Darwin) os=darwin ;;
 	FreeBSD) os=freebsd ;;
-	MINGW* | MSYS* | CYGWIN*) die "on Windows, install Shoal with winget: winget install BT10011.Shoal (or take the zip from the release page)" ;;
+	MINGW* | MSYS* | CYGWIN*) die "on Windows, take the zip from the release page: https://github.com/$repo/releases/latest" ;;
 	*) die "there is no Shoal build for $os" ;;
 	esac
 	case "$arch" in

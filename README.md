@@ -99,18 +99,12 @@ sudo pacman -U shoal-linux-amd64.pkg.tar.zst
 On 64-bit Arm, use `arm64` in place of `amd64`. A package grants Shoal
 the network access it needs as it installs, so there is nothing else to do.
 
-**Windows:**
-
-```
-winget install BT10011.Shoal
-```
-
-or download `shoal-windows-amd64.zip` (`-arm64` for Arm) from the
-[latest release](https://github.com/BT10011/shoal/releases/latest). Shoal
-sends ARP through **[Npcap](https://npcap.com)**, which you install once
-yourself, since its licence does not allow Shoal to include it: leave
-"Restrict Npcap driver's access to Administrators only" unticked.
-`shoal --setup` walks you through it.
+**Windows:** download `shoal-windows-amd64.zip` (`-arm64` for Arm) from
+the [latest release](https://github.com/BT10011/shoal/releases/latest) and
+unzip it. Shoal sends ARP through **[Npcap](https://npcap.com)**, which you
+install once yourself, since its licence does not allow Shoal to include
+it: leave "Restrict Npcap driver's access to Administrators only"
+unticked. `shoal --setup` walks you through it.
 
 **The install script**, for macOS, Linux and FreeBSD:
 
@@ -189,8 +183,6 @@ changing anything. If a package manager installed Shoal, `--upgrade`
 hands the update to it:
 - Homebrew runs `brew upgrade`.
 - apt, dnf, zypper or pacman installs the new package.
-- winget cannot replace a program while it runs, so Shoal prints the
-  command to run afterwards: `winget upgrade BT10011.Shoal`.
 
 Where only the administrator can write, as in `/usr/local/bin`, it asks
 for your password through sudo. On Linux the new copy keeps the network
@@ -348,8 +340,8 @@ This is **release 2** (v2.0.0). New since release 1:
   address this machine has, and above a `/22` Shoal asks before sweeping.
 - **Removing devices** that have stopped answering, with `d` and `D`.
 - **Six new dark themes.**
-- **Installing**: Homebrew, `.deb`, `.rpm` and Arch packages, winget, and
-  an install script that can be checked. Shoal now always scans with full
+- **Installing**: Homebrew, `.deb`, `.rpm` and Arch packages, and an
+  install script that can be checked. Shoal now always scans with full
   network access, set up once with `shoal --setup`, and `shoal --upgrade`
   updates it however it was installed.
 
