@@ -12,11 +12,14 @@ import (
 )
 
 // What the packages call shoal. The Homebrew formula lives in the tap
-// BT10011/homebrew-tap; the winget package is in microsoft/winget-pkgs; the
-// .deb, .rpm and Arch packages, attached to every release, install the
-// program as systemBinary.
+// BT10011/homebrew-tap, but brew is given only its short name: brew finds
+// an installed formula by that name and upgrades it from the tap it came
+// from, so the command still works if shoal moves to homebrew-core, where
+// the tap's full name would not. The winget package is in
+// microsoft/winget-pkgs; the .deb, .rpm and Arch packages, attached to
+// every release, install the program as systemBinary.
 const (
-	HomebrewFormula = "bt10011/tap/shoal"
+	HomebrewFormula = "shoal"
 	WingetID        = "BT10011.Shoal"
 	systemBinary    = "/usr/bin/shoal"
 )

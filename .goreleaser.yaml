@@ -116,7 +116,7 @@ release:
   footer: |
     ## Install
 
-    - **macOS and Linux, with Homebrew:** `brew install BT10011/tap/shoal`
+    - **macOS and Linux, with Homebrew:** `brew tap bt10011/tap`, then `brew install shoal`
     - **Debian, Ubuntu:** download `shoal-linux-amd64.deb` (or `-arm64`), then `sudo apt install ./shoal-linux-amd64.deb`
     - **Fedora, RHEL, openSUSE:** `sudo dnf install ./shoal-linux-amd64.rpm` (or `sudo zypper install …`)
     - **Arch:** `sudo pacman -U shoal-linux-amd64.pkg.tar.zst`

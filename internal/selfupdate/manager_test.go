@@ -34,9 +34,9 @@ func TestDetectManagerKnowsEachWayShoalIsInstalled(t *testing.T) {
 		p                  probes
 		want, upgrade      string // manager name and upgrade command, "" for none
 	}{
-		{"Homebrew on Apple silicon", "/opt/homebrew/Cellar/shoal/2.0.0/bin/shoal", "darwin", machine(""), "Homebrew", "upgrade " + HomebrewFormula},
-		{"Homebrew on Intel", "/usr/local/Cellar/shoal/2.0.0/bin/shoal", "darwin", machine(""), "Homebrew", "upgrade " + HomebrewFormula},
-		{"Homebrew on Linux", "/home/linuxbrew/.linuxbrew/Cellar/shoal/2.0.0/bin/shoal", "linux", machine(""), "Homebrew", "upgrade " + HomebrewFormula},
+		{"Homebrew on Apple silicon", "/opt/homebrew/Cellar/shoal/2.0.0/bin/shoal", "darwin", machine(""), "Homebrew", "upgrade shoal"},
+		{"Homebrew on Intel", "/usr/local/Cellar/shoal/2.0.0/bin/shoal", "darwin", machine(""), "Homebrew", "upgrade shoal"},
+		{"Homebrew on Linux", "/home/linuxbrew/.linuxbrew/Cellar/shoal/2.0.0/bin/shoal", "linux", machine(""), "Homebrew", "upgrade shoal"},
 		{"winget", winget, "windows", machine(""), "winget", "winget upgrade --id " + WingetID + " --exact"},
 		{"a .deb with apt", systemBinary, "linux", machine("dpkg-query", "apt-get"), "apt", "apt-get install"},
 		{"a .deb without apt", systemBinary, "linux", machine("dpkg-query"), "dpkg", "dpkg -i"},
@@ -96,7 +96,7 @@ func TestUpdateHandsAHomebrewInstallToBrew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "brew upgrade " + HomebrewFormula; strings.Join(ran, " ") != want {
+	if want := "brew upgrade shoal"; strings.Join(ran, " ") != want {
 		t.Errorf("ran %q, want %q", ran, want)
 	}
 	if !strings.Contains(out.String(), "installed with Homebrew") {
@@ -207,7 +207,7 @@ func TestUninstallHandsAHomebrewInstallToBrew(t *testing.T) {
 	if err := Uninstall(o); err != nil {
 		t.Fatalf("Uninstall = %v\n%s", err, out.String())
 	}
-	if want := "brew uninstall " + HomebrewFormula; strings.Join(ran, " ") != want {
+	if want := "brew uninstall shoal"; strings.Join(ran, " ") != want {
 		t.Errorf("ran %q, want %q", ran, want)
 	}
 	if !exists(brewed) {

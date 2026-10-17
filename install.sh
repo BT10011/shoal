@@ -18,9 +18,9 @@
 # what full network access takes on this system and asks for your password
 # once. Nothing is installed if a check fails.
 #
-# Package managers do the same job: brew install BT10011/tap/shoal, the
-# .deb, .rpm and Arch packages on the release page, or on Windows,
-# winget install BT10011.Shoal. See the README.
+# Package managers do the same job: Homebrew (brew tap bt10011/tap, then
+# brew install shoal), the .deb, .rpm and Arch packages on the release
+# page, or on Windows, winget install BT10011.Shoal. See the README.
 #
 # Optional settings, as environment variables before `sh`:
 #   SHOAL_VERSION=v2.0.0          a particular release (default: the latest)

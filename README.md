@@ -68,8 +68,12 @@ Actions from the tagged source.
 **macOS and Linux, with [Homebrew](https://brew.sh):**
 
 ```
-brew install BT10011/tap/shoal
+brew tap bt10011/tap
+brew install shoal
 ```
+
+The first line is needed only once. It tells Homebrew about Shoal's tap,
+BT10011/homebrew-tap, where the formula lives.
 
 **Debian and Ubuntu:**
 
