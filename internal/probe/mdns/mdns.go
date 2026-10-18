@@ -339,28 +339,40 @@ func (e *Enricher) handle(key string, ip net.IP, name string, id uint16, oneShot
 	}
 
 	rec := records[0]
-	emit(model.Observation{
+	host, itself := answeredBy(ip, from)
+	obs := model.Observation{
 		DeviceKey:  key,
 		Field:      model.FieldHostname,
 		Value:      rec.PTR,
 		Confidence: Confidence,
 		Raw:        wire,
 		TTL:        max(rec.TTL, minTTL),
-		Method:     fmt.Sprintf("mDNS PTR for %s, %s, mDNS TTL %s", name, responder(ip, from), rec.TTL),
-	})
+		Method:     fmt.Sprintf("mDNS PTR for %s, %s, mDNS TTL %s", name, responder(ip, host, itself), rec.TTL),
+	}
+	if !itself {
+		// Not the device's own word, so not contact with it: a sleep proxy
+		// goes on answering for a device after it has left.
+		obs.Source = model.SourceMDNSProxy
+	}
+	emit(obs)
 	return true
+}
+
+// answeredBy says who sent an answer about ip: its host, and whether that
+// is the device itself.
+func answeredBy(ip net.IP, from net.Addr) (string, bool) {
+	if addr, ok := from.(*net.UDPAddr); ok {
+		return addr.IP.String(), addr.IP.Equal(ip)
+	}
+	return from.String(), false
 }
 
 // responder explains who answered. Usually it is the device itself; a Bonjour
 // Sleep Proxy answers on behalf of devices that have gone to sleep, and that
 // is worth saying out loud rather than presenting as the device's own word.
-func responder(ip net.IP, from net.Addr) string {
-	host := from.String()
-	if addr, ok := from.(*net.UDPAddr); ok {
-		if addr.IP.Equal(ip) {
-			return fmt.Sprintf("answered by %s itself over multicast", ip)
-		}
-		host = addr.IP.String()
+func responder(ip net.IP, host string, itself bool) string {
+	if itself {
+		return fmt.Sprintf("answered by %s itself over multicast", ip)
 	}
-	return fmt.Sprintf("answered by %s on behalf of %s (a proxy responder, e.g. a Bonjour Sleep Proxy)", host, ip)
+	return fmt.Sprintf("answered by %s on behalf of %s (a proxy responder, e.g. a Bonjour Sleep Proxy, so it is not counted as hearing from %s)", host, ip, ip)
 }

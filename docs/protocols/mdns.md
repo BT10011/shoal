@@ -105,8 +105,15 @@ devices that have gone to sleep and answers for them. Shoal accepts that
 answer and names both parties:
 
 ```
-answered by 192.168.1.5 on behalf of 192.168.1.42 (a proxy responder, e.g. a Bonjour Sleep Proxy)
+answered by 192.168.1.5 on behalf of 192.168.1.42 (a proxy responder, e.g. a Bonjour Sleep Proxy, so it is not counted as hearing from 192.168.1.42)
 ```
+
+The name is kept, but credited to `mdns-proxy` rather than `mdns`, because it
+is not the device's own word. A sleep proxy goes on answering for a device
+for a while after it has left the network, so counting its answer as contact
+would keep a device that has gone from turning red at the end of a scan.
+`mdns-proxy` is therefore not one of the direct sources freshness is judged
+on, and a device's own `mdns` answer outranks it.
 
 Silence is not an error. Most non-Apple, non-avahi devices simply do not run a
 responder, and the log says that rather than reporting a failure.

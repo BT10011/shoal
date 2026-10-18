@@ -383,6 +383,22 @@ func TestEnrichNamesAProxyResponder(t *testing.T) {
 	if !strings.Contains(method, "192.168.1.5 on behalf of "+deviceIP) {
 		t.Errorf("Method = %q, want it to say who answered for whom", method)
 	}
+	// A proxy keeps answering for a device that has gone, so its answer must
+	// not count as hearing from the device.
+	if src := rec.obs[0].Source; src != model.SourceMDNSProxy || model.Direct(src) {
+		t.Errorf("Source = %q, want %q, which is not direct contact", src, model.SourceMDNSProxy)
+	}
+}
+
+func TestEnrichCreditsTheDevicesOwnAnswerToMDNS(t *testing.T) {
+	e, _ := probeWith(packet{wire: withID(loadHex(t, "reply-ptr.hex"), 0), from: udpAddr(deviceIP)})
+	var rec recorder
+	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.obs) != 1 || rec.obs[0].Source != "" || !strings.Contains(rec.obs[0].Method, "itself") {
+		t.Fatalf("the device's own answer should keep the probe's source (the engine fills in mdns): %+v", rec.obs)
+	}
 }
 
 func TestEnrichLogsASecondClaim(t *testing.T) {

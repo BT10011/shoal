@@ -137,7 +137,8 @@ The first column of the table, and the third line of the details pane,
 say how recently a probe heard from the device directly. Only probes that
 exchanged packets with the device count: arp, neigh, mdns, nbns and icmp.
 A resolver or the vendor table answering says nothing about whether the
-device is still there.
+device is still there, and nor does mdns-proxy: another device, such as a
+Bonjour Sleep Proxy, answering for one that has gone to sleep or left.
 
   (blank): heard from since the current scan began.
   ?: not heard from yet this scan, which is still running. Shown muted.

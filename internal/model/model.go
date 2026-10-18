@@ -40,6 +40,15 @@ const SourceHistory = "memory"
 // observing the present.
 func Historical(source string) bool { return source == SourceHistory }
 
+// SourceMDNSProxy credits an mDNS answer that came from another device on
+// behalf of the one asked about: a Bonjour Sleep Proxy, typically an Apple
+// TV or HomePod, answers for devices that have gone to sleep, and goes on
+// answering for a while after one has left the network. The name is worth
+// keeping, but it is not word from the device itself, so it is not direct
+// contact (Direct): counting it would keep a device that has gone looking
+// present. A device's own mDNS answer outranks it.
+const SourceMDNSProxy = "mdns-proxy"
+
 // MultiValued reports whether a field legitimately holds several values at
 // once (services, ports, flags). Single-valued fields with more than one live
 // value are in conflict.
@@ -73,17 +82,18 @@ func (o Observation) Expired(now time.Time) bool {
 // sourcePriority breaks ties between equally confident observations.
 // Higher wins. Unknown sources rank lowest.
 var sourcePriority = map[string]int{
-	"arp":      100,
-	"mdns":     90,
-	"neigh":    80,
-	"rdns":     70,
-	"nbns":     60,
-	"oui":      50,
-	"icmp":     40,
-	"ports":    30,
-	"classify": 20,
-	"store":    10,
-	"memory":   5,
+	"arp":        100,
+	"mdns":       90,
+	"mdns-proxy": 85,
+	"neigh":      80,
+	"rdns":       70,
+	"nbns":       60,
+	"oui":        50,
+	"icmp":       40,
+	"ports":      30,
+	"classify":   20,
+	"store":      10,
+	"memory":     5,
 }
 
 // SourcePriority returns the tie-break rank of a source.
