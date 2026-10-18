@@ -39,7 +39,8 @@ and you can watch each one answer as it runs.
 ```
 
 `shoal --demo` gives you that screen with a scripted network: no
-privileges, no packets sent.
+privileges, no packets sent. Press `i` to switch between its four invented
+networks.
 
 > Only scan networks you own or are authorised to test.
 

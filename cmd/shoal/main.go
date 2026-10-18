@@ -10,7 +10,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/BT10011/shoal/internal/capture"
 	"github.com/BT10011/shoal/internal/config"
@@ -18,7 +17,6 @@ import (
 	"github.com/BT10011/shoal/internal/netif"
 	"github.com/BT10011/shoal/internal/probe/arp"
 	"github.com/BT10011/shoal/internal/probe/av"
-	"github.com/BT10011/shoal/internal/probe/fake"
 	"github.com/BT10011/shoal/internal/probe/history"
 	"github.com/BT10011/shoal/internal/probe/icmp"
 	"github.com/BT10011/shoal/internal/probe/mdns"
@@ -430,38 +428,6 @@ func alsoFlag(into *[]*net.IPNet) func(string) error {
 		*into = append(*into, n)
 		return nil
 	}
-}
-
-func runDemo(theme string, saveTheme func(string) error) error {
-	st := store.NewMemory()
-	eng := engine.New(st, fake.Interface())
-	opts := fake.Options{}
-	if err := eng.AddDiscoverer(fake.NewDiscoverer(opts)); err != nil {
-		return err
-	}
-	// The demo's history lives in memory, seeded with an invented visit
-	// three days ago, so it shows what changed without touching the real file.
-	h, err := store.OpenHistory("")
-	if err != nil {
-		return err
-	}
-	defer h.Close()
-	if err := fake.SeedHistory(h, time.Now()); err != nil {
-		return err
-	}
-	if err := eng.AddDiscoverer(history.New(history.Options{History: h, Store: st, Status: eng.Status})); err != nil {
-		return err
-	}
-	ouiEnricher, err := realOUI()
-	if err != nil {
-		return err
-	}
-	for _, en := range append([]engine.Enricher{ouiEnricher, rogue.New(fake.Subnet()), av.New()}, fake.NewEnrichers(opts)...) {
-		if err := eng.AddEnricher(en); err != nil {
-			return err
-		}
-	}
-	return ui.Run(context.Background(), ui.Options{Store: st, Engine: eng, Demo: true, Theme: theme, SaveTheme: saveTheme})
 }
 
 func runIface(args []string) error {

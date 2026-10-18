@@ -1,12 +1,14 @@
 // Package fake provides scripted probes for --demo: a discoverer that
-// "sweeps" 192.168.1.0/24 and enrichers that answer from a fixed cast of
-// devices. Nothing touches the network. Every Method says "simulated" so
-// the provenance is honest. Vendor lookup is not faked: the real oui
-// enricher works offline, so the demo uses it with genuine MAC prefixes.
+// "sweeps" one of the demo's invented networks, 192.168.1.0/24 unless told
+// otherwise, and enrichers that answer from a fixed cast of devices.
+// Nothing touches the network. Every Method says "simulated" so the
+// provenance is honest. Vendor lookup is not faked: the real oui enricher
+// works offline, so the demo uses it with genuine MAC prefixes.
 package fake
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -44,16 +46,29 @@ type Options struct {
 	Interval time.Duration // pause between ARP "requests"
 	Latency  time.Duration // base round trip for enricher lookups
 	Seed     uint64
+	// Range is what the sweep asks. Nil sweeps the subnet of the interface
+	// it runs on, or 192.168.1.0/24 when it has none.
+	Range *net.IPNet
+	// Listen sweeps nothing: each device is overheard in turn, as it
+	// speaks, the way a large network the user chose not to sweep is
+	// watched.
+	Listen bool
+	// Resolver is the DNS server the rdns lookups pretend to ask:
+	// 192.168.1.1, the home router, unless set.
+	Resolver string
 }
 
 const (
 	defaultInterval = 15 * time.Millisecond
 	defaultLatency  = 150 * time.Millisecond
 	subnet          = "192.168.1"
-	hosts           = 254
+	hosts           = 254 // addresses a sweep of the default network asks
 	// overhearAt is the address index at which the sweep overhears the
 	// devices that are not in its subnet.
 	overhearAt = 40
+	// listenEvery is how many sweep intervals a listen-only scan waits
+	// between the devices it overhears: 1.5 s at the default pace.
+	listenEvery = 100
 )
 
 // Subnet is the network the demo pretends to scan.
@@ -62,10 +77,52 @@ func Subnet() *net.IPNet {
 	return n
 }
 
-// Interface is the interface the demo pretends to scan on: the subnet and
-// the gateway at .1, whose MAC the history probe uses to recognise it.
+// Interface is the interface the demo starts on: the subnet and the
+// gateway at .1, whose MAC the history probe uses to recognise it.
 func Interface() netif.Interface {
-	return netif.Interface{Name: "demo0", Subnet: Subnet(), Gateway: net.ParseIP(subnet + ".1"), IP: net.ParseIP(subnet + ".10")}
+	return netif.Interface{Name: "en0", MAC: mac("00:00:5e:00:53:10"), IP: net.ParseIP(subnet + ".10"), Subnet: Subnet(),
+		Gateway: net.ParseIP(subnet + ".1"), GatewaySource: "demo routing table"}
+}
+
+// Interfaces lists the networks the demo machine is on, as the picker (i)
+// shows them: the home network the demo starts on, an AV network on a USB
+// adapter, a large office network, and a VPN, which has no MAC and so
+// cannot be swept with ARP. All of it is invented; the machine's own MACs
+// are from the documentation range.
+func Interfaces() []netif.Interface {
+	noRoute := "only en0 has a default route (demo)"
+	return []netif.Interface{
+		Interface(),
+		{Name: "en7", MAC: mac("00:00:5e:00:53:07"), IP: net.ParseIP("172.16.10.20"), Subnet: cidr("172.16.10.0/24"), GatewaySource: noRoute},
+		{Name: "en8", MAC: mac("00:00:5e:00:53:08"), IP: net.ParseIP("172.20.4.15"), Subnet: cidr("172.20.0.0/16"),
+			Gateway: net.ParseIP("172.20.0.1"), GatewaySource: "demo routing table"},
+		{Name: "utun4", IP: net.ParseIP("198.51.100.7"), Subnet: cidr("198.51.100.0/24"), GatewaySource: noRoute},
+	}
+}
+
+// DevicesFor is the cast on one of the demo's networks: DefaultDevices on
+// the home network, a few AV boxes on en7 and an office on en8. Any other
+// network is empty.
+func DevicesFor(iface netif.Interface) []Device {
+	switch iface.Name {
+	case "", Interface().Name:
+		return DefaultDevices()
+	case "en7":
+		return avDevices()
+	case "en8":
+		return officeDevices()
+	}
+	return []Device{} // not nil, which would mean the default cast
+}
+
+func mac(s string) net.HardwareAddr {
+	m, _ := net.ParseMAC(s)
+	return m
+}
+
+func cidr(s string) *net.IPNet {
+	_, n, _ := net.ParseCIDR(s)
+	return n
 }
 
 func (o Options) withDefaults() Options {
@@ -80,6 +137,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Seed == 0 {
 		o.Seed = 1
+	}
+	if o.Resolver == "" {
+		o.Resolver = subnet + ".1"
 	}
 	return o
 }
@@ -116,6 +176,34 @@ func DefaultDevices() []Device {
 		{IP: "192.168.0.77", MAC: "00:1d:c1:12:34:56", MDNSName: "Stagebox-FOH.local",
 			Services: []string{"_netaudio-arc._udp", "_netaudio-cmc._udp", "_netaudio-dbc._udp"},
 			Silent:   true, Overheard: true, AskingFor: "192.168.0.1"},
+	}
+}
+
+// avDevices is the cast on en7, an AV network with no router and no DNS:
+// a switch, a Dante console, stagebox and wireless receiver, and an NDI
+// camera.
+func avDevices() []Device {
+	dante := []string{"_netaudio-arc._udp", "_netaudio-cmc._udp", "_netaudio-dbc._udp"}
+	return []Device{
+		{IP: "172.16.10.1", MAC: "00:09:5b:2e:61:01", MDNSName: "AV-Switch.local", Services: []string{"_http._tcp"}, RTT: 700 * time.Microsecond},
+		{IP: "172.16.10.11", MAC: "00:a0:de:44:19:0b", MDNSName: "Console-FOH.local", Services: dante, RTT: 1100 * time.Microsecond},
+		{IP: "172.16.10.21", MAC: "00:1d:c1:3a:5b:02", MDNSName: "Stagebox-A.local", Services: dante, RTT: 900 * time.Microsecond},
+		{IP: "172.16.10.31", MAC: "00:12:67:8c:20:31", MDNSName: "PTZ-CAM-2.local", Services: []string{"_ndi._tcp", "_rtsp._tcp"}, RTT: 1600 * time.Microsecond},
+		{IP: "172.16.10.41", MAC: "00:0e:dd:51:7a:29", MDNSName: "Wireless-RX1.local", Services: []string{"_netaudio-arc._udp", "_http._tcp"}, RTT: 1300 * time.Microsecond},
+	}
+}
+
+// officeDevices is the cast on en8, an office /16: the gateway, and a
+// meeting room TV and a printer in the /24 around the demo machine. A NAS
+// on another floor is found only by a sweep of the whole subnet.
+func officeDevices() []Device {
+	return []Device{
+		{IP: "172.20.0.1", MAC: "00:00:0c:47:2a:01", RDNS: "gw.office.lan", RTT: 1200 * time.Microsecond},
+		{IP: "172.20.4.21", MAC: "00:07:ab:6e:12:c4", MDNSName: "MeetingRoom-TV.local", Services: []string{"_airplay._tcp"}, RTT: 9 * time.Millisecond},
+		{IP: "172.20.4.30", MAC: "00:1b:a9:3c:88:17", RDNS: "printer-4.office.lan", MDNSName: "Brother-Printer.local",
+			Services: []string{"_ipp._tcp", "_http._tcp"}, RTT: 3 * time.Millisecond},
+		{IP: "172.20.9.50", MAC: "24:5e:be:41:0d:6a", RDNS: "nas-02.office.lan", MDNSName: "nas-02.local",
+			Services: []string{"_smb._tcp", "_http._tcp"}, RTT: 2 * time.Millisecond},
 	}
 }
 
@@ -176,7 +264,8 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Discoverer simulates an ARP sweep of 192.168.1.0/24.
+// Discoverer simulates an ARP sweep of the network it runs on, or of
+// 192.168.1.0/24 without one.
 type Discoverer struct {
 	opts   Options
 	script *script
@@ -192,17 +281,28 @@ func NewDiscoverer(opts Options) *Discoverer {
 func (d *Discoverer) Name() string { return "arp" }
 
 // Run walks every host address, reporting each request and reply.
-func (d *Discoverer) Run(ctx context.Context, _ netif.Interface, emit engine.Emit, report engine.Report) error {
-	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("simulated sweep of %s.0/24 (demo, no packets sent)", subnet)})
+func (d *Discoverer) Run(ctx context.Context, iface netif.Interface, emit engine.Emit, report engine.Report) error {
+	if d.opts.Listen {
+		return d.listen(ctx, iface, emit, report)
+	}
+	scope := d.opts.Range
+	if scope == nil {
+		scope = iface.Subnet
+	}
+	if scope == nil {
+		scope = Subnet()
+	}
+	first, total := hostRange(scope)
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("simulated sweep of %s (demo, no packets sent)", scope)})
 	answered := 0
-	for n := 1; n <= hosts; n++ {
-		ip := fmt.Sprintf("%s.%d", subnet, n)
+	for n := 1; n <= total; n++ {
+		ip := ipv4(first + uint32(n-1))
 		report(engine.ProbeEvent{Kind: engine.KindSent, Target: ip, Message: "who-has " + ip})
 		if err := sleep(ctx, d.script.rng.jitter(d.opts.Interval)); err != nil {
 			return err
 		}
 		if n == overhearAt {
-			d.overhear(emit, report)
+			d.overhear(scope, emit, report)
 		}
 		for _, dev := range d.script.byIP[ip] {
 			answered++
@@ -211,31 +311,76 @@ func (d *Discoverer) Run(ctx context.Context, _ netif.Interface, emit engine.Emi
 			emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldMAC, Value: dev.MAC, Method: method, Confidence: 1})
 			emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldIP, Value: ip, Method: method, Confidence: 1})
 		}
-		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: n, Total: hosts})
+		report(engine.ProbeEvent{Kind: engine.KindProgress, Done: n, Total: total})
 	}
-	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweep complete: %d replies from %d addresses", answered, hosts)})
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: fmt.Sprintf("sweep complete: %d replies from %d addresses", answered, total)})
 	return nil
 }
 
 // overhear plays the ARP frames of the devices that are not in the subnet:
 // the sweep never asks them, but their own traffic gives them away.
-func (d *Discoverer) overhear(emit engine.Emit, report engine.Report) {
+func (d *Discoverer) overhear(scope *net.IPNet, emit engine.Emit, report engine.Report) {
 	for _, dev := range d.opts.Devices {
 		if !dev.Overheard {
 			continue
 		}
 		var method, message string
 		if dev.AskingFor == dev.IP {
-			method = fmt.Sprintf("simulated gratuitous ARP from %s overheard during the sweep: the device is announcing that it now holds %s (demo); %s is outside %s.0/24, yet the frame arrived on this segment", dev.IP, dev.IP, dev.IP, subnet)
+			method = fmt.Sprintf("simulated gratuitous ARP from %s overheard during the sweep: the device is announcing that it now holds %s (demo); %s is outside %s, yet the frame arrived on this segment", dev.IP, dev.IP, dev.IP, scope)
 			message = fmt.Sprintf("announce: %s is-at %s (gratuitous, overheard) · outside our subnet", dev.IP, dev.MAC)
 		} else {
-			method = fmt.Sprintf("simulated ARP request from %s overheard during the sweep, asking who-has %s (demo); %s is outside %s.0/24, yet the frame arrived on this segment", dev.IP, dev.AskingFor, dev.IP, subnet)
+			method = fmt.Sprintf("simulated ARP request from %s overheard during the sweep, asking who-has %s (demo); %s is outside %s, yet the frame arrived on this segment", dev.IP, dev.AskingFor, dev.IP, scope)
 			message = fmt.Sprintf("who-has %s tell %s (overheard) · outside our subnet", dev.AskingFor, dev.IP)
 		}
 		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: dev.IP, Message: message})
 		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldMAC, Value: dev.MAC, Method: method, Confidence: 0.9})
 		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldIP, Value: dev.IP, Method: method, Confidence: 0.9})
 	}
+}
+
+// listen sweeps nothing. It overhears each device in turn, as a listener
+// hears whatever happens to speak, then waits for the scan to end.
+func (d *Discoverer) listen(ctx context.Context, iface netif.Interface, emit engine.Emit, report engine.Report) error {
+	report(engine.ProbeEvent{Kind: engine.KindInfo, Message: "listening only, no sweep (demo, no packets sent): devices appear as they speak"})
+	for _, dev := range d.opts.Devices {
+		if err := sleep(ctx, d.script.rng.jitter(listenEvery*d.opts.Interval)); err != nil {
+			return err
+		}
+		var method, message string
+		if gw := iface.Gateway; gw != nil && !gw.Equal(net.ParseIP(dev.IP)) {
+			method = fmt.Sprintf("simulated ARP request from %s overheard while listening, asking who-has %s (demo)", dev.IP, gw)
+			message = fmt.Sprintf("who-has %s tell %s (overheard)", gw, dev.IP)
+		} else {
+			method = fmt.Sprintf("simulated gratuitous ARP from %s overheard while listening (demo)", dev.IP)
+			message = fmt.Sprintf("announce: %s is-at %s (gratuitous, overheard)", dev.IP, dev.MAC)
+		}
+		report(engine.ProbeEvent{Kind: engine.KindReceived, Target: dev.IP, Message: message})
+		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldMAC, Value: dev.MAC, Method: method, Confidence: 0.9})
+		emit(model.Observation{DeviceKey: dev.MAC, Field: model.FieldIP, Value: dev.IP, Method: method, Confidence: 0.9})
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// hostRange is the first host address of n, as a number, and how many
+// host addresses n holds: all but its network and broadcast addresses,
+// except in a /31 or /32, which have none to spare.
+func hostRange(n *net.IPNet) (uint32, int) {
+	ip := n.IP.To4()
+	if ip == nil {
+		return 0, 0
+	}
+	base := binary.BigEndian.Uint32(ip)
+	ones, bits := n.Mask.Size()
+	size := 1 << (bits - ones)
+	if size <= 2 {
+		return base, size
+	}
+	return base + 1, size - 2
+}
+
+func ipv4(v uint32) string {
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
 }
 
 // NewEnrichers returns the demo rdns, mdns and icmp enrichers. Pair them
@@ -264,7 +409,7 @@ func (e *rdnsEnricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit 
 	if !ok {
 		return nil
 	}
-	resolver := subnet + ".1"
+	resolver := e.opts.Resolver
 	report(engine.ProbeEvent{Kind: engine.KindSent, Target: dev.IP, Message: fmt.Sprintf("PTR %s → %s", reverseName(dev.IP), resolver)})
 	if err := sleep(ctx, e.script.rng.jitter(e.opts.Latency)); err != nil {
 		return err

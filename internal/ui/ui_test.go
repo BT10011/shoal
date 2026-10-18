@@ -1820,3 +1820,38 @@ func TestListenCometsFillTheirWidthExactly(t *testing.T) {
 		t.Errorf("stopped: an empty wire, %q", got)
 	}
 }
+
+// The demo offers i as a real run does: the status bar names the network
+// on screen, the key bar offers the picker, and the picker lists the
+// networks the demo machine is on.
+func TestDemoOffersTheInterfacePicker(t *testing.T) {
+	a, _ := sized(t, 170, 40) // wide enough for the key bar to keep i
+	list := fake.Interfaces()
+	a.opts.Iface = list[1]
+	a.opts.Interfaces = func() ([]netif.Interface, error) { return list, nil }
+	a.opts.Open = func(netif.Interface, SweepChoice) (Session, *LargeSweep, error) {
+		return Session{}, nil, errors.New("not opened in this test")
+	}
+	plain := ansi.Strip(a.View())
+	for _, want := range []string{"DEMO  " + list[1].Subnet.String(), "i iface"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("view missing %q\n%s", want, plain)
+		}
+	}
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+	if cmd == nil {
+		t.Fatal("i does nothing in the demo")
+	}
+	a.Update(cmd())
+	plain = ansi.Strip(a.View())
+	for _, iface := range list {
+		if !strings.Contains(plain, iface.Name+" ") {
+			t.Errorf("picker missing %s\n%s", iface.Name, plain)
+		}
+	}
+	for _, want := range []string{"interfaces", "· scanning", "no MAC, no ARP"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("picker missing %q\n%s", want, plain)
+		}
+	}
+}

@@ -8,7 +8,7 @@ store and engine can be exercised without root, a network, or a real LAN.
 
 | Probe | Pretends to be | Trigger | What it emits |
 |---|---|---|---|
-| `arp` (discoverer) | ARP sweep of `192.168.1.0/24` | — | `mac`, `ip` for each scripted device; one `sent` event per address, `received` per reply, `progress` 1..254 |
+| `arp` (discoverer) | ARP sweep of the network chosen, `192.168.1.0/24` to start | — | `mac`, `ip` for each scripted device; one `sent` event per address, `received` per reply, `progress` 1..254 on a /24 |
 | `oui` | **not faked** — the real enricher runs offline against the embedded registry ([oui.md](oui.md)); the cast uses genuine vendor prefixes | `mac` | `vendor`, or the `locally-administered-mac` flag |
 | `rdns` | PTR query to the router resolver | `ip` | `hostname` (confidence 0.7, TTL 5m) or NXDOMAIN |
 | `mdns` | Multicast reverse PTR + DNS-SD enumeration | `ip` | `hostname` (confidence 0.9, TTL 2m) and `service` values |
@@ -53,6 +53,20 @@ at `.51` (now `.50`, so new address), the Raspberry Pi as `octopi.local`
 (now `raspberrypi.local`, so renamed), and no Chromecast, PTZ camera or
 Dante box (new). The demo interface has its gateway at `.1`, whose MAC
 identifies the network. The real history file is never touched.
+
+## Other networks: i
+
+The demo machine is on four invented networks (`fake.Interfaces`), and `i`
+switches between them as it does on a real machine. Each choice starts a
+fresh scripted session, as a real switch does. The history is shared, so
+going back to `en0` is another visit to it.
+
+| Interface | Network | What it shows |
+|---|---|---|
+| `en0` | `192.168.1.0/24`, gateway `.1` | the home network above, where the demo starts |
+| `en7` | `172.16.10.0/24`, no gateway | an AV network: a switch, a Dante console, stagebox and wireless receiver, and an NDI camera. rdns asks the home router, which knows none of them |
+| `en8` | `172.20.0.0/16`, gateway `172.20.0.1` | an office too large to sweep without asking, so the large-network question appears. The `/24` around the machine holds a meeting-room TV and a printer; a sweep of all of it, at the 500 requests a second a real one uses, also finds the gateway and a NAS on another floor; listening only overhears them one by one |
+| `utun4` | `198.51.100.0/24` | a VPN with no MAC, refused as a real one is, since ARP cannot run on it |
 
 ## Running it
 

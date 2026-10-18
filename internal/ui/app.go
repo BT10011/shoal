@@ -31,7 +31,7 @@ type Options struct {
 	SaveTheme func(name string) error
 
 	// Interfaces lists the networks the user can switch to with i. Nil
-	// turns the picker off, as in the demo.
+	// turns the picker off.
 	Interfaces func() ([]netif.Interface, error)
 	// Open builds the probes for an interface. Asked with SweepAsk about a
 	// subnet too large to sweep without asking, it returns a LargeSweep
@@ -475,8 +475,10 @@ func (a *app) statusLeft() string {
 	switch {
 	case a.opts.Demo && narrow:
 		parts = append(parts, s.StatusNotice.Render("DEMO"))
+	case a.opts.Demo && a.opts.Iface.Subnet != nil:
+		parts = append(parts, s.StatusNotice.Render("DEMO")+text.Render(" "+a.opts.Iface.Subnet.String()))
 	case a.opts.Demo:
-		parts = append(parts, s.StatusNotice.Render("DEMO")+text.Render(" 192.168.1.0/24"))
+		parts = append(parts, s.StatusNotice.Render("DEMO"))
 	case a.opts.Iface.Subnet != nil && narrow:
 		parts = append(parts, text.Render(a.opts.Iface.Name))
 	case a.opts.Iface.Subnet != nil:

@@ -237,3 +237,157 @@ func TestReverseName(t *testing.T) {
 		t.Fatalf("reverseName = %q", got)
 	}
 }
+
+func demoIface(t *testing.T, name string) netif.Interface {
+	t.Helper()
+	for _, iface := range Interfaces() {
+		if iface.Name == name {
+			return iface
+		}
+	}
+	t.Fatalf("no demo interface %s", name)
+	return netif.Interface{}
+}
+
+// The picker's list: the demo starts on its first entry, and each network
+// that can be swept has a cast inside its own subnet. The VPN cannot be.
+func TestInterfacesEachHaveTheirOwnNetwork(t *testing.T) {
+	list := Interfaces()
+	if len(list) < 2 || !list[0].Same(Interface()) {
+		t.Fatalf("Interfaces() = %+v, want the interface the demo starts on first", list)
+	}
+	noMAC := 0
+	for _, iface := range list {
+		if !iface.Subnet.Contains(iface.IP) {
+			t.Errorf("%s: %s is outside its own subnet %s", iface.Name, iface.IP, iface.Subnet)
+		}
+		if len(iface.MAC) != 6 {
+			noMAC++
+			continue
+		}
+		cast := DevicesFor(iface)
+		if len(cast) == 0 {
+			t.Errorf("%s has no devices", iface.Name)
+		}
+		for _, dev := range cast {
+			if !dev.Overheard && !iface.Subnet.Contains(net.ParseIP(dev.IP)) {
+				t.Errorf("%s: %s is outside %s", iface.Name, dev.IP, iface.Subnet)
+			}
+		}
+	}
+	if noMAC != 1 {
+		t.Errorf("want one interface with no MAC, to show one ARP cannot sweep; found %d", noMAC)
+	}
+	if cast := DevicesFor(netif.Interface{Name: "en99"}); cast == nil || len(cast) != 0 {
+		t.Errorf("an unknown network's cast = %v, want empty, and not nil, which means the default cast", cast)
+	}
+}
+
+func TestDiscovererSweepsTheInterfaceItRunsOn(t *testing.T) {
+	iface := demoIface(t, "en7")
+	opts := fast
+	opts.Devices = DevicesFor(iface)
+	c := &collector{}
+	if err := NewDiscoverer(opts).Run(context.Background(), iface, c.emit, c.report); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.count(engine.KindSent); got != 254 {
+		t.Errorf("sent %d requests, want 254 for %s", got, iface.Subnet)
+	}
+	if got := c.count(engine.KindReceived); got != len(opts.Devices) {
+		t.Errorf("got %d replies, want %d", got, len(opts.Devices))
+	}
+	if first := c.events[1]; first.Kind != engine.KindSent || first.Target != "172.16.10.1" {
+		t.Errorf("first request = %+v, want who-has 172.16.10.1", first)
+	}
+}
+
+// Sweeping only the /24 around the machine finds what is in it, and none
+// of the rest of the subnet.
+func TestDiscovererSweepsOnlyItsRange(t *testing.T) {
+	iface := demoIface(t, "en8")
+	opts := fast
+	opts.Devices = DevicesFor(iface)
+	_, opts.Range, _ = net.ParseCIDR("172.20.4.0/24")
+	c := &collector{}
+	if err := NewDiscoverer(opts).Run(context.Background(), iface, c.emit, c.report); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.count(engine.KindSent); got != 254 {
+		t.Errorf("sent %d requests, want 254 for %s", got, opts.Range)
+	}
+	inside := 0
+	for _, dev := range opts.Devices {
+		_, found := c.observation(dev.MAC, model.FieldIP)
+		want := opts.Range.Contains(net.ParseIP(dev.IP))
+		if found != want {
+			t.Errorf("%s: found = %v, want %v", dev.IP, found, want)
+		}
+		if want {
+			inside++
+		}
+	}
+	if inside == 0 || inside == len(opts.Devices) {
+		t.Errorf("%d of %d devices are in %s; want some in and some out, so the range shows", inside, len(opts.Devices), opts.Range)
+	}
+}
+
+// Listening asks nothing and has no total: the devices are overheard one
+// by one, and the listener carries on until its scan ends.
+func TestDiscovererListensWithoutSweeping(t *testing.T) {
+	iface := demoIface(t, "en8")
+	opts := fast
+	opts.Devices = DevicesFor(iface)
+	opts.Listen = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &collector{}
+	done := make(chan error, 1)
+	go func() { done <- NewDiscoverer(opts).Run(ctx, iface, c.emit, c.report) }()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		c.mu.Lock()
+		n := len(c.obs)
+		c.mu.Unlock()
+		if n == 2*len(opts.Devices) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("overheard %d observations, want ip and mac for each of %d devices", n, len(opts.Devices))
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v before its scan ended; a listener keeps listening", err)
+	default:
+	}
+	cancel()
+	if err := <-done; err != context.Canceled {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if got := c.count(engine.KindSent); got != 0 {
+		t.Errorf("sent %d requests, want none: listening asks nothing", got)
+	}
+	for _, e := range c.events {
+		if e.Kind == engine.KindProgress {
+			t.Errorf("progress %+v: a listener has no total", e)
+		}
+	}
+}
+
+func TestHostRange(t *testing.T) {
+	for _, tc := range []struct {
+		cidr, first string
+		n           int
+	}{
+		{"192.168.1.0/24", "192.168.1.1", 254},
+		{"172.20.0.0/16", "172.20.0.1", 65534},
+		{"192.0.2.6/31", "192.0.2.6", 2},
+		{"198.51.100.7/32", "198.51.100.7", 1},
+	} {
+		_, n, _ := net.ParseCIDR(tc.cidr)
+		first, count := hostRange(n)
+		if ipv4(first) != tc.first || count != tc.n {
+			t.Errorf("%s: %s and %d hosts, want %s and %d", tc.cidr, ipv4(first), count, tc.first, tc.n)
+		}
+	}
+}
