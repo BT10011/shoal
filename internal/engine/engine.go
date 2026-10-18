@@ -784,7 +784,7 @@ func (d *discoverer) observe(ev ProbeEvent) {
 	case KindInfo:
 		// An event about one device is log material, not the probe's own
 		// status: letting it through would, say, replace a listener's
-		// "listening" and stop its wave.
+		// "listening" and stop its comets.
 		if ev.Target == "" {
 			d.status.Message = ev.Message
 		}

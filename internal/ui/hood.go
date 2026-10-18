@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +28,8 @@ func (a *app) renderHood(width, rows int) []string {
 			state = "stopped"
 		}
 		// A probe that listens has no end to count towards, so its row
-		// says what it has heard and carries a wave rather than a bar.
+		// says what it has heard and sends each message in as a comet
+		// rather than filling a bar.
 		listener := isListener(d)
 		// A listener straight after a sweep of the same name is that probe's
 		// second stage (the ARP listener takes over when the sweep ends), so
@@ -76,7 +79,7 @@ func (a *app) renderHood(width, rows int) []string {
 			continue
 		}
 		if listener {
-			graphic = listenWave(barW, a.waveFrame(), d.State == engine.StateRunning && !waiting, a.barStyles())
+			graphic = listenComets(barW, a.heardPerTick(d.Name), d.State == engine.StateRunning && !waiting, a.cometStyles())
 		}
 		label := s.Item.Render(fit(name, 7))
 		if sweep != nil {
@@ -315,45 +318,174 @@ func isListener(d engine.DiscovererStatus) bool {
 	return d.Total == 0 && strings.HasPrefix(d.Message, "listening")
 }
 
-// The listener's wave. A probe that listens never finishes, so a bar that
-// fills would be a lie; instead a wave rolls away from the probe's name
-// for as long as it runs, like a signal being received, and goes flat
-// when it stops. Each glyph is one step of a braille sine curve.
-var (
-	waveGlyphs = []string{"⣀", "⡠", "⠔", "⠊", "⠉", "⠑", "⠢", "⢄"}
-	waveFlat   = "⣀"
-	asciiWave  = []string{"_", ".", "-", "~", "-", "."}
-	asciiFlat  = "_"
+// The listener's comets. A probe that listens never finishes, so a bar
+// that fills would be a lie; instead its row is a wire, and every message
+// the listener hears flies in along it towards the probe's name: a bright
+// head trailing light that fades from the theme's accent to its focus
+// colour. Several heard in one tick follow each other in a short train. A
+// quiet network leaves the wire empty, and a stopped listener's goes dim.
+const (
+	// cometEvery is the comets' clock: each moves a cell per tick.
+	cometEvery = 100 * time.Millisecond
+	// cometTail is how many cells of light trail a comet's head.
+	cometTail = 4
+	// cometTrain is how many comets one tick's messages send at most.
+	cometTrain = 3
+	// cometKeep is how many ticks of what was heard are kept per
+	// listener: more than any row is wide.
+	cometKeep = 512
 )
 
-// waveEvery is the wave's own clock: slower than the bar's so a cell
-// advances once per tick and the motion reads as a roll, not a flicker.
-const waveEvery = 200 * time.Millisecond
-
-func (a *app) waveFrame() int {
-	return int(a.now.UnixNano() / int64(waveEvery))
+// heardLog is what one listener has heard, tick by tick while it runs.
+type heardLog struct {
+	last    int   // its heard count at the previous tick
+	perTick []int // messages heard in each tick, newest last
 }
 
-func listenWave(width, frame int, running bool, st barStyles) string {
+// sampleHeard records how many messages each running listener heard
+// since the last tick.
+func (a *app) sampleHeard() {
+	for _, d := range a.status.Discoverers {
+		if !isListener(d) || d.State != engine.StateRunning {
+			continue
+		}
+		if a.heard == nil {
+			a.heard = map[string]*heardLog{}
+		}
+		h := a.heard[d.Name]
+		if h == nil {
+			h = &heardLog{}
+			a.heard[d.Name] = h
+		}
+		n := d.Done - h.last
+		if n < 0 { // a rescan started the listener's count again
+			n = d.Done
+		}
+		h.last = d.Done
+		h.perTick = append(h.perTick, n)
+		if over := len(h.perTick) - cometKeep; over > 0 {
+			h.perTick = h.perTick[over:]
+		}
+	}
+}
+
+func (a *app) heardPerTick(name string) []int {
+	if h := a.heard[name]; h != nil {
+		return h.perTick
+	}
+	return nil
+}
+
+// cometStyles colour a listener's wire: the bar's brightness levels and,
+// when the theme's colours are #rrggbb, the three a comet's tail blends
+// between. Without them the tail steps through the levels instead.
+type cometStyles struct {
+	barStyles
+	base                 lipgloss.Style
+	blend                bool
+	muted, focus, accent [3]float64
+}
+
+func (a *app) cometStyles() cometStyles {
+	s := a.renderer.Styles
+	c := cometStyles{barStyles: a.barStyles(), base: s.Item, blend: true}
+	for i, col := range []lipgloss.TerminalColor{s.ItemMuted.GetForeground(), s.Theme.BorderFocus, s.Theme.Unread} {
+		rgb, ok := hexRGB(col)
+		c.blend = c.blend && ok
+		switch i {
+		case 0:
+			c.muted = rgb
+		case 1:
+			c.focus = rgb
+		case 2:
+			c.accent = rgb
+		}
+	}
+	return c
+}
+
+// hexRGB reads a #rrggbb colour.
+func hexRGB(c lipgloss.TerminalColor) ([3]float64, bool) {
+	var rgb [3]float64
+	hex, ok := c.(lipgloss.Color)
+	if !ok || len(hex) != 7 || hex[0] != '#' {
+		return rgb, false
+	}
+	for i := range rgb {
+		v, err := strconv.ParseUint(string(hex[1+2*i:3+2*i]), 16, 8)
+		if err != nil {
+			return rgb, false
+		}
+		rgb[i] = float64(v)
+	}
+	return rgb, true
+}
+
+// light is the style of a comet's tail at brightness x, from 1 beside the
+// head to nearly 0 at its end: from accent to focus colour, fading
+// towards the muted one.
+func (c cometStyles) light(x float64) lipgloss.Style {
+	if !c.blend {
+		switch {
+		case x > 0.65:
+			return c.solid
+		case x > 0.35:
+			return c.mid
+		}
+		return c.dim
+	}
+	fade := 0.3 + 0.7*x
+	hex := "#"
+	for i := range c.accent {
+		v := c.focus[i] + (c.accent[i]-c.focus[i])*x
+		v = c.muted[i] + (v-c.muted[i])*fade
+		hex += fmt.Sprintf("%02x", int(math.Round(min(255, max(0, v)))))
+	}
+	return c.base.Foreground(lipgloss.Color(hex))
+}
+
+func listenComets(width int, heard []int, running bool, c cometStyles) string {
 	if width < 1 {
 		return ""
 	}
-	glyphs, flat := waveGlyphs, waveFlat
-	if st.plain {
-		glyphs, flat = asciiWave, asciiFlat
+	wire, tail, head := "─", "━", "●"
+	if c.plain {
+		wire, tail, head = "-", "=", "o"
 	}
 	if !running {
-		return st.dim.Render(strings.Repeat(flat, width))
+		return c.dim.Render(strings.Repeat(wire, width))
 	}
-	n := len(glyphs)
+	// A message heard age ticks ago entered at the right edge and has
+	// moved age cells towards the name since.
+	light := make([]float64, width)
+	isHead := make([]bool, width)
+	for age := 0; age < width+cometTail; age++ {
+		j := len(heard) - 1 - age
+		if j < 0 {
+			break
+		}
+		for k := 0; k < min(heard[j], cometTrain); k++ {
+			x := width - 1 - age - 2*k
+			if x >= 0 {
+				isHead[x] = true
+			}
+			for t := 1; t <= cometTail; t++ {
+				if xt := x + t; xt >= 0 && xt < width {
+					light[xt] = max(light[xt], 1-float64(t)/(cometTail+1))
+				}
+			}
+		}
+	}
 	var b strings.Builder
 	for i := 0; i < width; i++ {
-		k := ((i-frame)%n + n) % n // shifts right as frame grows: the wave travels away from the name
-		style := st.dim
-		if k == n/2 { // the crest
-			style = st.mid
+		switch {
+		case isHead[i]:
+			b.WriteString(c.bright.Render(head))
+		case light[i] > 0:
+			b.WriteString(c.light(light[i]).Render(tail))
+		default:
+			b.WriteString(c.dim.Render(wire))
 		}
-		b.WriteString(style.Render(glyphs[k]))
 	}
 	return b.String()
 }

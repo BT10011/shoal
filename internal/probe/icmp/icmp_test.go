@@ -56,6 +56,16 @@ func equal(a, b []byte) bool {
 	return true
 }
 
+// The hood's mode line names the socket, never the privilege: shoal always
+// scans with full access, so "unprivileged" there read as a warning.
+func TestShortNamesTheSocket(t *testing.T) {
+	for mode, want := range map[Mode]string{ModeDatagram: "ping socket", ModeRaw: "raw socket", ModeEchoAPI: "IcmpSendEcho"} {
+		if got := mode.Short(); got != want {
+			t.Errorf("%q: %q, want %q", mode, got, want)
+		}
+	}
+}
+
 func TestEchoMatchesFixture(t *testing.T) {
 	got, err := Echo(0x1234, 1)
 	if err != nil {

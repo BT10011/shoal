@@ -44,15 +44,18 @@ const (
 	ModeEchoAPI Mode = "unprivileged Windows echo API (IcmpSendEcho)"
 )
 
-// Short is a status-bar-sized name for the socket kind.
+// Short is a status-bar-sized name for the socket kind. It names the
+// socket rather than the privilege: shoal has full access whenever it
+// scans, and "unprivileged" beside that read as if it were running
+// without it.
 func (m Mode) Short() string {
 	switch m {
 	case ModeRaw:
-		return "raw"
+		return "raw socket"
 	case ModeEchoAPI:
 		return "IcmpSendEcho"
 	}
-	return "unprivileged"
+	return "ping socket"
 }
 
 // addr returns the destination in the form the socket expects. A datagram

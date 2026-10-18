@@ -563,51 +563,78 @@ func TestLogSelectionSurvivesTrimming(t *testing.T) {
 	}
 }
 
-func TestListenerRowRollsAWaveAndCountsWhatItHeard(t *testing.T) {
+func TestListenerRowSendsEachMessageInAsAComet(t *testing.T) {
 	a, _ := sized(t, 120, 40)
 	listening := engine.DiscovererStatus{Name: "mdns", State: engine.StateRunning, Done: 57, Message: "listening"}
 	a.status = engine.Status{Scan: 1, ScanStarted: t0, Discoverers: []engine.DiscovererStatus{
 		{Name: "arp", State: engine.StateDone, Done: 428, Total: 428}, listening}}
+	// wire is the listener's graphic: the run of cells after its name.
+	wire := func() []rune {
+		for _, l := range strings.Split(ansi.Strip(a.View()), "\n") {
+			if i := strings.Index(l, "mdns "); i >= 0 && strings.Contains(l, "57 heard") {
+				return []rune(strings.Fields(l[i+len("mdns"):])[0])
+			}
+		}
+		t.Fatalf("no listener row\n%s", ansi.Strip(a.View()))
+		return nil
+	}
 	plain := ansi.Strip(a.View())
 	if !strings.Contains(plain, "listening · 57 heard") || strings.Contains(plain, "57 running") {
 		t.Errorf("listener row should say what it heard\n%s", plain)
 	}
-	row := ""
-	for _, l := range strings.Split(plain, "\n") {
-		if strings.Contains(l, "listening · 57 heard") {
-			row = l
-		}
-	}
-	if !strings.ContainsAny(row, strings.Join(waveGlyphs, "")) {
-		t.Errorf("listener row should carry the wave: %q", row)
-	}
 	if strings.Contains(plain, "428/428 done") && !strings.Contains(plain, "⣿") {
 		t.Errorf("the sweep keeps its bar\n%s", plain)
 	}
-
-	// The wave rolls as time passes, even with nothing new heard.
-	before := ansi.Strip(listenWave(30, a.waveFrame(), true, a.barStyles()))
-	a.now = a.now.Add(waveEvery)
-	after := ansi.Strip(listenWave(30, a.waveFrame(), true, a.barStyles()))
-	if before == after || lipgloss.Width(before) != 30 || lipgloss.Width(after) != 30 {
-		t.Errorf("wave should advance one step per tick: %q then %q", before, after)
+	if w := string(wire()); len(w) < 10 || strings.Trim(w, "─") != "" {
+		t.Errorf("nothing sampled yet: an empty wire: %q", w)
 	}
-	if before[3:] != after[:len(after)-3] && before[:len(before)-3] != after[3:] {
-		t.Errorf("wave should travel, not scramble: %q then %q", before, after)
+
+	// What was heard since the last tick enters at the right, beside the
+	// count, as a train of at most three comets, then flies left a cell
+	// per tick.
+	a.sampleHeard()
+	first := wire()
+	n := len(first)
+	if string(first[n-5:]) != "●━●━●" || strings.Count(string(first), "●") != 3 {
+		t.Errorf("57 messages enter as a train of three at the right: %q", string(first))
+	}
+	for i := 0; i < 5; i++ {
+		a.sampleHeard()
+	}
+	later := wire()
+	if len(later) != n || string(later[n-10:]) != "●━●━●━━━━─" {
+		t.Errorf("five ticks on, the train is five cells nearer the name: %q then %q", string(first), string(later))
+	}
+	if string(later[n-10:n-5]) != string(first[n-5:]) {
+		t.Errorf("the comets should travel, not change: %q then %q", string(first), string(later))
+	}
+	if got := a.heardPerTick("mdns"); len(got) != 6 || got[0] != 57 || got[5] != 0 {
+		t.Errorf("one sample per tick of what was heard since the last: %v", got)
 	}
 	if cmd := a.tick(); cmd == nil {
 		t.Fatal("tick")
 	}
 
-	// Stopped: a flat line and the count it reached.
+	// A rescan starts the listener's count again: what it heard since is
+	// a new sample, never a negative one.
+	a.status.Discoverers[1].Done = 3
+	a.sampleHeard()
+	if got := a.heardPerTick("mdns"); got[len(got)-1] != 3 {
+		t.Errorf("after a rescan the count starts again: %v", got)
+	}
+
+	// Stopped: the count it reached, a dim and empty wire, and no more
+	// samples.
+	a.status.Discoverers[1].Done = 57
 	listening.State = engine.StateCancelled
 	a.status.Discoverers[1] = listening
-	plain = ansi.Strip(a.View())
-	if !strings.Contains(plain, "stopped · 57 heard") || !strings.Contains(plain, strings.Repeat(waveFlat, 10)) {
-		t.Errorf("stopped listener should go flat\n%s", plain)
+	before := len(a.heardPerTick("mdns"))
+	a.sampleHeard()
+	if w := string(wire()); strings.Trim(w, "─") != "" || len(a.heardPerTick("mdns")) != before {
+		t.Errorf("a stopped listener's wire should be empty and unsampled: %q", w)
 	}
-	if got := ansi.Strip(listenWave(8, 5, true, barStyles{plain: true})); lipgloss.Width(got) != 8 || strings.ContainsAny(got, "⣀⠉") {
-		t.Errorf("plain themes get an ASCII wave: %q", got)
+	if !strings.Contains(ansi.Strip(a.View()), "stopped · 57 heard") {
+		t.Errorf("a stopped listener keeps its count\n%s", ansi.Strip(a.View()))
 	}
 
 	// A sweep that has not announced its total yet is not a listener.
@@ -752,7 +779,7 @@ func TestSweepAndItsListenerReadAsOneProbe(t *testing.T) {
 	if !strings.HasPrefix(r[0], "arp ") || !strings.HasPrefix(r[1], "  └") || strings.HasPrefix(r[1], "arp") {
 		t.Fatalf("the listener should hang under the sweep, not repeat its name:\n%s", strings.Join(r, "\n"))
 	}
-	if !strings.Contains(r[1], "listens once the sweep ends") || !strings.Contains(r[1], strings.Repeat(waveFlat, 5)) {
+	if !strings.Contains(r[1], "listens once the sweep ends") || !strings.Contains(r[1], strings.Repeat("─", 5)) || strings.Contains(r[1], "●") {
 		t.Errorf("while the sweep runs the listener waits, flat:\n%s", r[1])
 	}
 	if !strings.HasPrefix(r[2], "mdns ") || !strings.Contains(r[2], "listening · 9 heard") {
@@ -761,9 +788,10 @@ func TestSweepAndItsListenerReadAsOneProbe(t *testing.T) {
 
 	a.status.Discoverers[0].State, a.status.Discoverers[0].Done = engine.StateDone, 253
 	a.status.Discoverers[1].Done = 14
+	a.sampleHeard()
 	r = rows()
-	if !strings.Contains(r[0], "253/253 done") || !strings.Contains(r[1], "still listening · 14 heard") || strings.Contains(r[1], strings.Repeat(waveFlat, 8)) {
-		t.Errorf("after the sweep the listener carries on, rolling:\n%s", strings.Join(r, "\n"))
+	if !strings.Contains(r[0], "253/253 done") || !strings.Contains(r[1], "still listening · 14 heard") || !strings.Contains(r[1], "●") {
+		t.Errorf("after the sweep the listener carries on, sending in what it hears:\n%s", strings.Join(r, "\n"))
 	}
 }
 
@@ -1739,5 +1767,56 @@ func TestDemoFlagsDanteAndNDI(t *testing.T) {
 		if !strings.Contains(unwrapped, strings.ReplaceAll(want, " ", "")) {
 			t.Errorf("details missing %q\n%s", want, details)
 		}
+	}
+}
+
+func TestListenCometsFillTheirWidthExactly(t *testing.T) {
+	a := &app{renderer: newRenderer(Themes()[0])}
+	full := a.cometStyles()
+	if !full.blend {
+		t.Fatal("shoal's themes give #rrggbb colours, so a tail should blend")
+	}
+	stepped := full
+	stepped.blend = false
+	plain := full
+	plain.plain = true
+	heard := make([]int, 700)
+	for i := range heard {
+		heard[i] = (i * 7) % 13 % 5
+	}
+	for name, c := range map[string]cometStyles{"blended": full, "stepped": stepped, "plain": plain} {
+		for w := 0; w <= 90; w++ {
+			for _, h := range [][]int{nil, {9}, heard} {
+				for _, running := range []bool{true, false} {
+					out := listenComets(w, h, running, c)
+					if x, y := ansi.StringWidth(out), runewidth.StringWidth(ansi.Strip(out)); x != w || y != w {
+						t.Fatalf("%s, width %d: x/ansi says %d, go-runewidth %d", name, w, x, y)
+					}
+					if c.plain && strings.ContainsFunc(ansi.Strip(out), func(r rune) bool { return r > 0x7f }) {
+						t.Fatalf("a plain theme's wire must be ASCII: %q", ansi.Strip(out))
+					}
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		width int
+		heard []int
+		want  string
+	}{
+		{6, []int{1}, "─────●"},                                                            // just heard: at the right edge
+		{8, []int{1, 0, 0}, "─────●━━"},                                                    // two ticks on: two cells nearer the name
+		{10, []int{3}, "─────●━●━●"},                                                       // three at once: a train
+		{8, []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, "━━━─────"}, // reaching the name, its tail last
+	} {
+		if got := ansi.Strip(listenComets(tc.width, tc.heard, true, full)); got != tc.want {
+			t.Errorf("width %d, heard %v: %q, want %q", tc.width, tc.heard, got, tc.want)
+		}
+	}
+	if got := ansi.Strip(listenComets(10, []int{3}, true, plain)); got != "-----o=o=o" {
+		t.Errorf("plain: %q", got)
+	}
+	if got := ansi.Strip(listenComets(6, []int{3}, false, full)); got != "──────" {
+		t.Errorf("stopped: an empty wire, %q", got)
 	}
 }

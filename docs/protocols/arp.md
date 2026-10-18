@@ -119,8 +119,9 @@ announces itself when it links up — so a second discoverer, `arp.Listener`,
 opens its own raw socket and keeps writing frames down for as long as the
 scan runs. It sends nothing, shares the sweep's decoder and rules above,
 reports as `arp` so its facts carry the same weight, and shows in the hood
-pane as a wave with a count of frames heard. It runs in every scan, since
-shoal always scans with raw access.
+pane as a wire along which each frame heard flies in as a comet, with a
+count of frames heard. It runs in every scan, since shoal always scans
+with raw access.
 
 While the sweep is running both sockets receive every frame. The listener
 asks the sweep (`Sweep.Sweeping`) and stands aside until it finishes, so the

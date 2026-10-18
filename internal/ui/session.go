@@ -96,6 +96,7 @@ func (a *app) switchTo(iface netif.Interface, choice SweepChoice) tea.Cmd {
 	a.opts.Mode = "starting on " + iface.Name
 	a.all, a.devices, a.selected, a.cursor, a.top = nil, nil, "", 0, 0
 	a.status = engine.Status{}
+	a.heard = nil
 	a.switching = true
 	a.pending.Add(1)
 	open, capture := a.opts.Open, a.opts.Capture

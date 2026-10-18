@@ -30,13 +30,15 @@ and the details pane can tell you which one. Nothing appears by magic.
   focus here and scroll it with the same movement keys; Esc goes back.
 
   Under the hood: what the probes are doing right now. A progress bar per
-  discoverer that sweeps, a rolling wave for one that only listens (it has
-  no end to count towards, so the row says how many messages it has heard
-  and the wave goes flat when it stops), and a line per enricher counting,
-  for this scan, how many devices it asked and how many it named, or for
-  icmp answered and for rogue flagged. An enricher that has asked and
-  learned nothing is shown muted. Beneath the rule is a log of every packet
-  sent (→) and received (←), with the time it happened. The
+  discoverer that sweeps. One that only listens has no end to count
+  towards, so its row is a wire instead: every message it hears enters at
+  the right, beside the count of messages heard, and flies along it
+  towards the probe's name as a comet. A quiet network leaves the wire
+  empty, and it goes dim when the listener stops. Then a line per enricher
+  counting, for this scan, how many devices it asked and how many it
+  named, or for icmp answered and for rogue flagged. An enricher that has
+  asked and learned nothing is shown muted. Beneath the rule is a log of
+  every packet sent (→) and received (←), with the time it happened. The
   log follows the newest event until you Tab into the pane and press ↑:
   that pins it, selects an event, and shows that event in full, wrapped
   rather than cut off, with a line saying what kind of event it was and

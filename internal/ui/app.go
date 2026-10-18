@@ -48,9 +48,9 @@ type Options struct {
 const (
 	batchEvery = 100 * time.Millisecond
 	clockEvery = time.Second
-	// A listener's wave needs a steady clock, since batches only arrive
+	// A listener's comets need a steady clock, since batches only arrive
 	// when something is heard; while one runs the UI ticks at this rate.
-	animateEvery = waveEvery
+	animateEvery = cometEvery
 	logKeep      = 2000 // events kept for browsing; a /24 sweep produces about 600
 
 	// subnetBelowWidth is the terminal width under which the status bar
@@ -109,6 +109,7 @@ type app struct {
 	events   []engine.ProbeEvent
 	status   engine.Status
 	now      time.Time
+	heard    map[string]*heardLog // what each listener heard, by probe name
 
 	sort    sortState
 	filter  filter
@@ -166,7 +167,7 @@ func (a *app) Init() tea.Cmd {
 }
 
 // tick schedules the next clock message: once a second normally, faster
-// while a listener's wave has to keep rolling.
+// while a listener's comets are flying.
 func (a *app) tick() tea.Cmd {
 	every := clockEvery
 	for _, d := range a.status.Discoverers {
@@ -184,6 +185,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 	case tickMsg:
 		a.now = time.Time(msg)
+		a.sampleHeard()
 		return a, a.tick()
 	case Batch:
 		a.applyBatch(msg)
