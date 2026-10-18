@@ -42,6 +42,7 @@ func loadHex(t *testing.T, name string) []byte {
 const (
 	deviceKey = "00:11:32:7f:a2:c4"
 	deviceIP  = "192.168.1.20"
+	otherIP   = "192.0.2.7" // another device, pinged at the same time
 )
 
 func equal(a, b []byte) bool {
@@ -61,6 +62,18 @@ func equal(a, b []byte) bool {
 func TestShortNamesTheSocket(t *testing.T) {
 	for mode, want := range map[Mode]string{ModeDatagram: "ping socket", ModeRaw: "raw socket", ModeEchoAPI: "IcmpSendEcho"} {
 		if got := mode.Short(); got != want {
+			t.Errorf("%q: %q, want %q", mode, got, want)
+		}
+	}
+}
+
+func TestModeWithArticle(t *testing.T) {
+	for mode, want := range map[Mode]string{
+		ModeDatagram: "an unprivileged datagram socket",
+		ModeRaw:      "a raw socket",
+		ModeEchoAPI:  "an unprivileged Windows echo API (IcmpSendEcho)",
+	} {
+		if got := mode.withArticle(); got != want {
 			t.Errorf("%q: %q, want %q", mode, got, want)
 		}
 	}
@@ -127,6 +140,9 @@ func TestParseReplyReadsUnreachable(t *testing.T) {
 	if !reply.Unreachable {
 		t.Error("Unreachable = false, want the report recognised")
 	}
+	if reply.About != nil {
+		t.Errorf("About = %v, want nil: the report quotes no IPv4 header", reply.About)
+	}
 }
 
 func TestParseReplyRejectsGarbage(t *testing.T) {
@@ -136,9 +152,11 @@ func TestParseReplyRejectsGarbage(t *testing.T) {
 }
 
 // fakeConn answers echo requests according to respond, which may return
-// nothing to model a host that ignores ICMP.
+// nothing to model a host that ignores ICMP. Answers come from deviceIP
+// unless from says otherwise.
 type fakeConn struct {
 	respond func(req []byte) [][]byte
+	from    string
 	queue   [][]byte
 	sent    [][]byte
 	closed  bool
@@ -158,7 +176,11 @@ func (c *fakeConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	next := c.queue[0]
 	c.queue = c.queue[1:]
-	return copy(p, next), &net.UDPAddr{IP: net.ParseIP(deviceIP)}, nil
+	from := deviceIP
+	if c.from != "" {
+		from = c.from
+	}
+	return copy(p, next), &net.UDPAddr{IP: net.ParseIP(from)}, nil
 }
 
 func (c *fakeConn) Close() error                     { c.closed = true; return nil }
@@ -288,26 +310,54 @@ func TestEnrichSilenceIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestEnrichReportsUnreachable(t *testing.T) {
-	unreachable := func([]byte) [][]byte {
-		msg := xicmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &xicmp.DstUnreach{Data: make([]byte, 28)}}
+// unreachableQuoting answers every request with a destination-unreachable
+// report quoting the IPv4 header of an undelivered packet to dst. With dst
+// empty it quotes nothing readable, as Windows' rebuilt reports do.
+func unreachableQuoting(dst string) func([]byte) [][]byte {
+	quote := make([]byte, 28)
+	if dst != "" {
+		quote[0] = 0x45 // IPv4, a 20-byte header
+		copy(quote[16:20], net.ParseIP(dst).To4())
+	}
+	return func([]byte) [][]byte {
+		msg := xicmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &xicmp.DstUnreach{Data: quote}}
 		wire, err := msg.Marshal(nil)
 		if err != nil {
 			panic(err)
 		}
 		return [][]byte{wire}
 	}
-	e, _ := probeWith(unreachable)
+}
+
+func TestEnrichReportsUnreachable(t *testing.T) {
+	for _, dst := range []string{"", deviceIP} {
+		e, _ := probeWith(unreachableQuoting(dst))
+		var rec recorder
+		if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+			t.Fatal(err)
+		}
+		if len(rec.obs) != 0 {
+			t.Errorf("quoting %q: emitted %+v, want no latency for an unreachable host", dst, rec.obs)
+		}
+		info := rec.messages(engine.KindInfo)
+		if len(info) == 0 || !strings.Contains(strings.Join(info, " "), "unreachable") {
+			t.Errorf("quoting %q: info events = %v, want the unreachable report", dst, info)
+		}
+	}
+}
+
+// A report about another device's echo reaches this socket too, and is not
+// this device's to log.
+func TestEnrichIgnoresUnreachableAboutAnotherDevice(t *testing.T) {
+	e, _ := probeWith(unreachableQuoting(otherIP))
 	var rec recorder
 	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.obs) != 0 {
-		t.Errorf("emitted %+v, want no latency for an unreachable host", rec.obs)
-	}
-	info := rec.messages(engine.KindInfo)
-	if len(info) == 0 || !strings.Contains(strings.Join(info, " "), "unreachable") {
-		t.Errorf("info events = %v, want the unreachable report", info)
+	for _, m := range rec.messages(engine.KindInfo) {
+		if strings.Contains(m, "unreachable") {
+			t.Errorf("info %q: a report about %s's echo was logged as %s's", m, otherIP, deviceIP)
+		}
 	}
 }
 
@@ -327,6 +377,25 @@ func TestEnrichIgnoresAStrangersReply(t *testing.T) {
 	}
 	if len(rec.obs) != 0 {
 		t.Errorf("emitted %+v, want nothing from another process's ping", rec.obs)
+	}
+}
+
+// A Mac hands every ICMP socket every reply that reaches the machine, so the
+// socket pinging one device also reads the replies to the devices pinged
+// alongside it, with the same payload and sequence numbers. Credited to this
+// device, they kept one that had left the network looking present.
+func TestEnrichIgnoresAnotherDevicesReply(t *testing.T) {
+	e, conn := probeWith(echoBack)
+	conn.from = otherIP
+	var rec recorder
+	if err := e.Enrich(context.Background(), snapshot(deviceKey, deviceIP), rec.emit, rec.report); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.obs) != 0 {
+		t.Errorf("emitted %+v, want nothing: every reply came from %s, not %s", rec.obs, otherIP, deviceIP)
+	}
+	if got := rec.messages(engine.KindReceived); len(got) != 0 {
+		t.Errorf("received events = %v, want none: the replies were another device's", got)
 	}
 }
 

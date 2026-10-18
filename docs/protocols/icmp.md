@@ -47,11 +47,21 @@ resolution where the API reports whole milliseconds. Since those reply bytes
 are shoal's reconstruction, each reply's log line, and its comment in a
 capture, says so.
 
-With a datagram socket the kernel owns the ICMP **id**: it rewrites the id on
-the way out and demultiplexes replies back to the socket that sent them. Shoal
-therefore never matches on the id. It matches on the **sequence number** and
-on its own payload, the literal string `shoal probe`, which also keeps another
-process's pings out of the results when running on a shared raw socket.
+On Linux, the kernel owns a datagram socket's ICMP **id**: it rewrites the id
+on the way out and passes each socket only the replies to its own echoes.
+Shoal therefore never matches on the id. It matches on the **sequence number**
+and on its own payload, the literal string `shoal probe`, which keeps another
+process's pings out of the results.
+
+A Mac's kernel does neither. It hands every ICMP socket every reply that
+reaches the machine, as Linux does every raw socket. Shoal pings up to eight
+devices at once, each from its own socket, and their replies carry the same
+payload and sequence numbers. So a reply counts only for the device whose
+**address sent it**. Without that check, a device that had left the network
+would be credited with a neighbour's reply and look present after every
+rescan. A `destination unreachable` report is held to the same rule: it
+quotes the packet that could not be delivered, and is logged only for the
+device that packet was going to.
 
 Which socket was used appears in every method string, and in the status bar:
 

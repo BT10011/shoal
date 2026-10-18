@@ -18,9 +18,10 @@ import (
 	"github.com/BT10011/shoal/internal/model"
 )
 
-// Payload is sent in every echo request. Unprivileged sockets let the kernel
-// choose the ICMP id, and it rewrites the id on the way out, so shoal
-// recognises its own replies by this payload and the sequence number instead.
+// Payload is sent in every echo request. Linux's unprivileged sockets let the
+// kernel choose the ICMP id, and it rewrites the id on the way out, so shoal
+// recognises its own replies by this payload and the sequence number instead,
+// and which device a reply is from by the address that sent it.
 const Payload = "shoal probe"
 
 // protocolICMP is ICMP's IP protocol number, which the parser needs in order
@@ -33,8 +34,9 @@ const protocolICMP = 1
 type Mode string
 
 const (
-	// ModeDatagram is an unprivileged ICMP socket: the kernel owns the id and
-	// only passes back replies to echoes this process sent.
+	// ModeDatagram is an unprivileged ICMP socket. On Linux the kernel owns
+	// the id and passes each socket only the replies to its own echoes. A
+	// Mac's passes every such socket every reply that reaches the machine.
 	ModeDatagram Mode = "unprivileged datagram socket"
 	// ModeRaw is a raw socket, which needs root or cap_net_raw.
 	ModeRaw Mode = "raw socket"
@@ -56,6 +58,15 @@ func (m Mode) Short() string {
 		return "IcmpSendEcho"
 	}
 	return "ping socket"
+}
+
+// withArticle is the mode's name with "a" or "an" before it, for the method
+// string: "an unprivileged datagram socket", "a raw socket".
+func (m Mode) withArticle() string {
+	if m != "" && strings.ContainsRune("aeiou", rune(m[0])) {
+		return "an " + string(m)
+	}
+	return "a " + string(m)
 }
 
 // addr returns the destination in the form the socket expects. A datagram
@@ -165,8 +176,8 @@ func (e *Enricher) Enrich(ctx context.Context, d model.DeviceSnapshot, emit engi
 		Field:      model.FieldLatency,
 		Value:      FormatRTT(best),
 		Confidence: 1,
-		Method: fmt.Sprintf("ICMP echo reply from %s, best of %d (%s), over an %s",
-			ip, e.opts.Count, listRTTs(rtts), mode),
+		Method: fmt.Sprintf("ICMP echo reply from %s, best of %d (%s), over %s",
+			ip, e.opts.Count, listRTTs(rtts), mode.withArticle()),
 	})
 	return nil
 }
@@ -239,12 +250,24 @@ func (e *Enricher) collect(conn net.PacketConn, mode Mode, key string, ip net.IP
 			continue
 		}
 		if reply.Unreachable {
+			if reply.About != nil && !reply.About.Equal(ip) {
+				continue // a report about another device's echo
+			}
 			report(engine.ProbeEvent{Kind: engine.KindInfo, Target: key,
 				Message: fmt.Sprintf("%s reports %s unreachable", host(from), ip)})
 			continue
 		}
 		if !reply.Echo || !reply.Mine {
 			continue // somebody else's ping, on a shared raw socket
+		}
+		// A Mac hands every ICMP socket every reply that reaches the machine,
+		// as Linux does every raw socket. So this socket also reads the
+		// replies to the devices being pinged alongside this one, which carry
+		// the same payload and sequence numbers. Only the address a reply came
+		// from says whose it is. Counted here, a neighbour's reply would keep
+		// a device that has left the network looking present.
+		if !ip.Equal(addrIP(from)) {
+			continue
 		}
 		at, ok := sent[reply.Seq]
 		if !ok {
@@ -276,14 +299,22 @@ func (e *Enricher) collect(conn net.PacketConn, mode Mode, key string, ip net.IP
 // socket reports its peer as a UDP address, and the port is always zero and
 // always meaningless.
 func host(addr net.Addr) string {
+	if ip := addrIP(addr); ip != nil {
+		return ip.String()
+	}
+	return addr.String()
+}
+
+// addrIP is the address a message came from, whichever kind of socket read
+// it, or nil.
+func addrIP(addr net.Addr) net.IP {
 	switch a := addr.(type) {
 	case *net.UDPAddr:
-		return a.IP.String()
+		return a.IP
 	case *net.IPAddr:
-		return a.IP.String()
-	default:
-		return addr.String()
+		return a.IP
 	}
+	return nil
 }
 
 // Echo builds an ICMP echo request carrying shoal's payload.
@@ -301,7 +332,8 @@ type Reply struct {
 	Echo        bool // an echo reply
 	Unreachable bool // a destination-unreachable report
 	ID, Seq     int
-	Mine        bool // carries shoal's payload
+	Mine        bool   // carries shoal's payload
+	About       net.IP // an unreachable report's undelivered destination, when it quotes one
 }
 
 // ParseReply decodes an ICMP message.
@@ -319,10 +351,20 @@ func ParseReply(wire []byte) (Reply, error) {
 			Mine: string(body.Data) == Payload,
 		}, nil
 	case *xicmp.DstUnreach:
-		return Reply{Unreachable: true}, nil
+		return Reply{Unreachable: true, About: quotedDestination(body.Data)}, nil
 	default:
 		return Reply{}, nil
 	}
+}
+
+// quotedDestination reads where the undelivered packet was going from the
+// IPv4 header an unreachable report quotes. It is nil when the quote is too
+// short or is not IPv4, as with the reports Windows' echo API is rebuilt into.
+func quotedDestination(quote []byte) net.IP {
+	if len(quote) < ipv4.HeaderLen || quote[0]>>4 != 4 {
+		return nil
+	}
+	return net.IP(append([]byte(nil), quote[16:20]...))
 }
 
 // FormatRTT renders a round trip the way the table shows it.
