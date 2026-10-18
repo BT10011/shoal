@@ -20,7 +20,7 @@ import (
 
 func TestMacScriptsParse(t *testing.T) {
 	for name, script := range map[string]string{
-		"macSetup": macSetup, "macRemove": macRemove, "chmodScript": chmodScript, "giveBack": giveBack,
+		"macSetup": macSetup, "macRemove": macRemove, "chmodScript": chmodScript, "giveBack": giveBack, "macGiveBack": macGiveBack,
 	} {
 		if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
 			t.Errorf("%s does not parse: %v\n%s", name, err, out)
@@ -253,5 +253,75 @@ func TestGiveBackLeavesALinkAndAMissingFolderAlone(t *testing.T) {
 func TestMacSetupGivesBackOnlyWhenAsked(t *testing.T) {
 	if !strings.Contains(macSetup, "if [ \"$2\" = 1 ]; then\n\tgive_back || ") {
 		t.Error("macSetup does not give the folder back when $2 is 1")
+	}
+}
+
+func TestMacGiveBackOnlyGivesBackAndFailsLoudly(t *testing.T) {
+	if !strings.Contains(macGiveBack, giveBack+"give_back || {") || !strings.Contains(macGiveBack, "exit 1") {
+		t.Error("macGiveBack should run give_back and stop with an error when it fails")
+	}
+	for _, other := range []string{"dseditgroup", "launchctl", "chgrp"} {
+		if strings.Contains(macGiveBack, other) {
+			t.Errorf("macGiveBack should change nothing but the folder, yet runs %s", other)
+		}
+	}
+}
+
+func TestDescribeOpensWithAnIntroWhenThereIsOne(t *testing.T) {
+	s := Setup{Intro: "Your settings belong to root.", Changes: []string{"give them back"}}
+	got := s.Describe()
+	if !strings.HasPrefix(got, "Your settings belong to root.\n") || strings.Contains(got, "ARP") {
+		t.Errorf("an Intro replaces the sentence about access:\n%s", got)
+	}
+	if !strings.HasPrefix((Setup{Missing: "x"}).Describe(), "Shoal sweeps the network with ARP") {
+		t.Error("without an Intro the description starts with access")
+	}
+}
+
+// runMacGiveBack runs macGiveBack, the whole script, for alice as root
+// would, with the same stand-ins as runGiveBack, holding folders made in
+// holds. It returns the script's output and error.
+func runMacGiveBack(t *testing.T, home, holds string) (string, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "log")
+	for name, body := range map[string]string{
+		"id":    `echo "alice:*:501:20::0:0:Alice:` + home + `:/bin/zsh"`,
+		"chown": `echo "chown $*" >>"` + log + `"`,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := strings.NewReplacer("/private/tmp", holds, "-user root", "-user "+strconv.Itoa(os.Getuid()),
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "PATH="+bin+":/usr/bin:/bin").Replace(macGiveBack)
+	out, err := exec.Command("sh", "-c", script, "shoal-setup", "alice").CombinedOutput()
+	chowns, _ := os.ReadFile(log)
+	return string(out), string(chowns), err
+}
+
+func TestMacGiveBackHandsTheFolderToTheUserNamed(t *testing.T) {
+	home := t.TempDir()
+	data := shoalData(t, home, 0o700)
+	holds := t.TempDir()
+	out, chowns, err := runMacGiveBack(t, home, holds)
+	if err != nil {
+		t.Fatalf("macGiveBack failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(chowns, "chown -h alice "+filepath.Join(holds)) || func() bool { _, err := os.Stat(filepath.Join(data, "history.db")); return err != nil }() {
+		t.Errorf("the folder should be handed to alice and put back where it was:\n%s", chowns)
+	}
+}
+
+func TestMacGiveBackStopsWithAnErrorWhenItCannot(t *testing.T) {
+	home := t.TempDir()
+	shoalData(t, home, 0o700)
+	out, _, err := runMacGiveBack(t, home, filepath.Join(t.TempDir(), "missing"))
+	if err == nil || !strings.Contains(out, "could not give alice back") || !strings.Contains(out, "sudo chown -R alice") {
+		t.Errorf("a failure should stop the script and say what to run instead (err %v):\n%s", err, out)
 	}
 }

@@ -44,6 +44,27 @@ func For(_ string, _ error) Setup {
 	return s
 }
 
+// Leftovers is what setup tidies even when access already works: the
+// folder of settings and history that running shoal with sudo, as v1.0
+// said to on a Mac, left belonging to root, which shoal cannot read until
+// it is given back. Access through Wireshark's ChmodBPF means setup is
+// never offered for access, so this is offered on its own. ok is false
+// when there is nothing to tidy, or when shoal runs as root, which can
+// read the folder anyway and would only take it back again.
+func Leftovers() (Setup, bool) {
+	name := setupUser()
+	if name == "" || os.Geteuid() == 0 || !rootOwnsData() {
+		return Setup{}, false
+	}
+	return Setup{
+		Intro: "Shoal's settings and history, in ~/" + DataFolder + ",\n" +
+			"belong to root: running shoal with sudo, as v1.0 said to on a Mac, left them\n" +
+			"so. Until they are yours again, shoal runs without its history and theme.",
+		Changes: []string{"give " + name + " back the folder of settings and history,\n    ~/" + DataFolder},
+		command: []string{"/bin/sh", "-c", macGiveBack, "shoal-setup", name},
+	}, true
+}
+
 // rootOwnsData reports whether root owns the folder of settings and
 // history, as it does after shoal was run with sudo, which keeps HOME on
 // macOS: the folder setup gives back (giveBack).

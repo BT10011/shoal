@@ -154,6 +154,19 @@ fi
 ` + openDevices + `dsmemberutil flushcache
 `
 
+// macGiveBack is what setup runs as root on macOS when the packet capture
+// devices already work for the user, through Wireshark's ChmodBPF or an
+// earlier setup, but running shoal with sudo left the folder of settings
+// and history belonging to root: giveBack alone, for the user in $1.
+const macGiveBack = `set -e
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+user="$1"
+` + giveBack + `give_back || {
+	echo "shoal: could not give $user back ~/` + DataFolder + `; to do it yourself, run: sudo chown -R $user ~/'` + DataFolder + `'" >&2
+	exit 1
+}
+`
+
 // macRemove is what --uninstall runs as root on macOS: the start-up job and
 // its script go, and the group stays, since Wireshark may use it too.
 const macRemove = `PATH=/usr/sbin:/usr/bin:/sbin:/bin

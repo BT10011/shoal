@@ -43,6 +43,10 @@ func StillRefused(_ string, refusal error) string {
 	return "Npcap is still not usable: " + refusal.Error()
 }
 
+// Leftovers is what setup tidies even when access already works: nothing
+// on Windows.
+func Leftovers() (Setup, bool) { return Setup{}, false }
+
 // Remove is what --uninstall runs as root to undo setup: nothing, since
 // Npcap is not shoal's to remove.
 func Remove() []string { return nil }

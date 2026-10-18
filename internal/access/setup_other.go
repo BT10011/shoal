@@ -16,6 +16,10 @@ func For(string, error) Setup {
 // StillRefused explains a refusal that setup did not cure.
 func StillRefused(_ string, refusal error) string { return refusal.Error() }
 
+// Leftovers is what setup tidies even when access already works: nothing
+// here.
+func Leftovers() (Setup, bool) { return Setup{}, false }
+
 // Remove is what --uninstall runs as root to undo setup: nothing here.
 func Remove() []string { return nil }
 

@@ -19,6 +19,9 @@ import "strings"
 
 // Setup is what granting full network access takes on this machine.
 type Setup struct {
+	// Intro opens the description in place of the sentence about full
+	// network access, for a Setup that tidies something else (Leftovers).
+	Intro string
 	// Missing says what shoal lacks, in a sentence or two wrapped to fit
 	// a terminal.
 	Missing string
@@ -60,8 +63,14 @@ func (s Setup) Apply(run func(name string, args ...string) error) error {
 // and what will be done about it.
 func (s Setup) Describe() string {
 	var b strings.Builder
-	b.WriteString("Shoal sweeps the network with ARP, which needs full network access.\n")
-	b.WriteString(s.Missing + "\n")
+	if s.Intro != "" {
+		b.WriteString(s.Intro + "\n")
+	} else {
+		b.WriteString("Shoal sweeps the network with ARP, which needs full network access.\n")
+	}
+	if s.Missing != "" {
+		b.WriteString(s.Missing + "\n")
+	}
 	if len(s.Changes) > 0 {
 		b.WriteString("\nSetting it up will:\n")
 		for _, c := range s.Changes {

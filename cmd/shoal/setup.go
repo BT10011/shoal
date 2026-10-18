@@ -56,7 +56,12 @@ func runSetup(args []string) error {
 	}
 	switch {
 	case refusal == nil:
-		fmt.Printf("Shoal already has full network access: it can sweep %s with ARP.\nThere is nothing to set up.\n", iface.Name)
+		fmt.Printf("Shoal already has full network access: it can sweep %s with ARP.\n", iface.Name)
+		if _, ok := access.Leftovers(); ok {
+			fmt.Println()
+			return offerLeftovers(confirmer(*yes))
+		}
+		fmt.Println("There is nothing to set up.")
 		return nil
 	case !errors.Is(refusal, arp.ErrPermission):
 		return fmt.Errorf("shoal cannot sweep %s with ARP, and it is not a matter of permission, so setup cannot help: %w", iface.Name, refusal)
@@ -96,6 +101,14 @@ func setupAsRoot(binary string, yes bool) error {
 func ensureAccess(iface netif.Interface) error {
 	refusal := arp.CheckAccess(iface)
 	if refusal == nil {
+		// Access works, perhaps through Wireshark, so setup was never
+		// offered; it may still have something to tidy. Declined, shoal
+		// scans without it, as it would have anyway.
+		if interactive() {
+			if err := offerLeftovers(confirmer(false)); err != nil {
+				fmt.Fprintln(os.Stderr, "shoal:", err)
+			}
+		}
 		return nil
 	}
 	if !errors.Is(refusal, arp.ErrPermission) {
@@ -153,6 +166,28 @@ func offerSetup(s access.Setup, confirm func(string) bool) error {
 		fmt.Println()
 		return errors.New("there is nobody at the terminal to wait for; start shoal again once it is done")
 	}
+	return nil
+}
+
+// offerLeftovers offers what setup tidies even when access works
+// (access.Leftovers): on macOS, the settings and history that running
+// shoal with sudo left belonging to root. It changes nothing without the
+// user's agreement, and a refusal is not an error.
+func offerLeftovers(confirm func(string) bool) error {
+	s, ok := access.Leftovers()
+	if !ok {
+		return nil
+	}
+	fmt.Print(s.Describe())
+	fmt.Println()
+	if !confirm("Give them back now? sudo will ask for your password.") {
+		fmt.Println("Nothing was changed. shoal --setup offers this again.")
+		return nil
+	}
+	if err := s.Apply(elevate.Run); err != nil {
+		return fmt.Errorf("your settings and history could not be given back: %w", err)
+	}
+	fmt.Println("Done: your settings and history are yours again.")
 	return nil
 }
 

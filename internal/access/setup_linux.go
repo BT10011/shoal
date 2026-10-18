@@ -35,6 +35,11 @@ func StillRefused(binary string, refusal error) string {
 		"Run sudo setcap cap_net_raw+ep %s and look at what it says. (%v)", binary, binary, refusal)
 }
 
+// Leftovers is what setup tidies even when access already works: nothing
+// on Linux, where sudo gives root its own home, so shoal run with sudo
+// never left the user's settings belonging to root.
+func Leftovers() (Setup, bool) { return Setup{}, false }
+
 // Remove is what --uninstall runs as root to undo setup: nothing on Linux,
 // where the capability goes with the file.
 func Remove() []string { return nil }
