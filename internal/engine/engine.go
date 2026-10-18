@@ -966,10 +966,6 @@ func (en *enricher) pop() (key string, renewal, ok bool) {
 	return key, renewal, true
 }
 
-func (en *enricher) finish(err error, answered, renewal bool) {
-	en.finishKey("", err, answered, renewal)
-}
-
 // finishKey records the end of a lookup for a device.
 func (en *enricher) finishKey(key string, err error, answered, renewal bool) {
 	en.mu.Lock()

@@ -877,7 +877,7 @@ func TestProgressBar(t *testing.T) {
 	same := func(frame int) string {
 		return ansi.Strip(progressBar(100, 254, 30, frame, barStyles{}))
 	}
-	if same(7) != same(7) {
+	if first, again := same(7), same(7); first != again {
 		t.Fatal("same frame must render identically")
 	}
 	if same(7) == same(8) {
