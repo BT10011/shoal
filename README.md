@@ -68,12 +68,13 @@ Actions from the tagged source.
 **macOS and Linux, with [Homebrew](https://brew.sh):**
 
 ```
-brew tap bt10011/tap
-brew install shoal
+brew install bt10011/tap/shoal
 ```
 
-The first line is needed only once. It tells Homebrew about Shoal's tap,
-BT10011/homebrew-tap, where the formula lives.
+That installs Shoal from its own tap, BT10011/homebrew-tap. Naming the tap
+in full is also how Homebrew 6 and later are told to trust Shoal's formula,
+and only that one, from a tap that is not Homebrew's own. From then on,
+`brew upgrade` keeps it up to date.
 
 **Debian and Ubuntu:**
 
@@ -82,12 +83,22 @@ curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linu
 sudo apt install ./shoal-linux-amd64.deb
 ```
 
-**Fedora, RHEL and openSUSE:**
+**Fedora and RHEL:**
 
 ```
 curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linux-amd64.rpm
-sudo dnf install ./shoal-linux-amd64.rpm     # openSUSE: sudo zypper install ./shoal-linux-amd64.rpm
+sudo dnf install ./shoal-linux-amd64.rpm
 ```
+
+**openSUSE:**
+
+```
+curl -fsSLO https://github.com/BT10011/shoal/releases/latest/download/shoal-linux-amd64.rpm
+sudo zypper install --allow-unsigned-rpm ./shoal-linux-amd64.rpm
+```
+
+zypper refuses a package not signed with a GPG key unless told to take
+it. Shoal's packages are checked another way: see "Checking a download".
 
 **Arch:**
 
@@ -132,6 +143,15 @@ from its last line, so a download cut short runs nothing. Settings, before
   rights and adds that folder to your PATH.
 - `SHOAL_VERSION=v2.0.0` picks a release.
 - `SHOAL_NO_SUDO=1` never uses sudo.
+
+**From source**, with Go 1.27 or later:
+
+```
+git clone https://github.com/BT10011/shoal.git
+cd shoal
+make build           # bin/shoal
+bin/shoal --setup    # full network access for that binary
+```
 
 ### Full network access
 
@@ -196,8 +216,8 @@ sudo shoal --update
 
 The first time v2.0 starts, it asks for your password to set up full
 network access. On a Mac where v1.0 ran with `sudo`, which left Shoal's
-settings and history belonging to root, setup gives them back to you at
-the same time.
+settings and history belonging to root, it offers to give them back to you
+too, even when Wireshark already gives it network access.
 
 ### Removing it
 
@@ -206,7 +226,8 @@ shoal --uninstall
 ```
 
 Before deleting anything, it lists everything it would remove and asks
-you to agree:
+you to agree (in a script, `--yes` agrees in advance; an answer piped in
+never counts):
 - the program, through the package manager if one installed it;
 - the remembered theme;
 - the history of every network scanned;
@@ -215,15 +236,6 @@ you to agree:
 
 Npcap on Windows and the `access_bpf` group on macOS stay, since other
 programs use them.
-
-**From source**, with Go 1.27 or later:
-
-```
-git clone https://github.com/BT10011/shoal.git
-cd shoal
-make build           # bin/shoal
-bin/shoal --setup    # full network access for that binary
-```
 
 ## Using it
 
@@ -247,6 +259,13 @@ learned, `x` adds the raw packets, `/` filters (`/dante`, `/off-subnet`),
 address this machine has, `d` removes a device that has stopped
 answering (`D` removes them all), `w` records packets for Wireshark, `t`
 picks a theme and `q` quits.
+
+**Watching it listen.** Two probes keep listening after the sweep:
+`dns-sd`, for Bonjour and Avahi announcements, and `arp`, for devices that
+speak up later, such as one carrying an address from another network. In
+the Under the hood pane, each of their rows is a wire: every message heard
+flies in along it as a comet, towards the probe's name, beside a count of
+everything heard so far. A quiet network leaves the wire empty.
 
 **Devices that have gone.** A device the scan finished without hearing is
 shown in red; Shoal never drops it by itself. Press `d` on it, or `D` for
@@ -339,6 +358,8 @@ This is **release 2** (v2.0.0). New since release 1:
 - **Interfaces and large networks**: `i` switches to any interface or
   address this machine has, and above a `/22` Shoal asks before sweeping.
 - **Removing devices** that have stopped answering, with `d` and `D`.
+- **Listeners you can watch**: every message `dns-sd` and `arp` hear flies
+  in along their rows in Under the hood, as a comet.
 - **Six new dark themes.**
 - **Installing**: Homebrew, `.deb`, `.rpm` and Arch packages, and an
   install script that can be checked. Shoal now always scans with full
