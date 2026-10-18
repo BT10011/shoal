@@ -826,7 +826,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## golang.org/x/net v0.59.0
+## golang.org/x/net v0.60.0
 
 ### LICENSE
 
