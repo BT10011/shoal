@@ -51,6 +51,10 @@ type UninstallOptions struct {
 	// ConfigFile and HistoryFile are what shoal writes: the settings file
 	// (internal/config) and the history database (internal/store).
 	ConfigFile, HistoryFile string
+	// HistoryNamed marks a HistoryFile the user named with --history: it
+	// is removed as a file, never with the folder holding it, which is
+	// theirs whatever it is called.
+	HistoryNamed bool
 	// Shells overrides the startup files searched for the installer's PATH
 	// line; nil means the usual ones for this user.
 	Shells []string
@@ -58,6 +62,9 @@ type UninstallOptions struct {
 	Out io.Writer
 	// Confirm is asked before anything is removed. Nil means refuse.
 	Confirm func(question string) bool
+	// Yes means the user agreed in advance (--yes): a package manager that
+	// removes shoal is told not to ask again, since a script cannot answer.
+	Yes bool
 	// Elevate, Run, Has and Owns are as in Options: running a command as
 	// root and as the user, and finding the package manager that
 	// installed shoal. Nil means the real thing.
@@ -115,8 +122,9 @@ func Plan(o UninstallOptions) ([]Item, error) {
 	// its records stay true.
 	if m := detectManager(bin, runtime.GOOS, runtime.GOARCH, probes{has: o.Has, owns: o.Owns}); m != nil && exists(bin) {
 		seen[bin] = true
-		items = append(items, Item{Path: bin, What: "the shoal program, removed by " + m.name + ": " + m.command(m.remove),
-			Command: m.remove, Root: m.root, ByHand: m.byHand, Manual: m.command(m.remove)})
+		cmd := m.removal(o.Yes)
+		items = append(items, Item{Path: bin, What: "the shoal program, removed by " + m.name + ": " + m.command(cmd),
+			Command: cmd, Root: m.root, ByHand: m.byHand, Manual: m.command(m.remove)})
 	} else {
 		add(bin, "the shoal program")
 	}
@@ -131,7 +139,11 @@ func Plan(o UninstallOptions) ([]Item, error) {
 	// On macOS both files live in one directory, so these can name the
 	// same thing; add skips the repeat.
 	add(owned(o.ConfigFile), "settings, including the remembered theme")
-	add(owned(o.HistoryFile), "the history of every network shoal has scanned")
+	if o.HistoryNamed {
+		add(o.HistoryFile, "the history of every network shoal has scanned")
+	} else {
+		add(owned(o.HistoryFile), "the history of every network shoal has scanned")
+	}
 
 	for _, rc := range o.shells() {
 		if line, ok := installerLine(rc); ok {
@@ -149,10 +161,10 @@ func Plan(o UninstallOptions) ([]Item, error) {
 	return items, nil
 }
 
-// owned turns a file shoal writes into the thing to delete: the directory
-// holding it when shoal owns that directory, so nothing of anyone else's
-// is caught, and otherwise the file alone — which is what a history file
-// named with --history is.
+// owned turns a file shoal writes in its default place into the thing to
+// delete: the directory holding it when shoal owns that directory, so
+// nothing of anyone else's is caught, and otherwise the file alone. A
+// history file named with --history never comes here (HistoryNamed).
 func owned(file string) string {
 	if file == "" {
 		return ""

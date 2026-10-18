@@ -18,8 +18,8 @@
 # what full network access takes on this system and asks for your password
 # once. Nothing is installed if a check fails.
 #
-# Package managers do the same job: Homebrew (brew tap bt10011/tap, then
-# brew install shoal), the .deb, .rpm and Arch packages on the release
+# Package managers do the same job: Homebrew (brew install
+# bt10011/tap/shoal), the .deb, .rpm and Arch packages on the release
 # page, or on Windows, the zip on the release page. See the README.
 #
 # Optional settings, as environment variables before `sh`:

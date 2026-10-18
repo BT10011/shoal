@@ -9,6 +9,9 @@
 # a cask's download and Gatekeeper then blocks an unsigned binary, while a
 # formula's download is never quarantined. It installs the release's own
 # archives for macOS and Linux, each pinned to the checksum in SHA256SUMS.
+# It names its version, although brew audit --strict calls that redundant
+# with the version in the archives' addresses: Homebrew's guess from an
+# address is a heuristic, and a tap's formula is never audited.
 set -eu
 
 if [ $# -ne 2 ]; then

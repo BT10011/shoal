@@ -32,6 +32,9 @@ type manager struct {
 	// upgrade and remove are its commands. For a system package, upgrade's
 	// last argument is the downloaded package, added when it is run.
 	upgrade, remove []string
+	// removeYes is remove told not to ask, for an uninstall the user has
+	// agreed to in advance with --yes; nil when remove never asks.
+	removeYes []string
 	// root marks commands that need the administrator.
 	root bool
 	// byHand marks commands shoal cannot run itself: winget cannot
@@ -39,6 +42,15 @@ type manager struct {
 	byHand bool
 	// pkg is the release file a system package manager installs from.
 	pkg string
+}
+
+// removal is the command that removes shoal: told not to ask when the
+// user agreed in advance (--yes), since a script has nobody to answer.
+func (m *manager) removal(yes bool) []string {
+	if yes && m.removeYes != nil {
+		return m.removeYes
+	}
+	return m.remove
 }
 
 // command spells a command the way the user would type it.
@@ -104,22 +116,33 @@ func detectManager(target, goos, goarch string, p probes) *manager {
 	case p.owns("dpkg-query", "-S", target):
 		if p.has("apt-get") {
 			return &manager{name: "apt", root: true, pkg: pkg(".deb"),
-				upgrade: []string{"apt-get", "install"}, remove: []string{"apt-get", "remove", "shoal"}}
+				upgrade: []string{"apt-get", "install"}, remove: []string{"apt-get", "remove", "shoal"},
+				removeYes: []string{"apt-get", "remove", "-y", "shoal"}}
 		}
 		return &manager{name: "dpkg", root: true, pkg: pkg(".deb"),
 			upgrade: []string{"dpkg", "-i"}, remove: []string{"dpkg", "-r", "shoal"}}
 	case p.owns("rpm", "-qf", target):
 		for _, tool := range []string{"dnf", "zypper", "yum"} {
 			if p.has(tool) {
+				upgrade := []string{tool, "install"}
+				removeYes := []string{tool, "remove", "-y", "shoal"}
+				if tool == "zypper" {
+					// zypper refuses an unsigned package unless told to
+					// take it; shoal's are checked against the release's
+					// checksums instead, before zypper sees them.
+					upgrade = append(upgrade, "--allow-unsigned-rpm")
+					removeYes = []string{"zypper", "--non-interactive", "remove", "shoal"}
+				}
 				return &manager{name: tool, root: true, pkg: pkg(".rpm"),
-					upgrade: []string{tool, "install"}, remove: []string{tool, "remove", "shoal"}}
+					upgrade: upgrade, remove: []string{tool, "remove", "shoal"}, removeYes: removeYes}
 			}
 		}
 		return &manager{name: "rpm", root: true, pkg: pkg(".rpm"),
 			upgrade: []string{"rpm", "-U"}, remove: []string{"rpm", "-e", "shoal"}}
 	case p.owns("pacman", "-Qo", target):
 		return &manager{name: "pacman", root: true, pkg: pkg(".pkg.tar.zst"),
-			upgrade: []string{"pacman", "-U"}, remove: []string{"pacman", "-R", "shoal"}}
+			upgrade: []string{"pacman", "-U"}, remove: []string{"pacman", "-R", "shoal"},
+			removeYes: []string{"pacman", "-R", "--noconfirm", "shoal"}}
 	}
 	return nil
 }

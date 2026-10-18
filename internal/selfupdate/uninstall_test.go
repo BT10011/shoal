@@ -206,6 +206,46 @@ func TestUninstallLeavesAHistoryFileSomewhereElseAsAFile(t *testing.T) {
 	}
 }
 
+func TestUninstallNeverTakesTheFolderOfANamedHistoryFile(t *testing.T) {
+	// A history file named with --history lives in the user's own folder,
+	// which may well be called shoal: a source checkout, say. Only the
+	// file goes.
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin", "shoal")
+	project := filepath.Join(root, "Projects", "shoal")
+	named := filepath.Join(project, "scans.db")
+	for _, d := range []string{filepath.Dir(bin), project} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{bin, named, filepath.Join(project, "main.go")} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o := UninstallOptions{Binary: bin, HistoryFile: named, HistoryNamed: true, Shells: []string{},
+		Confirm: func(string) bool { return true }}
+	items, err := Plan(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Path == project {
+			t.Fatalf("the plan offers to remove the whole folder %s", project)
+		}
+	}
+	if err := Uninstall(o); err != nil {
+		t.Fatalf("Uninstall = %v, want nil", err)
+	}
+	if exists(named) {
+		t.Error("the named history file survived")
+	}
+	if !exists(filepath.Join(project, "main.go")) {
+		t.Error("uninstall removed the folder holding a named history file")
+	}
+}
+
 func TestRemoveInstallerLineLeavesAFileWithoutOneAlone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".bashrc")
 	original := "export PATH=\"/usr/local/bin:$PATH\"\nalias ll='ls -l'\n"

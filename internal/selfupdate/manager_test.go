@@ -41,7 +41,7 @@ func TestDetectManagerKnowsEachWayShoalIsInstalled(t *testing.T) {
 		{"a .deb with apt", systemBinary, "linux", machine("dpkg-query", "apt-get"), "apt", "apt-get install"},
 		{"a .deb without apt", systemBinary, "linux", machine("dpkg-query"), "dpkg", "dpkg -i"},
 		{"an .rpm with dnf", systemBinary, "linux", machine("rpm", "dnf", "yum"), "dnf", "dnf install"},
-		{"an .rpm with zypper", systemBinary, "linux", machine("rpm", "zypper"), "zypper", "zypper install"},
+		{"an .rpm with zypper", systemBinary, "linux", machine("rpm", "zypper"), "zypper", "zypper install --allow-unsigned-rpm"},
 		{"an .rpm alone", systemBinary, "linux", machine("rpm"), "rpm", "rpm -U"},
 		{"an Arch package", systemBinary, "linux", machine("pacman"), "pacman", "pacman -U"},
 		{"install.sh's place", "/usr/local/bin/shoal", "linux", machine("dpkg-query", "apt-get"), "", ""},
@@ -184,6 +184,40 @@ func TestUpdateRefusesAPackageThatDoesNotMatchItsChecksum(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("Update = %v, want a refusal naming the checksum", err)
+	}
+}
+
+// With --yes the user has agreed in advance, so the package manager is
+// told not to ask again; without it, the user answers the manager too.
+func TestRemovalIsToldNotToAskOnlyWithYes(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		p            probes
+		ask, yes     string
+	}{
+		{"apt", systemBinary, machine("dpkg-query", "apt-get"), "apt-get remove shoal", "apt-get remove -y shoal"},
+		{"dpkg", systemBinary, machine("dpkg-query"), "dpkg -r shoal", "dpkg -r shoal"},
+		{"dnf", systemBinary, machine("rpm", "dnf"), "dnf remove shoal", "dnf remove -y shoal"},
+		{"zypper", systemBinary, machine("rpm", "zypper"), "zypper remove shoal", "zypper --non-interactive remove shoal"},
+		{"yum", systemBinary, machine("rpm", "yum"), "yum remove shoal", "yum remove -y shoal"},
+		{"rpm", systemBinary, machine("rpm"), "rpm -e shoal", "rpm -e shoal"},
+		{"pacman", systemBinary, machine("pacman"), "pacman -R shoal", "pacman -R --noconfirm shoal"},
+		{"Homebrew", "/opt/homebrew/Cellar/shoal/2.0.0/bin/shoal", machine(""), "uninstall shoal", "uninstall shoal"},
+	} {
+		goos := "linux"
+		if strings.Contains(tc.target, "homebrew") {
+			goos = "darwin"
+		}
+		m := detectManager(tc.target, goos, "amd64", tc.p)
+		if m == nil {
+			t.Fatalf("%s: no manager found", tc.name)
+		}
+		if got := strings.Join(m.removal(false), " "); !strings.HasSuffix(got, tc.ask) {
+			t.Errorf("%s without --yes: %q, want %q", tc.name, got, tc.ask)
+		}
+		if got := strings.Join(m.removal(true), " "); !strings.HasSuffix(got, tc.yes) {
+			t.Errorf("%s with --yes: %q, want %q", tc.name, got, tc.yes)
+		}
 	}
 }
 

@@ -37,7 +37,7 @@ func (o Options) restoreRawAccess(target string) {
 // noSetcap says what to do when setcap is not installed to put the
 // capability back.
 func noSetcap(out io.Writer, target string) {
-	fmt.Fprintf(out, "\nThe new binary cannot send ARP until it is granted raw network access,\nand setcap is not installed to grant it. Install libcap (libcap2-bin on\nDebian and Ubuntu) and run: %s\n", grantCommand(target))
+	fmt.Fprintf(out, "\nThe new binary cannot send ARP until it is granted raw network access,\nand setcap is not installed to grant it. Install it (libcap2-bin on Debian\nand Ubuntu, libcap-progs on openSUSE, libcap on Fedora and Arch) and run: %s\n", grantCommand(target))
 }
 
 func grantCommand(target string) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -64,13 +65,14 @@ func runUninstall(args []string) error {
 	opts := selfupdate.UninstallOptions{
 		Out:     os.Stdout,
 		Confirm: confirmer(*yes),
+		Yes:     *yes,
 	}
 	// Both paths come from the packages that own them, so an uninstall
 	// cannot go looking in the wrong place if either ever moves.
 	if p, err := config.DefaultPath(); err == nil {
 		opts.ConfigFile = p
 	}
-	opts.HistoryFile = *historyPath
+	opts.HistoryFile, opts.HistoryNamed = *historyPath, *historyPath != ""
 	if opts.HistoryFile == "" {
 		if p, err := store.DefaultHistoryPath(); err == nil {
 			opts.HistoryFile = p
@@ -83,14 +85,24 @@ func runUninstall(args []string) error {
 // with nobody to answer it — a pipe, a script — is a no, since both of
 // these change the machine.
 func confirmer(yes bool) func(string) bool {
+	return confirmFrom(os.Stdin, os.Stdout, yes)
+}
+
+// confirmFrom is confirmer reading the answer from in and asking on out.
+// Only a terminal can answer: piped input is never taken for agreement.
+func confirmFrom(in *os.File, out io.Writer, yes bool) func(string) bool {
 	if yes {
 		return func(string) bool { return true }
 	}
 	return func(question string) bool {
-		fmt.Printf("%s [y/N] ", question)
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		fmt.Fprintf(out, "%s [y/N] ", question)
+		if fi, err := in.Stat(); err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			fmt.Fprintln(out, "\nThere is no terminal to answer from, so that is a no. In a script, add --yes to agree.")
+			return false
+		}
+		line, err := bufio.NewReader(in).ReadString('\n')
 		if err != nil {
-			fmt.Println()
+			fmt.Fprintln(out)
 			return false
 		}
 		switch strings.ToLower(strings.TrimSpace(line)) {

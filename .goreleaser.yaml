@@ -98,6 +98,10 @@ nfpms:
         dependencies: [libcap2-bin]
       archlinux:
         dependencies: [libcap]
+      # setcap by its path: it is libcap on Fedora and RHEL but
+      # libcap-progs on openSUSE, which does not install it by default.
+      rpm:
+        dependencies: [/usr/sbin/setcap]
 
 checksum:
   name_template: SHA256SUMS
@@ -119,9 +123,10 @@ release:
   footer: |
     ## Install
 
-    - **macOS and Linux, with Homebrew:** `brew tap bt10011/tap`, then `brew install shoal`
+    - **macOS and Linux, with Homebrew:** `brew install bt10011/tap/shoal`
     - **Debian, Ubuntu:** download `shoal-linux-amd64.deb` (or `-arm64`), then `sudo apt install ./shoal-linux-amd64.deb`
-    - **Fedora, RHEL, openSUSE:** `sudo dnf install ./shoal-linux-amd64.rpm` (or `sudo zypper install …`)
+    - **Fedora, RHEL:** `sudo dnf install ./shoal-linux-amd64.rpm`
+    - **openSUSE:** `sudo zypper install --allow-unsigned-rpm ./shoal-linux-amd64.rpm`
     - **Arch:** `sudo pacman -U shoal-linux-amd64.pkg.tar.zst`
     - **Windows:** `shoal-windows-amd64.zip` (or `-arm64`) below; then install [Npcap](https://npcap.com)
     - **The install script:** see the README for how to check it before running it

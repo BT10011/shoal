@@ -14,7 +14,7 @@ func For(binary string, _ error) Setup {
 	s := Setup{Missing: "On Linux that is the cap_net_raw capability on the program file, and this copy\ndoes not have it."}
 	setcap := SetcapPath()
 	if setcap == "" {
-		s.Manual = "setcap, which grants it, is not installed. Install libcap2-bin (Debian, Ubuntu)\nor libcap (Fedora, Arch), then run shoal --setup again."
+		s.Manual = "setcap, which grants it, is not installed. Install libcap2-bin (Debian, Ubuntu),\nlibcap-progs (openSUSE) or libcap (Fedora, Arch), then run shoal --setup again."
 		return s
 	}
 	s.Changes = []string{fmt.Sprintf("give the cap_net_raw capability (setcap cap_net_raw+ep) to\n    %s, so it can send and hear ARP without running as root", binary)}

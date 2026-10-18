@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -104,4 +105,31 @@ func captureStdout(t *testing.T, f func()) string {
 	f()
 	w.Close()
 	return <-done
+}
+
+// A question is answered only from a terminal: a "y" arriving down a pipe
+// is never taken for agreement, since these questions change the machine.
+func TestConfirmationIsNeverReadFromAPipe(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	var out strings.Builder
+	if confirmFrom(r, &out, false)("Remove all of this?") {
+		t.Fatal("a piped y was taken as agreement")
+	}
+	if !strings.Contains(out.String(), "--yes") {
+		t.Errorf("the refusal should say how a script agrees: %q", out.String())
+	}
+	if rest, _ := io.ReadAll(r); string(rest) != "y\n" {
+		t.Errorf("the pipe was read: %q left", rest)
+	}
+	if !confirmFrom(r, &out, true)("Remove all of this?") {
+		t.Error("--yes should agree without asking")
+	}
 }
