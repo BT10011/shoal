@@ -63,7 +63,8 @@ privileges, no packets sent.
 ## Install
 
 Choose whichever suits you: each installs the same build, made by GitHub
-Actions from the tagged source.
+Actions from the tagged source. On a Mac, Shoal needs macOS 13 (Ventura)
+or later.
 
 **macOS and Linux, with [Homebrew](https://brew.sh):**
 
@@ -185,7 +186,10 @@ that it is the file the release holds. Or compare it with the release's
 
 Shoal is not yet signed with an Apple or Microsoft certificate. So a file
 downloaded in a browser may warn the first time it runs:
-- macOS says it cannot check the developer.
+- macOS says it cannot check the developer, or cannot check Shoal for
+  malware. To allow it, run `xattr -d com.apple.quarantine shoal` in its
+  folder, or after the first try, click Open Anyway in System Settings,
+  under Privacy & Security.
 - Windows SmartScreen says it protected your PC.
 
 Homebrew, the Linux packages and the install script do not download
